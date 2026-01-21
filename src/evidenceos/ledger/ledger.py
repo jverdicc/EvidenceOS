@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Optional, Tuple
 
 
 class LedgerViolation(RuntimeError):
     pass
+
+
+@dataclass
+class EvidenceWealthLedger:
+    wealth: float = 1.0
+    bankruptcy_threshold: float = 1e-12
+    history: Tuple[float, ...] = ()
+
+    def apply_e_value(self, e_value: float) -> float:
+        if not math.isfinite(e_value) or e_value <= 0.0:
+            raise LedgerViolation("e_value_invalid")
+        next_wealth = self.wealth * e_value
+        self.wealth = next_wealth
+        self.history = self.history + (e_value,)
+        if self.wealth < self.bankruptcy_threshold:
+            raise LedgerViolation("ewl_bankrupt")
+        return self.wealth
+
+    def is_bankrupt(self) -> bool:
+        return self.wealth < self.bankruptcy_threshold
 
 
 @dataclass
@@ -81,7 +102,10 @@ class ConservationLedger:
     adaptivity: AdaptivityLane = field(default_factory=AdaptivityLane)
     privacy: PrivacyLane = field(default_factory=PrivacyLane)
     integrity: IntegrityLane = field(default_factory=IntegrityLane)
+    wealth: EvidenceWealthLedger = field(default_factory=EvidenceWealthLedger)
 
     def fail_closed_if_corrupted(self) -> None:
         if self.integrity.state == "Corrupted":
             raise LedgerViolation("integrity_corrupted:" + ",".join(self.integrity.flags))
+        if self.wealth.is_bankrupt():
+            raise LedgerViolation("ewl_bankrupt")

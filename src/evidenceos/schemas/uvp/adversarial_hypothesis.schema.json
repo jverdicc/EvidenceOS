@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/uvp/adversarial_hypothesis.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hypothesis_id", "description"],
+  "properties": {
+    "hypothesis_id": {"type": "string", "minLength": 1},
+    "description": {"type": "string", "minLength": 1},
+    "physhir_hash": {"type": "string", "minLength": 1},
+    "dag_hash": {"type": "string", "minLength": 1},
+    "payload_hash": {"type": "string", "minLength": 1},
+    "mechanism_blobs": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
+  }
+}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.org/schemas/physics/physhir.schema.json",
-  "title": "PhysHIR",
+  "$id": "https://evidenceos.dev/schemas/uvp/physhir.schema.json",
+  "title": "UVP PhysHIR",
   "type": "object",
   "additionalProperties": false,
   "required": ["target", "variables", "expression"],
@@ -28,26 +28,31 @@
         }
       }
     },
-    "expression": {"$ref": "#/$defs/expr"}
+    "expression": {"$ref": "#/$defs/expr"},
+    "observations": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
+    "constraints": {"$ref": "#/$defs/constraints"}
   },
   "$defs": {
     "expr": {
       "oneOf": [
-        {"$ref": "#/$defs/var"},
-        {"$ref": "#/$defs/const"},
-        {"$ref": "#/$defs/add"},
-        {"$ref": "#/$defs/sub"},
-        {"$ref": "#/$defs/mul"},
-        {"$ref": "#/$defs/div"},
-        {"$ref": "#/$defs/pow"},
-        {"$ref": "#/$defs/exp"},
-        {"$ref": "#/$defs/log"},
-        {"$ref": "#/$defs/sin"},
-        {"$ref": "#/$defs/cos"},
-        {"$ref": "#/$defs/clamp"}
+        {"$ref": "#/$defs/var_expr"},
+        {"$ref": "#/$defs/const_expr"},
+        {"$ref": "#/$defs/add_expr"},
+        {"$ref": "#/$defs/sub_expr"},
+        {"$ref": "#/$defs/mul_expr"},
+        {"$ref": "#/$defs/div_expr"},
+        {"$ref": "#/$defs/pow_expr"},
+        {"$ref": "#/$defs/exp_expr"},
+        {"$ref": "#/$defs/log_expr"},
+        {"$ref": "#/$defs/sin_expr"},
+        {"$ref": "#/$defs/cos_expr"},
+        {"$ref": "#/$defs/clamp_expr"}
       ]
     },
-    "var": {
+    "var_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "name"],
@@ -56,17 +61,17 @@
         "name": {"type": "string", "minLength": 1}
       }
     },
-    "const": {
+    "const_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "value"],
       "properties": {
         "type": {"const": "Const"},
         "value": {"type": "number"},
-        "units": {"type": "string"}
+        "units": {"type": ["string", "null"]}
       }
     },
-    "add": {
+    "add_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "lhs", "rhs"],
@@ -76,7 +81,7 @@
         "rhs": {"$ref": "#/$defs/expr"}
       }
     },
-    "sub": {
+    "sub_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "lhs", "rhs"],
@@ -86,7 +91,7 @@
         "rhs": {"$ref": "#/$defs/expr"}
       }
     },
-    "mul": {
+    "mul_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "lhs", "rhs"],
@@ -96,7 +101,7 @@
         "rhs": {"$ref": "#/$defs/expr"}
       }
     },
-    "div": {
+    "div_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "lhs", "rhs"],
@@ -106,7 +111,7 @@
         "rhs": {"$ref": "#/$defs/expr"}
       }
     },
-    "pow": {
+    "pow_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "base", "exponent"],
@@ -116,7 +121,7 @@
         "exponent": {"type": "integer"}
       }
     },
-    "exp": {
+    "exp_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "arg"],
@@ -125,7 +130,7 @@
         "arg": {"$ref": "#/$defs/expr"}
       }
     },
-    "log": {
+    "log_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "arg"],
@@ -134,7 +139,7 @@
         "arg": {"$ref": "#/$defs/expr"}
       }
     },
-    "sin": {
+    "sin_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "arg"],
@@ -143,7 +148,7 @@
         "arg": {"$ref": "#/$defs/expr"}
       }
     },
-    "cos": {
+    "cos_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "arg"],
@@ -152,7 +157,7 @@
         "arg": {"$ref": "#/$defs/expr"}
       }
     },
-    "clamp": {
+    "clamp_expr": {
       "type": "object",
       "additionalProperties": false,
       "required": ["type", "arg", "min", "max"],
@@ -161,6 +166,66 @@
         "arg": {"$ref": "#/$defs/expr"},
         "min": {"type": "number"},
         "max": {"type": "number"}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pinned_primaries": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pinned_primary"}
+        },
+        "ranges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/range_constraint"}
+        },
+        "conservation": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/conservation_constraint"}
+        }
+      }
+    },
+    "pinned_primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "units", "value"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "units": {"type": "string", "minLength": 1},
+        "value": {"type": "number"},
+        "locked": {"type": "boolean"}
+      }
+    },
+    "range_constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["var", "units"],
+      "properties": {
+        "var": {"type": "string", "minLength": 1},
+        "min": {"type": ["number", "null"]},
+        "max": {"type": ["number", "null"]},
+        "units": {"type": "string", "minLength": 1}
+      }
+    },
+    "conservation_constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "inputs", "outputs", "tolerance", "units"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "tolerance": {"type": "number", "minimum": 0},
+        "units": {"type": "string", "minLength": 1}
       }
     }
   }

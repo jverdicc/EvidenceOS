@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/uvp_syscall.schema.json",
+  "title": "UVP Syscall",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "syscall_id",
+    "syscall_type",
+    "session_id",
+    "issued_at",
+    "payload"
+  ],
+  "properties": {
+    "syscall_id": {
+      "type": "string"
+    },
+    "syscall_type": {
+      "type": "string",
+      "enum": [
+        "announce",
+        "propose",
+        "evaluate",
+        "certify"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/announce"
+        },
+        {
+          "$ref": "#/$defs/propose"
+        },
+        {
+          "$ref": "#/$defs/evaluate"
+        },
+        {
+          "$ref": "#/$defs/certify"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "announce": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "syscall_type",
+        "agent_id",
+        "supported_versions",
+        "capabilities"
+      ],
+      "properties": {
+        "syscall_type": {
+          "const": "announce"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "supported_versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "propose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "syscall_type",
+        "safety_case_id",
+        "safety_properties",
+        "adversarial_hypotheses"
+      ],
+      "properties": {
+        "syscall_type": {
+          "const": "propose"
+        },
+        "safety_case_id": {
+          "type": "string"
+        },
+        "safety_properties": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "safety_property.schema.json"
+          }
+        },
+        "adversarial_hypotheses": {
+          "type": "array",
+          "items": {
+            "$ref": "adversarial_hypothesis.schema.json"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evaluate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "syscall_type",
+        "decision",
+        "decision_trace_hash"
+      ],
+      "properties": {
+        "syscall_type": {
+          "const": "evaluate"
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "valid",
+            "invalid",
+            "indeterminate"
+          ]
+        },
+        "decision_trace_hash": {
+          "type": "string"
+        },
+        "ewl_state_id": {
+          "type": "string"
+        }
+      }
+    },
+    "certify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "syscall_type",
+        "certificate_id",
+        "scc_hash"
+      ],
+      "properties": {
+        "syscall_type": {
+          "const": "certify"
+        },
+        "certificate_id": {
+          "type": "string"
+        },
+        "scc_hash": {
+          "type": "string"
+        },
+        "signatures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signature"
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signer_id",
+        "algorithm",
+        "signature"
+      ],
+      "properties": {
+        "signer_id": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
