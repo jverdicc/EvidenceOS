@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run tests (pytest)",
+      "type": "shell",
+      "command": "pytest",
+      "group": "test"
+    },
+    {
+      "label": "Lint (ruff check)",
+      "type": "shell",
+      "command": "ruff check .",
+      "group": "build"
+    },
+    {
+      "label": "Format (ruff format)",
+      "type": "shell",
+      "command": "ruff format .",
+      "group": "build"
+    },
+    {
+      "label": "Typecheck (mypy)",
+      "type": "shell",
+      "command": "mypy src",
+      "group": "build"
+    },
+    {
+      "label": "Docs (mkdocs serve)",
+      "type": "shell",
+      "command": "mkdocs serve",
+      "group": "build"
+    }
+  ]
+}

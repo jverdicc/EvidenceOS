@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/federation/vault_descriptor.schema.json",
+  "title": "VaultDescriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "vault_id",
+    "oracle_endpoint",
+    "vault_pubkey"
+  ],
+  "properties": {
+    "vault_id": {
+      "type": "string"
+    },
+    "oracle_endpoint": {
+      "type": "string"
+    },
+    "vault_pubkey": {
+      "type": "string",
+      "description": "Base64 or hex-encoded raw ed25519 public key bytes"
+    },
+    "population_weight": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "supports_dp": {
+      "type": "boolean",
+      "default": false
+    },
+    "supports_zk": {
+      "type": "boolean",
+      "default": false
+    },
+    "supports_secagg": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
