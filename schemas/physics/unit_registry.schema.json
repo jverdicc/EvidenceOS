@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/physics/unit_registry.schema.json",
+  "title": "Unit Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "units"
+  ],
+  "properties": {
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
+    }
+  },
+  "$defs": {
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "symbol",
+        "dimension"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "dimension": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "m",
+            "kg",
+            "s",
+            "A",
+            "K",
+            "mol",
+            "cd"
+          ],
+          "properties": {
+            "m": {
+              "type": "integer"
+            },
+            "kg": {
+              "type": "integer"
+            },
+            "s": {
+              "type": "integer"
+            },
+            "A": {
+              "type": "integer"
+            },
+            "K": {
+              "type": "integer"
+            },
+            "mol": {
+              "type": "integer"
+            },
+            "cd": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  }
+}

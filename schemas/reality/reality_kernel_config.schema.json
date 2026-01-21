@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/reality/reality_kernel_config.schema.json",
+  "title": "Reality Kernel Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "gates",
+    "bayesian_priors"
+  ],
+  "properties": {
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "physhir",
+        "causal_integrity",
+        "counterfactual_canary"
+      ],
+      "properties": {
+        "physhir": {
+          "type": "boolean"
+        },
+        "causal_integrity": {
+          "type": "boolean"
+        },
+        "counterfactual_canary": {
+          "type": "boolean"
+        }
+      }
+    },
+    "bayesian_priors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/prior"
+      }
+    },
+    "evalue_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimum_threshold": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "prior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "prior_probability",
+        "conservative_multiplier"
+      ],
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "prior_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "conservative_multiplier": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    }
+  }
+}

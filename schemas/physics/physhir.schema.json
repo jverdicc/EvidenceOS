@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/physics/physhir.schema.json",
+  "title": "PhysHIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "variables",
+    "constraints"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "unit_registry": {
+      "$ref": "unit_registry.schema.json"
+    },
+    "variables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/hirVariable"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "$ref": "constraints.schema.json"
+      }
+    }
+  },
+  "$defs": {
+    "hirVariable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "units"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "units": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/siBaseVector"
+            },
+            {
+              "$ref": "#/$defs/unitTokens"
+            }
+          ]
+        },
+        "value": {
+          "type": [
+            "number",
+            "string"
+          ]
+        }
+      }
+    },
+    "siBaseVector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "m",
+        "kg",
+        "s",
+        "A",
+        "K",
+        "mol",
+        "cd"
+      ],
+      "properties": {
+        "m": {
+          "type": "integer"
+        },
+        "kg": {
+          "type": "integer"
+        },
+        "s": {
+          "type": "integer"
+        },
+        "A": {
+          "type": "integer"
+        },
+        "K": {
+          "type": "integer"
+        },
+        "mol": {
+          "type": "integer"
+        },
+        "cd": {
+          "type": "integer"
+        }
+      }
+    },
+    "unitTokens": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -19,3 +19,4 @@ __all__ = [
     "validate_pinned_primaries",
     "validate_ranges",
 ]
+"""Physics package for Reality Kernel scaffolding."""
