@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/scc.schema.json",
+  "title": "Standardized Claim Capsule",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "session_id",
+    "timestamp_utc",
+    "announce",
+    "propose",
+    "evaluations",
+    "ewl_state",
+    "reality_gate_report",
+    "kernel_public_key",
+    "scc_hash",
+    "signature"
+  ],
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "session_id": {"type": "string", "minLength": 1},
+    "timestamp_utc": {"type": "string", "minLength": 1},
+    "announce": {"$ref": "announce.schema.json"},
+    "propose": {"$ref": "propose.schema.json"},
+    "evaluations": {
+      "type": "array",
+      "items": {"$ref": "evaluation.schema.json"}
+    },
+    "ewl_state": {"$ref": "ewl_state.schema.json"},
+    "reality_gate_report": {"$ref": "reality_gate_report.schema.json"},
+    "kernel_public_key": {"type": "string", "minLength": 1},
+    "scc_hash": {"type": "string", "minLength": 1},
+    "signature": {"type": "string", "minLength": 1}
+  }
+}

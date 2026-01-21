@@ -28,7 +28,12 @@ nav:
       - RFC-0013 Causal Integrity: rfc/RFC-0013-causal-integrity.md
       - RFC-0014 e-Process Bayesian Infusion: rfc/RFC-0014-eprocess-bayesian-infusion.md
       - RFC-0015 Reality Kernel Gates: rfc/RFC-0015-reality-kernel-gates.md
+      - RFC-0017 UVP Wire Protocol: rfc/RFC-0017-uvp-wire-protocol.md
+      - RFC-0018 Verified Safety Case: rfc/RFC-0018-verified-safety-case.md
+      - RFC-0019 Standardized Claim Capsule: rfc/RFC-0019-standardized-claim-capsule-scc.md
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
+      - UVP Sessions: uvp.md
+      - UVP + Safety Case: uvp.md
       - Copilot Runbook: copilot.md

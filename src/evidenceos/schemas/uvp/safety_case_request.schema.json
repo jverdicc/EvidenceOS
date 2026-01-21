@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/uvp/safety_case_request.schema.json",
+  "title": "VerifiedSafetyCaseRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claim_id",
+    "claim",
+    "safety_properties",
+    "adversarial_hypotheses",
+    "evidence_items",
+    "reality_kernel",
+    "e_value",
+    "alpha",
+    "build_utc"
+  ],
+  "properties": {
+    "claim_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claim": {
+      "type": "string",
+      "minLength": 1
+    },
+    "safety_properties": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "adversarial_hypotheses": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "evidence_items": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "reality_kernel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["physhir", "causal", "config"],
+      "properties": {
+        "physhir": {
+          "type": "object"
+        },
+        "causal": {
+          "type": "object"
+        },
+        "config": {
+          "type": "object"
+        }
+      }
+    },
+    "e_value": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "alpha": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "prior": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "resource_cost": {
+      "type": "number",
+      "minimum": 0
+    },
+    "bankruptcy_threshold": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "build_utc": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

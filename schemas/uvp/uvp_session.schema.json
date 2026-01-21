@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/uvp_session.schema.json",
+  "title": "UVP Session",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id",
+    "protocol_version",
+    "created_at",
+    "participants",
+    "canonicalization",
+    "hash_algorithm",
+    "transcript_hash",
+    "state"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "protocol_version": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/participant"
+      }
+    },
+    "canonicalization": {
+      "type": "string",
+      "enum": [
+        "rfc8785"
+      ]
+    },
+    "hash_algorithm": {
+      "type": "string",
+      "enum": [
+        "sha256"
+      ]
+    },
+    "transcript_hash": {
+      "type": "string"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed",
+        "invalid"
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "note": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "participant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "participant_id",
+        "role"
+      ],
+      "properties": {
+        "participant_id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "prover",
+            "verifier",
+            "arbiter",
+            "observer"
+          ]
+        },
+        "signing_key_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
