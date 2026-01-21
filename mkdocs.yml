@@ -13,6 +13,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - UVP Verified Safety Case: uvp.md
   - RFCs:
       - RFC-0001 Conservation Ledger: rfc/RFC-0001-conservation-ledger.md
       - RFC-0004 DP-Aware Judge: rfc/RFC-0004-dp-aware-judge.md

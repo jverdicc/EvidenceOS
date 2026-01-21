@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/uvp/scc.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "safety_property",
+    "timestamp_utc",
+    "counts",
+    "decision",
+    "ewl",
+    "transcript",
+    "transcript_hash",
+    "kernel_pubkey",
+    "signature"
+  ],
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "safety_property": {"type": "string", "minLength": 1},
+    "timestamp_utc": {"type": "string", "minLength": 1},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tested", "gated_out", "fails"],
+      "properties": {
+        "tested": {"type": "integer", "minimum": 0},
+        "gated_out": {"type": "integer", "minimum": 0},
+        "fails": {"type": "integer", "minimum": 0}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "ewl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alpha",
+        "prior",
+        "p0",
+        "p1",
+        "e_value",
+        "status",
+        "support_threshold",
+        "bankruptcy_threshold"
+      ],
+      "properties": {
+        "alpha": {"type": "number"},
+        "prior": {"type": "number"},
+        "p0": {"type": "number"},
+        "p1": {"type": "number"},
+        "e_value": {"type": "number"},
+        "status": {"type": "string", "minLength": 1},
+        "support_threshold": {"type": "number"},
+        "bankruptcy_threshold": {"type": "number"}
+      }
+    },
+    "transcript": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "transcript_hash": {"type": "string", "minLength": 1},
+    "kernel_pubkey": {"type": "string", "minLength": 1},
+    "signature": {"type": "string", "minLength": 1}
+  }
+}
