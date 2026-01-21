@@ -30,4 +30,5 @@ nav:
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
+      - Interop: interop.md
       - Copilot Runbook: copilot.md
