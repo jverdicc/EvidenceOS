@@ -1,3 +1,38 @@
+from evidenceos.physics.units import (
+    DIMENSIONLESS,
+    SI_BASES,
+    Dimension,
+    DimensionError,
+    SIBase,
+    UnitRegistry,
+    add_dimensions,
+    div_dimensions,
+    exp_dimension,
+    log_dimension,
+    mul_dimensions,
+    parse_dimension,
+    pow_dimension,
+    sin_dimension,
+    sub_dimensions,
+)
+
+__all__ = [
+    "DIMENSIONLESS",
+    "SI_BASES",
+    "Dimension",
+    "DimensionError",
+    "SIBase",
+    "UnitRegistry",
+    "add_dimensions",
+    "div_dimensions",
+    "exp_dimension",
+    "log_dimension",
+    "mul_dimensions",
+    "parse_dimension",
+    "pow_dimension",
+    "sin_dimension",
+    "sub_dimensions",
+]
 """Physics modules for EvidenceOS."""
 
 from evidenceos.physics.physhir import PhysHIR, PhysHIRCompiler, TargetSpec, VariableSpec
