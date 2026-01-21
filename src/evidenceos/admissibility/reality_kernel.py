@@ -72,6 +72,14 @@ class RealityKernel:
             errors.append(AdmissibilityError("CONFIG_LOAD_ERROR", str(exc)))
             return AdmissibilityResult("FAIL", tuple(errors), tuple(warnings))
 
+        return self.validate_payloads(physhir, causal, config)
+
+    def validate_payloads(
+        self, physhir: dict[str, Any], causal: dict[str, Any], config: dict[str, Any]
+    ) -> AdmissibilityResult:
+        errors: list[AdmissibilityError] = []
+        warnings: list[str] = []
+
         errors.extend(self._validate_schemas(physhir, causal, config))
         if errors:
             return AdmissibilityResult("FAIL", tuple(errors), tuple(warnings))

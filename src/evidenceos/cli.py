@@ -6,7 +6,9 @@ from pathlib import Path
 
 from evidenceos.admissibility.reality_kernel import RealityKernel
 from evidenceos.capsule.claim_capsule import verify_capsule
+from evidenceos.common.schema_validate import validate_json
 from evidenceos.etl.store_file import EvidenceTransparencyLog
+from evidenceos.safety_case.verified import VerifiedSafetyCaseInput, VerifiedSafetyCasePipeline
 
 
 def _cmd_capsule_verify(args: argparse.Namespace) -> int:
@@ -53,6 +55,22 @@ def _cmd_reality_validate(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_uvp_certify(args: argparse.Namespace) -> int:
+    payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    schema_path = (
+        Path(__file__).resolve().parents[0]
+        / "schemas"
+        / "uvp"
+        / "safety_case_request.schema.json"
+    )
+    validate_json(payload, schema_path)
+    inputs = VerifiedSafetyCaseInput.from_payload(payload)
+    pipeline = VerifiedSafetyCasePipeline()
+    pipeline.run(inputs, Path(args.out_dir))
+    print("OK: SCC generated")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="evidenceos")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -88,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     reality_validate.add_argument("--causal", required=True)
     reality_validate.add_argument("--config", required=True)
     reality_validate.set_defaults(func=_cmd_reality_validate)
+
+    uvp = sub.add_parser("uvp", help="UVP utilities")
+    uvp_sub = uvp.add_subparsers(dest="uvp_cmd", required=True)
+    uvp_cert = uvp_sub.add_parser("certify", help="Run Verified Safety Case pipeline")
+    uvp_cert.add_argument("--input", required=True)
+    uvp_cert.add_argument("--out-dir", required=True)
+    uvp_cert.set_defaults(func=_cmd_uvp_certify)
 
     return p
 
