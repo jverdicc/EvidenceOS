@@ -11,4 +11,22 @@ __all__ = [
     "SafetyProperty",
     "validate_adversarial_hypothesis",
     "validate_safety_property",
+from .syscalls import (
+    UVPAnnouncement,
+    UVPCertification,
+    UVPEvaluation,
+    UVPEvent,
+    UVPInterface,
+    UVPProposal,
+    UVPTranscript,
+)
+
+__all__ = [
+    "UVPAnnouncement",
+    "UVPCertification",
+    "UVPEvaluation",
+    "UVPEvent",
+    "UVPInterface",
+    "UVPProposal",
+    "UVPTranscript",
 ]
