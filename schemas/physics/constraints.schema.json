@@ -107,6 +107,38 @@
           ]
         }
       }
+  "$id": "https://evidenceos.dev/schemas/physics/constraints.schema.json",
+  "title": "PhysHIR Constraint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "expression"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "conservation",
+        "dimensional",
+        "boundary"
+      ]
+    },
+    "expression": {
+      "type": "string"
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "description": {
+      "type": "string"
     }
   }
 }

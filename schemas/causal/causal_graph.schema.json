@@ -6,23 +6,52 @@
   "additionalProperties": false,
   "required": [
     "graph_id",
+  "required": ["nodes", "edges", "treatment", "outcome"],
+  "properties": {
+  "$id": "https://evidenceos.dev/schemas/causal/causal_graph.schema.json",
+  "title": "Causal Graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
     "nodes",
     "edges"
   ],
   "properties": {
     "graph_id": {
+    "id": {
       "type": "string"
     },
     "nodes": {
       "type": "array",
       "minItems": 1,
       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "time_index"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "time_index": {"type": "integer"}
+        }
         "$ref": "#/$defs/node"
       }
     },
     "edges": {
       "type": "array",
       "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["src", "dst"],
+        "properties": {
+          "src": {"type": "string", "minLength": 1},
+          "dst": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "treatment": {"type": "string", "minLength": 1},
+    "outcome": {"type": "string", "minLength": 1},
+    "adjustment_set": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
         "$ref": "#/$defs/edge"
       }
     }
@@ -67,6 +96,8 @@
             "bidirected",
             "latent"
           ]
+        "label": {
+          "type": "string"
         }
       }
     }
