@@ -19,6 +19,7 @@ nav:
       - RFC-0005 Claim Capsules: rfc/RFC-0005-claim-capsules.md
       - RFC-0006 Transparency Log: rfc/RFC-0006-evidence-transparency-log.md
       - RFC-0011 Federated Evidence: rfc/RFC-0011-federated-evidence.md
+      - RFC-0012 PhysHIR AST + Typechecker: rfc/RFC-0012-physhir-ast-typechecker.md
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
