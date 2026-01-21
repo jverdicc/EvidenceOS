@@ -4,6 +4,8 @@
   "title": "CausalGraph",
   "type": "object",
   "additionalProperties": false,
+  "required": [
+    "graph_id",
   "required": ["nodes", "edges", "treatment", "outcome"],
   "properties": {
   "$id": "https://evidenceos.dev/schemas/causal/causal_graph.schema.json",
@@ -15,6 +17,7 @@
     "edges"
   ],
   "properties": {
+    "graph_id": {
     "id": {
       "type": "string"
     },
@@ -86,6 +89,13 @@
         "target": {
           "type": "string"
         },
+        "edge_type": {
+          "type": "string",
+          "enum": [
+            "direct",
+            "bidirected",
+            "latent"
+          ]
         "label": {
           "type": "string"
         }

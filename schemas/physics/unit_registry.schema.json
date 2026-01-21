@@ -1,5 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/physics/unit_registry.schema.json",
+  "title": "UnitRegistry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "registry_id",
+    "units"
+  ],
+  "properties": {
+    "registry_id": {
+      "type": "string"
+    },
+    "units": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unit_entry"
   "$id": "https://evidenceos.dev/schemas/physics/unit_registry.schema.json",
   "title": "Unit Registry",
   "type": "object",
@@ -17,6 +33,37 @@
     }
   },
   "$defs": {
+    "unit_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "dimension_vector",
+        "aliases"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "dimension_vector": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "type": "number"
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scale_factor": {
+          "type": "number"
+        },
+        "offset": {
+          "type": "number"
     "unit": {
       "type": "object",
       "additionalProperties": false,
