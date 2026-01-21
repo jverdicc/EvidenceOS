@@ -1,5 +1,164 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PhysHIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "variables", "expression"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "units"],
+      "properties": {
+        "name": {"type": "string"},
+        "units": {"type": "string"}
+      }
+    },
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "units"],
+        "properties": {
+          "name": {"type": "string"},
+          "units": {"type": "string"}
+        }
+      }
+    },
+    "expression": {"$ref": "#/$defs/expr"}
+  },
+  "$defs": {
+    "expr": {
+      "oneOf": [
+        {"$ref": "#/$defs/var"},
+        {"$ref": "#/$defs/const"},
+        {"$ref": "#/$defs/add"},
+        {"$ref": "#/$defs/sub"},
+        {"$ref": "#/$defs/mul"},
+        {"$ref": "#/$defs/div"},
+        {"$ref": "#/$defs/pow"},
+        {"$ref": "#/$defs/exp"},
+        {"$ref": "#/$defs/log"},
+        {"$ref": "#/$defs/sin"},
+        {"$ref": "#/$defs/cos"},
+        {"$ref": "#/$defs/clamp"}
+      ]
+    },
+    "var": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name"],
+      "properties": {
+        "type": {"const": "Var"},
+        "name": {"type": "string"}
+      }
+    },
+    "const": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"const": "Const"},
+        "value": {"type": "number"},
+        "units": {"type": "string"}
+      }
+    },
+    "add": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Add"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "sub": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Sub"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "mul": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Mul"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "div": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Div"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "pow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "base", "exponent"],
+      "properties": {
+        "type": {"const": "Pow"},
+        "base": {"$ref": "#/$defs/expr"},
+        "exponent": {"type": "integer"}
+      }
+    },
+    "exp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Exp"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Log"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "sin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Sin"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "cos": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Cos"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "clamp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg", "min", "max"],
+      "properties": {
+        "type": {"const": "Clamp"},
+        "arg": {"$ref": "#/$defs/expr"},
+        "min": {"type": "number"},
+        "max": {"type": "number"}
   "$id": "https://evidenceos.dev/schemas/physics/physhir.schema.json",
   "title": "PhysHIR",
   "type": "object",
