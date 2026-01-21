@@ -21,3 +21,4 @@ __all__ = [
     "rescale",
     "shuffle",
 ]
+"""Causal package for Reality Kernel scaffolding."""
