@@ -3,13 +3,13 @@ requires = ["setuptools>=70", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "evidenceos"
-version = "0.2.0"
+name = "EvidenceOS"
+version = "0.5.0"
 description = "EvidenceOS: reference kernel for SafeClaim / adaptive evaluation"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
-authors = [{name="EvidenceOS Contributors"}]
+authors = [{name = "Joseph Verdicchio"}]
 dependencies = [
   "jsonschema>=4.22",
   "cryptography>=42.0",
