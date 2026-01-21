@@ -41,6 +41,26 @@ python -m evidenceos.examples.federated_demo
 
 ---
 
+## UVP interoperability
+
+UVP (Universal Verification Protocol) sessions are file-based for deterministic, language-agnostic
+integration. External pipelines write syscall JSON payloads and EvidenceOS certifies them into a
+Standardized Claim Capsule (SCC).
+
+CLI examples:
+
+```bash
+# validate Reality Kernel inputs before spending resources
+evidenceos reality validate --physhir inputs/physhir.json --causal inputs/causal.json --config inputs/reality.json
+
+# certify a UVP session directory (syscalls + session.json)
+evidenceos uvp certify --session ./session
+```
+
+For full details, see `docs/interop.md`.
+
+---
+
 ## Repository layout
 
 ```text

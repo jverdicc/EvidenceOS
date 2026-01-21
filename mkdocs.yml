@@ -34,6 +34,7 @@ nav:
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
+      - Interop: interop.md
       - UVP Sessions: uvp.md
       - UVP + Safety Case: uvp.md
       - Copilot Runbook: copilot.md
