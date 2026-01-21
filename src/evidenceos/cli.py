@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from evidenceos.admissibility.reality_kernel import RealityKernel
 from evidenceos.capsule.claim_capsule import verify_capsule
 from evidenceos.etl.store_file import EvidenceTransparencyLog
 
@@ -38,6 +39,20 @@ def _cmd_etl_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reality_validate(args: argparse.Namespace) -> int:
+    kernel = RealityKernel()
+    result = kernel.validate_from_files(
+        Path(args.physhir),
+        Path(args.causal),
+        Path(args.config),
+    )
+    if result.ok:
+        print("PASS")
+        return 0
+    print(result.errors[0].code)
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="evidenceos")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -65,6 +80,14 @@ def build_parser() -> argparse.ArgumentParser:
     etl_v.add_argument("log_dir")
     etl_v.add_argument("entry_hash")
     etl_v.set_defaults(func=_cmd_etl_verify)
+
+    reality = sub.add_parser("reality", help="Reality Kernel gates")
+    reality_sub = reality.add_subparsers(dest="reality_cmd", required=True)
+    reality_validate = reality_sub.add_parser("validate", help="Validate Reality Kernel inputs")
+    reality_validate.add_argument("--physhir", required=True)
+    reality_validate.add_argument("--causal", required=True)
+    reality_validate.add_argument("--config", required=True)
+    reality_validate.set_defaults(func=_cmd_reality_validate)
 
     return p
 
