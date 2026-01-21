@@ -15,3 +15,4 @@ __all__ = [
     "prior_multiplier",
     "validate_prior",
 ]
+"""Evidence package for Reality Kernel scaffolding."""
