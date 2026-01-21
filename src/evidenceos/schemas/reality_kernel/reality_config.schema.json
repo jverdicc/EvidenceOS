@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/reality_kernel/reality_config.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["alpha", "prior", "e_value", "enable_canary"],
+  "properties": {
+    "alpha": {"type": "number"},
+    "prior": {"type": "number"},
+    "e_value": {"type": "number"},
+    "enable_canary": {"type": "boolean"},
+    "canaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "invariant"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "invariant": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}
