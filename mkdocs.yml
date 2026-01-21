@@ -30,4 +30,5 @@ nav:
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
+      - UVP Sessions: uvp.md
       - Copilot Runbook: copilot.md
