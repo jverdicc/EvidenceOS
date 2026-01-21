@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/adversarial_hypothesis.schema.json",
+  "title": "Adversarial Hypothesis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hypothesis_id",
+    "attack_description",
+    "target",
+    "severity"
+  ],
+  "properties": {
+    "hypothesis_id": {
+      "type": "string"
+    },
+    "attack_description": {
+      "type": "string"
+    },
+    "target": {
+      "type": "string"
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

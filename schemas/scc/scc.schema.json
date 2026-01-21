@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/scc/scc.schema.json",
+  "title": "Standardized Claim Capsule",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scc_id",
+    "version",
+    "claim",
+    "safety_case_id",
+    "uvp_session_id",
+    "safety_properties",
+    "adversarial_hypotheses",
+    "decision",
+    "decision_trace_hash",
+    "transcript_hash",
+    "canonical_hash"
+  ],
+  "properties": {
+    "scc_id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "claim": {
+      "type": "string"
+    },
+    "safety_case_id": {
+      "type": "string"
+    },
+    "uvp_session_id": {
+      "type": "string"
+    },
+    "safety_properties": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "../uvp/safety_property.schema.json"
+      }
+    },
+    "adversarial_hypotheses": {
+      "type": "array",
+      "items": {
+        "$ref": "../uvp/adversarial_hypothesis.schema.json"
+      }
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "valid",
+        "invalid",
+        "indeterminate"
+      ]
+    },
+    "decision_trace_hash": {
+      "type": "string"
+    },
+    "transcript_hash": {
+      "type": "string"
+    },
+    "canonical_hash": {
+      "type": "string"
+    },
+    "evidence_ledger_id": {
+      "type": "string"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/signature"
+      }
+    }
+  },
+  "$defs": {
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signer_id",
+        "algorithm",
+        "signature"
+      ],
+      "properties": {
+        "signer_id": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
