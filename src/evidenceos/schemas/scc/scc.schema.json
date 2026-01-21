@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/scc/scc.schema.json",
+  "title": "StandardizedClaimCapsule",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "header",
+    "invariants",
+    "causal",
+    "epistemic",
+    "payload",
+    "signature"
+  ],
+  "properties": {
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "uid"
+      ],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "string"
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "physhir",
+        "details_hash"
+      ],
+      "properties": {
+        "physhir": {
+          "type": "string"
+        },
+        "details_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "causal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dag_hash",
+        "temporal_ok",
+        "backdoor_ok",
+        "canary_ok"
+      ],
+      "properties": {
+        "dag_hash": {
+          "type": "string"
+        },
+        "temporal_ok": {
+          "type": "boolean"
+        },
+        "backdoor_ok": {
+          "type": "boolean"
+        },
+        "canary_ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "epistemic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wealth",
+        "alpha",
+        "threshold",
+        "prior",
+        "cert"
+      ],
+      "properties": {
+        "wealth": {
+          "type": "number"
+        },
+        "alpha": {
+          "type": "number"
+        },
+        "threshold": {
+          "type": "number"
+        },
+        "prior": {
+          "type": "number"
+        },
+        "cert": {
+          "type": "string"
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hir_hash",
+        "executable_hash"
+      ],
+      "properties": {
+        "hir_hash": {
+          "type": "string"
+        },
+        "executable_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kernel_pubkey",
+        "kernel_sig",
+        "timestamp_utc"
+      ],
+      "properties": {
+        "kernel_pubkey": {
+          "type": "string"
+        },
+        "kernel_sig": {
+          "type": "string"
+        },
+        "timestamp_utc": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
