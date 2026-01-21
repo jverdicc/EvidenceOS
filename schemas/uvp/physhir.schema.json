@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/physhir.schema.json",
+  "title": "UVP PhysHIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "variables", "expression"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "units"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "units": {"type": "string", "minLength": 1}
+      }
+    },
+    "variables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "units"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "units": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "expression": {"$ref": "#/$defs/expr"},
+    "observations": {
+      "type": "object",
+      "additionalProperties": {"type": "number"}
+    },
+    "constraints": {"$ref": "#/$defs/constraints"}
+  },
+  "$defs": {
+    "expr": {
+      "oneOf": [
+        {"$ref": "#/$defs/var_expr"},
+        {"$ref": "#/$defs/const_expr"},
+        {"$ref": "#/$defs/add_expr"},
+        {"$ref": "#/$defs/sub_expr"},
+        {"$ref": "#/$defs/mul_expr"},
+        {"$ref": "#/$defs/div_expr"},
+        {"$ref": "#/$defs/pow_expr"},
+        {"$ref": "#/$defs/exp_expr"},
+        {"$ref": "#/$defs/log_expr"},
+        {"$ref": "#/$defs/sin_expr"},
+        {"$ref": "#/$defs/cos_expr"},
+        {"$ref": "#/$defs/clamp_expr"}
+      ]
+    },
+    "var_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name"],
+      "properties": {
+        "type": {"const": "Var"},
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
+    "const_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": {"const": "Const"},
+        "value": {"type": "number"},
+        "units": {"type": ["string", "null"]}
+      }
+    },
+    "add_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Add"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "sub_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Sub"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "mul_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Mul"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "div_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "lhs", "rhs"],
+      "properties": {
+        "type": {"const": "Div"},
+        "lhs": {"$ref": "#/$defs/expr"},
+        "rhs": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "pow_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "base", "exponent"],
+      "properties": {
+        "type": {"const": "Pow"},
+        "base": {"$ref": "#/$defs/expr"},
+        "exponent": {"type": "integer"}
+      }
+    },
+    "exp_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Exp"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "log_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Log"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "sin_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Sin"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "cos_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg"],
+      "properties": {
+        "type": {"const": "Cos"},
+        "arg": {"$ref": "#/$defs/expr"}
+      }
+    },
+    "clamp_expr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "arg", "min", "max"],
+      "properties": {
+        "type": {"const": "Clamp"},
+        "arg": {"$ref": "#/$defs/expr"},
+        "min": {"type": "number"},
+        "max": {"type": "number"}
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pinned_primaries": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pinned_primary"}
+        },
+        "ranges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/range_constraint"}
+        },
+        "conservation": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/conservation_constraint"}
+        }
+      }
+    },
+    "pinned_primary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "units", "value"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "units": {"type": "string", "minLength": 1},
+        "value": {"type": "number"},
+        "locked": {"type": "boolean"}
+      }
+    },
+    "range_constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["var", "units"],
+      "properties": {
+        "var": {"type": "string", "minLength": 1},
+        "min": {"type": ["number", "null"]},
+        "max": {"type": ["number", "null"]},
+        "units": {"type": "string", "minLength": 1}
+      }
+    },
+    "conservation_constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "inputs", "outputs", "tolerance", "units"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "inputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "outputs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "tolerance": {"type": "number", "minimum": 0},
+        "units": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

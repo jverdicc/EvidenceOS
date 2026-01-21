@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/ewl_state.schema.json",
+  "title": "UVP EWL State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "wealth", "bankruptcy_floor", "last_increment", "updates", "bankrupt"],
+  "properties": {
+    "version": {"type": "string", "minLength": 1},
+    "wealth": {"type": "number", "minimum": 0},
+    "bankruptcy_floor": {"type": "number", "minimum": 0},
+    "last_increment": {"type": "number", "minimum": 0},
+    "updates": {"type": "integer", "minimum": 0},
+    "bankrupt": {"type": "boolean"}
+  }
+}
