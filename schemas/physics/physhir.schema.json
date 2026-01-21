@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/physics/physhir.schema.json",
+  "title": "PhysHIR",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "hir_id",
+    "variables"
+  ],
+  "properties": {
+    "hir_id": {
+      "type": "string"
+    },
+    "variables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/hir_variable"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/constraint_ref"
+      }
+    }
+  },
+  "$defs": {
+    "unit_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "representation",
+        "value"
+      ],
+      "properties": {
+        "representation": {
+          "type": "string",
+          "enum": [
+            "si_vector",
+            "token"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "array",
+              "minItems": 7,
+              "maxItems": 7,
+              "items": {
+                "type": "number"
+              }
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    "hir_variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "units"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "units": {
+          "$ref": "#/$defs/unit_spec"
+        },
+        "value": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ]
+        },
+        "uncertainty": {
+          "type": "number",
+          "minimum": 0
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      }
+    },
+    "constraint_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "constraint_id"
+      ],
+      "properties": {
+        "constraint_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

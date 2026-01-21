@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/reality/reality_kernel_config.schema.json",
+  "title": "RealityKernelConfig",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "config_id",
+    "gates",
+    "bayesian_priors"
+  ],
+  "properties": {
+    "config_id": {
+      "type": "string"
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/gate"
+      }
+    },
+    "bayesian_priors": {
+      "$ref": "#/$defs/bayesian_priors"
+    },
+    "physhir": {
+      "$ref": "#/$defs/physhir_config"
+    },
+    "causal": {
+      "$ref": "#/$defs/causal_config"
+    }
+  },
+  "$defs": {
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gate_type",
+        "enabled"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "gate_type": {
+          "type": "string",
+          "enum": [
+            "physhir",
+            "causal_integrity",
+            "bayesian_calibration",
+            "admissibility"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      }
+    },
+    "bayesian_priors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prior_probability",
+        "low_prior_multiplier"
+      ],
+      "properties": {
+        "prior_probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "low_prior_multiplier": {
+          "type": "number",
+          "minimum": 1
+        },
+        "e_value_floor": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "physhir_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "unit_registry_id": {
+          "type": "string"
+        },
+        "constraints_id": {
+          "type": "string"
+        }
+      }
+    },
+    "causal_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "graph_id": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
