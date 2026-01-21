@@ -20,6 +20,10 @@ nav:
       - RFC-0006 Transparency Log: rfc/RFC-0006-evidence-transparency-log.md
       - RFC-0011 Federated Evidence: rfc/RFC-0011-federated-evidence.md
       - RFC-0012 PhysHIR AST + Typechecker: rfc/RFC-0012-physhir-ast-typechecker.md
+      - RFC-0012 PhysHIR: rfc/RFC-0012-physhir.md
+      - RFC-0013 Causal Integrity: rfc/RFC-0013-causal-integrity.md
+      - RFC-0014 e-Process Bayesian Infusion: rfc/RFC-0014-eprocess-bayesian-infusion.md
+      - RFC-0015 Reality Kernel Gates: rfc/RFC-0015-reality-kernel-gates.md
   - Developer:
       - Architecture: architecture.md
       - Testing: testing.md
