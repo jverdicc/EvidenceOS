@@ -1,0 +1,7 @@
+{
+  "version": "0.1",
+  "nodes": [
+    {"op": "input", "dtype": "float"}
+  ],
+  "outputs": ["missing"]
+}

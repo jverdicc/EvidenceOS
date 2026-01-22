@@ -41,6 +41,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "nightly: long-running or Monte Carlo tests",
+  "wasm: requires WASM runtime availability",
+  "slow: slower than typical PR-tier checks",
+]
 
 [tool.ruff]
 line-length = 100

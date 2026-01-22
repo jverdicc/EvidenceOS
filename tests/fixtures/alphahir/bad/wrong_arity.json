@@ -1,0 +1,8 @@
+{
+  "version": "0.1",
+  "nodes": [
+    {"id": "x", "op": "input", "dtype": "float"},
+    {"id": "out", "op": "add", "args": ["x"], "dtype": "float"}
+  ],
+  "outputs": ["out"]
+}
