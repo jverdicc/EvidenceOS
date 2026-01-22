@@ -35,6 +35,10 @@ from evidenceos.uvp import (
     uvp_propose,
 )
 from evidenceos.safety_case.verified import VerifiedSafetyCaseInput, VerifiedSafetyCasePipeline
+from evidenceos.ledger.ledger import ConservationLedger
+from evidenceos.schemas.popperpp import FalsificationConfig
+from evidenceos.teams.popperpp.team import PopperppTeam
+from evidenceos.teams.popperpp.types import ClaimContract, DataContract
 
 
 def _cmd_capsule_verify(args: argparse.Namespace) -> int:
@@ -110,6 +114,40 @@ def _cmd_uvp_safety_case(args: argparse.Namespace) -> int:
         timestamp_utc=str(args.timestamp_utc),
     )
     print(render_scc_json(scc))
+
+
+def _cmd_falsify(args: argparse.Namespace) -> int:
+    claim_payload = _load_json_object(Path(args.claim))
+    data_payload = _load_json_object(Path(args.data))
+    config_payload = _load_json_object(Path(args.config))
+    config = FalsificationConfig.model_validate(config_payload)
+    if args.lane:
+        config.lane_policy = {**config.lane_policy, "default": args.lane}
+
+    claim = ClaimContract(
+        claim_id=str(claim_payload.get("claim_id", "claim-unknown")),
+        dataset_id=str(claim_payload.get("dataset_id", "dataset-unknown")),
+        null_nl=str(claim_payload.get("null_nl", "null")),
+        alt_nl=str(claim_payload.get("alt_nl", "alt")),
+    )
+    data_contract = DataContract(
+        dataset_id=str(data_payload.get("dataset_id", claim.dataset_id)),
+        allowed_columns=list(data_payload.get("allowed_columns", [])),
+    )
+    ledger = ConservationLedger()
+    team = PopperppTeam(config)
+    run = team.run(claim, data_contract, ledger)
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_path = out_dir / "falsification_run.json"
+    ledger_path = out_dir / "ledger_snapshot.json"
+    run_path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
+    ledger_path.write_text(
+        json.dumps(run.ledger_snapshot.model_dump(), indent=2), encoding="utf-8"
+    )
+    print(run_path)
+    return 0
 def _load_json_file(path: Path) -> object:
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -207,6 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
     reality_validate.add_argument("--causal", required=True)
     reality_validate.add_argument("--config", required=True)
     reality_validate.set_defaults(func=_cmd_reality_validate)
+
+    falsify = sub.add_parser("falsify", help="Run POPPER++ falsification protocol")
+    falsify.add_argument("--claim", required=True)
+    falsify.add_argument("--data", required=True)
+    falsify.add_argument("--config", required=True)
+    falsify.add_argument("--lane", default=None, help="Override default lane policy")
+    falsify.add_argument("--out-dir", required=True)
+    falsify.set_defaults(func=_cmd_falsify)
 
     uvp = sub.add_parser("uvp", help="UVP verified safety case tooling")
     uvp_sub = uvp.add_subparsers(dest="uvp_cmd", required=True)
