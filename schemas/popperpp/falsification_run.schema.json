@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/popperpp/falsification_run.schema.json",
+  "title": "FalsificationRun",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "claim_id",
+    "dataset_id",
+    "config",
+    "rounds",
+    "aggregated_e",
+    "decision",
+    "ledger_snapshot"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "claim_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "config": {
+      "$ref": "falsification_config.schema.json"
+    },
+    "rounds": {
+      "type": "array",
+      "items": {"$ref": "round_result.schema.json"}
+    },
+    "aggregated_e": {
+      "type": "number",
+      "minimum": 0
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["REJECT_H0", "NO_DECISION", "BUDGET_EXHAUSTED", "INVALID"]
+    },
+    "ledger_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "snapshot"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "snapshot": {"type": "object"}
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/popperpp/round_result.schema.json",
+  "title": "RoundResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "round_idx",
+    "subhypothesis_id",
+    "status",
+    "artifacts"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "round_idx": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "subhypothesis_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "p_value": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "e_value": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "SKIP", "ERROR"]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "path"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string"}
+        }
+      }
+    },
+    "notes": {
+      "type": ["string", "null"]
+    }
+  }
+}
