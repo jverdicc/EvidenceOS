@@ -1,0 +1,3 @@
+PCDB bundle corrupt fixture placeholder.
+
+Intended to represent a corrupted archive once binary fixtures are supported.
