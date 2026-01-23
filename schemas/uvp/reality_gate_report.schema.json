@@ -27,12 +27,13 @@
         "gates": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["physhir", "causal_dag", "canary", "ewl"],
+          "required": ["physhir", "causal_dag", "canary", "ewl", "leakage"],
           "properties": {
             "physhir": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]},
             "causal_dag": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]},
             "canary": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]},
-            "ewl": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]}
+            "ewl": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]},
+            "leakage": {"type": "string", "enum": ["PASS", "FAIL", "SKIPPED"]}
           }
         }
       }

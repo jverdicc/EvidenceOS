@@ -54,7 +54,10 @@ def _cmd_etl_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_etl_append(args: argparse.Namespace) -> int:
-    log = EvidenceTransparencyLog(Path(args.log_dir))
+    keypair = None
+    if args.signing_key_hex:
+        keypair = keypair_from_private_hex(args.signing_key_hex)
+    log = EvidenceTransparencyLog(Path(args.log_dir), keypair=keypair)
     meta = json.loads(args.meta) if args.meta else {}
     entry_hash, sth = log.append({"capsule_root": args.capsule_root, **meta})
     print(entry_hash)
@@ -186,7 +189,13 @@ def _cmd_uvp_propose(args: argparse.Namespace) -> int:
 
 def _cmd_uvp_evaluate(args: argparse.Namespace) -> int:
     meta = json.loads(args.meta) if args.meta else {}
-    entry = uvp_evaluate(Path(args.session_dir), args.hypothesis, int(args.outcome_x), meta)
+    entry = uvp_evaluate(
+        Path(args.session_dir),
+        args.hypothesis,
+        int(args.outcome_x),
+        meta,
+        leakage_bits=float(args.leakage_bits),
+    )
     print(json.dumps(entry, sort_keys=True, indent=2))
     return 0
 
@@ -231,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     etl_a.add_argument("log_dir")
     etl_a.add_argument("capsule_root")
     etl_a.add_argument("--meta", default="", help="JSON string metadata")
+    etl_a.add_argument("--signing-key-hex", default="", help="Ed25519 private key hex")
     etl_a.set_defaults(func=_cmd_etl_append)
 
     etl_v = etl_sub.add_parser("verify", help="Verify inclusion of entry_hash in ETL")
@@ -289,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     uvp_evaluate_cmd.add_argument("hypothesis")
     uvp_evaluate_cmd.add_argument("outcome_x")
     uvp_evaluate_cmd.add_argument("--meta", default="", help="JSON string metadata")
+    uvp_evaluate_cmd.add_argument("--leakage-bits", default="0.0", help="Leakage bits spent")
     uvp_evaluate_cmd.set_defaults(func=_cmd_uvp_evaluate)
 
     uvp_certify_cmd = uvp_sub.add_parser("certify", help="Generate SCC and signature")

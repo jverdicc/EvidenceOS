@@ -14,7 +14,9 @@
     "gate_errors",
     "e_increment",
     "ewl_before",
-    "ewl_after"
+    "ewl_after",
+    "leakage_bits",
+    "leakage_total_bits"
   ],
   "properties": {
     "index": {"type": "integer", "minimum": 0},
@@ -29,6 +31,8 @@
     },
     "e_increment": {"type": "number", "minimum": 0},
     "ewl_before": {"type": "number", "minimum": 0},
-    "ewl_after": {"type": "number", "minimum": 0}
+    "ewl_after": {"type": "number", "minimum": 0},
+    "leakage_bits": {"type": "number", "minimum": 0},
+    "leakage_total_bits": {"type": "number", "minimum": 0}
   }
 }

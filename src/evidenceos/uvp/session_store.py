@@ -20,6 +20,7 @@ PROPOSE_SCHEMA = SCHEMA_DIR / "propose.schema.json"
 EVALUATION_SCHEMA = SCHEMA_DIR / "evaluation.schema.json"
 EWL_STATE_SCHEMA = SCHEMA_DIR / "ewl_state.schema.json"
 GATE_REPORT_SCHEMA = SCHEMA_DIR / "reality_gate_report.schema.json"
+CANARY_STATE_SCHEMA = SCHEMA_DIR / "canary_state.schema.json"
 SCC_SCHEMA = SCHEMA_DIR / "scc.schema.json"
 PHYSHIR_SCHEMA = SCHEMA_DIR / "physhir.schema.json"
 CAUSAL_SCHEMA = SCHEMA_DIR / "causal_dag.schema.json"
@@ -37,6 +38,7 @@ class SessionPaths:
     evaluations_path: Path
     ewl_state_path: Path
     reality_gate_report_path: Path
+    canary_state_path: Path
     scc_path: Path
 
 
@@ -48,6 +50,8 @@ class EWLState:
     last_increment: float
     updates: int
     bankrupt: bool
+    leakage_bits: float
+    leakage_budget_bits: float
 
     def to_obj(self) -> dict[str, Any]:
         return {
@@ -57,6 +61,8 @@ class EWLState:
             "last_increment": self.last_increment,
             "updates": self.updates,
             "bankrupt": self.bankrupt,
+            "leakage_bits": self.leakage_bits,
+            "leakage_budget_bits": self.leakage_budget_bits,
         }
 
 
@@ -76,6 +82,18 @@ class GateReportEntry:
         }
 
 
+@dataclass(frozen=True)
+class CanaryState:
+    total_settlements: int
+    settlements_since_pulse: int
+
+    def to_obj(self) -> dict[str, Any]:
+        return {
+            "total_settlements": self.total_settlements,
+            "settlements_since_pulse": self.settlements_since_pulse,
+        }
+
+
 def session_paths(session_dir: Path) -> SessionPaths:
     return SessionPaths(
         root=session_dir,
@@ -84,6 +102,7 @@ def session_paths(session_dir: Path) -> SessionPaths:
         evaluations_path=session_dir / "evaluations.jsonl",
         ewl_state_path=session_dir / "ewl_state.json",
         reality_gate_report_path=session_dir / "reality_gate_report.json",
+        canary_state_path=session_dir / "canary_state.json",
         scc_path=session_dir / "scc.json",
     )
 
@@ -97,6 +116,7 @@ def init_session_dir(session_dir: Path) -> None:
         paths.evaluations_path,
         paths.ewl_state_path,
         paths.reality_gate_report_path,
+        paths.canary_state_path,
         paths.scc_path,
     ]
     if any(path.exists() for path in existing):
@@ -110,10 +130,14 @@ def init_session_dir(session_dir: Path) -> None:
         last_increment=1.0,
         updates=0,
         bankrupt=False,
+        leakage_bits=0.0,
+        leakage_budget_bits=0.0,
     )
     write_json(paths.ewl_state_path, default_state.to_obj(), EWL_STATE_SCHEMA)
     report_obj = {"version": GATE_REPORT_VERSION, "entries": []}
     write_json(paths.reality_gate_report_path, report_obj, GATE_REPORT_SCHEMA)
+    canary_state = CanaryState(total_settlements=0, settlements_since_pulse=0)
+    write_json(paths.canary_state_path, canary_state.to_obj(), CANARY_STATE_SCHEMA)
 
 
 def ensure_session_dir(session_dir: Path) -> None:
@@ -189,6 +213,8 @@ def load_ewl_state(paths: SessionPaths) -> EWLState:
         last_increment=float(obj["last_increment"]),
         updates=int(obj["updates"]),
         bankrupt=bool(obj["bankrupt"]),
+        leakage_bits=float(obj.get("leakage_bits", 0.0)),
+        leakage_budget_bits=float(obj.get("leakage_budget_bits", 0.0)),
     )
 
 
@@ -202,6 +228,23 @@ def load_gate_report(paths: SessionPaths) -> dict[str, Any]:
     return obj
 
 
+def load_canary_state(paths: SessionPaths) -> CanaryState:
+    if not paths.canary_state_path.exists():
+        raise SessionStoreError("canary_state_missing")
+    obj = read_json(paths.canary_state_path)
+    if not isinstance(obj, dict):
+        raise SessionStoreError("canary_state_invalid")
+    validate_json(obj, CANARY_STATE_SCHEMA)
+    return CanaryState(
+        total_settlements=int(obj["total_settlements"]),
+        settlements_since_pulse=int(obj["settlements_since_pulse"]),
+    )
+
+
+def write_canary_state(paths: SessionPaths, state: CanaryState) -> None:
+    write_json(paths.canary_state_path, state.to_obj(), CANARY_STATE_SCHEMA)
+
+
 __all__ = [
     "ANNOUNCE_SCHEMA",
     "CAUSAL_SCHEMA",
@@ -210,12 +253,14 @@ __all__ = [
     "EWL_VERSION",
     "GATE_REPORT_SCHEMA",
     "GATE_REPORT_VERSION",
+    "CANARY_STATE_SCHEMA",
     "PHYSHIR_SCHEMA",
     "PROPOSE_SCHEMA",
     "SCC_SCHEMA",
     "SCC_VERSION",
     "UVP_VERSION",
     "EWLState",
+    "CanaryState",
     "GateReportEntry",
     "SessionPaths",
     "SessionStoreError",
@@ -225,9 +270,11 @@ __all__ = [
     "load_announce",
     "load_ewl_state",
     "load_gate_report",
+    "load_canary_state",
     "load_propose",
     "read_json",
     "read_jsonl",
     "session_paths",
+    "write_canary_state",
     "write_json",
 ]

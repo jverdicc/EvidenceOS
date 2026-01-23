@@ -10,6 +10,7 @@ import jsonschema
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from evidenceos.causal.canary import DataBatch, add_noise, invariance_test, rescale, shuffle
+from evidenceos.causal.pulse import CanaryPulsePolicy, record_settlement, should_run_pulse
 from evidenceos.causal.dag import CausalGraphParseError, parse_causal_graph
 from evidenceos.common.canonical_json import canonical_dumps_bytes
 from evidenceos.common.hashing import sha256_prefixed
@@ -38,16 +39,19 @@ from .session_store import (
     SCC_SCHEMA,
     SCC_VERSION,
     UVP_VERSION,
+    CanaryState,
     EWLState,
     SessionPaths,
     append_jsonl,
     ensure_session_dir,
     load_announce,
     load_ewl_state,
+    load_canary_state,
     load_gate_report,
     load_propose,
     read_jsonl,
     session_paths,
+    write_canary_state,
     write_json,
 )
 
@@ -62,6 +66,7 @@ class EWLPolicy:
     alt_p: float
     initial_wealth: float
     bankruptcy_floor: float
+    leakage_budget_bits: float
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,8 @@ class EvaluationEntry:
     e_increment: float
     ewl_before: float
     ewl_after: float
+    leakage_bits: float
+    leakage_total_bits: float
 
     def to_obj(self) -> dict[str, Any]:
         return {
@@ -89,6 +96,8 @@ class EvaluationEntry:
             "e_increment": self.e_increment,
             "ewl_before": self.ewl_before,
             "ewl_after": self.ewl_after,
+            "leakage_bits": self.leakage_bits,
+            "leakage_total_bits": self.leakage_total_bits,
         }
 
 
@@ -196,6 +205,8 @@ def uvp_announce(session_dir: Path | str, pds_manifest: Mapping[str, Any]) -> di
         last_increment=1.0,
         updates=0,
         bankrupt=False,
+        leakage_bits=0.0,
+        leakage_budget_bits=policy.leakage_budget_bits,
     )
     write_json(paths.ewl_state_path, ewl_state.to_obj(), EWL_STATE_SCHEMA)
 
@@ -205,6 +216,9 @@ def uvp_announce(session_dir: Path | str, pds_manifest: Mapping[str, Any]) -> di
 
     if not paths.evaluations_path.exists():
         paths.evaluations_path.write_text("", encoding="utf-8")
+
+    if not paths.canary_state_path.exists():
+        write_canary_state(paths, CanaryState(total_settlements=0, settlements_since_pulse=0))
 
     return announce
 
@@ -235,6 +249,8 @@ def uvp_evaluate(
     hypothesis: str,
     outcome_x: int,
     meta: Mapping[str, Any],
+    *,
+    leakage_bits: float = 0.0,
 ) -> dict[str, Any]:
     if outcome_x not in (0, 1):
         raise ValueError("outcome_x must be 0 or 1")
@@ -254,6 +270,7 @@ def uvp_evaluate(
         "causal_dag": "SKIPPED",
         "canary": "SKIPPED",
         "ewl": "SKIPPED",
+        "leakage": "SKIPPED",
     }
     gate_errors: list[str] = []
 
@@ -275,12 +292,43 @@ def uvp_evaluate(
 
     if bool(gates_cfg["require_canary"]):
         canary_cfg = manifest.get("canary_config")
-        errors = _run_canary_gate(canary_cfg)
-        if errors:
-            gate_results["canary"] = "FAIL"
-            gate_errors.extend(errors)
+        canary_state = load_canary_state(paths)
+        pulse_cfg = None
+        if isinstance(canary_cfg, Mapping):
+            pulse_cfg = canary_cfg.get("pulse")
+        if isinstance(pulse_cfg, Mapping):
+            policy = CanaryPulsePolicy(
+                every_n_settlements=int(pulse_cfg.get("every_n_settlements", 0)),
+                probability=float(pulse_cfg.get("probability", 0.0)),
+                seed=int(pulse_cfg.get("seed", 0)),
+                require_on_first=bool(pulse_cfg.get("require_on_first", True)),
+            )
+            run_pulse = should_run_pulse(canary_state, policy)
         else:
-            gate_results["canary"] = "PASS"
+            run_pulse = True
+
+        if run_pulse:
+            errors = _run_canary_gate(canary_cfg)
+            if errors:
+                gate_results["canary"] = "FAIL"
+                gate_errors.extend(errors)
+            else:
+                gate_results["canary"] = "PASS"
+        else:
+            gate_results["canary"] = "SKIPPED"
+        record_settlement(canary_state, ran_pulse=run_pulse)
+        write_canary_state(paths, canary_state)
+
+    if not math.isfinite(leakage_bits) or leakage_bits < 0:
+        gate_results["leakage"] = "FAIL"
+        gate_errors.append("LEAKAGE_INVALID")
+        leakage_bits = 0.0
+    leakage_total = ewl_state.leakage_bits + leakage_bits
+    if ewl_state.leakage_budget_bits and leakage_total > ewl_state.leakage_budget_bits:
+        gate_results["leakage"] = "FAIL"
+        gate_errors.append("LEAKAGE_BUDGET_EXCEEDED")
+    elif gate_results["leakage"] == "SKIPPED":
+        gate_results["leakage"] = "PASS"
 
     if ewl_state.bankrupt or ewl_state.wealth <= ewl_state.bankruptcy_floor:
         gate_results["ewl"] = "FAIL"
@@ -311,6 +359,8 @@ def uvp_evaluate(
             last_increment=e_increment,
             updates=ewl_state.updates + 1,
             bankrupt=ewl_after <= ewl_state.bankruptcy_floor,
+            leakage_bits=leakage_total,
+            leakage_budget_bits=ewl_state.leakage_budget_bits,
         )
         write_json(paths.ewl_state_path, ewl_state.to_obj(), EWL_STATE_SCHEMA)
         status = "VALID"
@@ -319,6 +369,17 @@ def uvp_evaluate(
         ewl_before = ewl_state.wealth
         ewl_after = ewl_before
         e_increment = 0.0
+        ewl_state = EWLState(
+            version=ewl_state.version,
+            wealth=ewl_state.wealth,
+            bankruptcy_floor=ewl_state.bankruptcy_floor,
+            last_increment=ewl_state.last_increment,
+            updates=ewl_state.updates,
+            bankrupt=ewl_state.bankrupt,
+            leakage_bits=leakage_total,
+            leakage_budget_bits=ewl_state.leakage_budget_bits,
+        )
+        write_json(paths.ewl_state_path, ewl_state.to_obj(), EWL_STATE_SCHEMA)
         status = "INVALID"
         gate_status = "FAIL"
 
@@ -333,6 +394,8 @@ def uvp_evaluate(
         e_increment=e_increment,
         ewl_before=ewl_before,
         ewl_after=ewl_after,
+        leakage_bits=leakage_bits,
+        leakage_total_bits=leakage_total,
     )
     append_jsonl(paths.evaluations_path, entry.to_obj(), EVALUATION_SCHEMA)
     return entry.to_obj()
@@ -410,6 +473,7 @@ def _parse_ewl_policy(manifest: Mapping[str, Any]) -> EWLPolicy:
         alt_p=float(policy["alt_p"]),
         initial_wealth=float(policy["initial_wealth"]),
         bankruptcy_floor=float(policy["bankruptcy_floor"]),
+        leakage_budget_bits=float(policy.get("leakage_budget_bits", 0.0)),
     )
 
 
@@ -583,6 +647,8 @@ __all__ = [
     "EvaluationEntry",
     "MeanEvaluator",
     "SCCPayload",
+    "UVPEvent",
+    "UVPTranscript",
     "UVPError",
     "bernoulli_e_increment",
     "keypair_from_private_hex",
@@ -591,8 +657,12 @@ __all__ = [
     "uvp_certify",
     "uvp_evaluate",
     "uvp_propose",
-            "events": [event.to_obj() for event in self.events],
-        }
+    "UVPAnnouncement",
+    "UVPProposal",
+    "UVPEvaluation",
+    "UVPCertification",
+    "UVPInterface",
+]
 
 
 @dataclass(frozen=True)
