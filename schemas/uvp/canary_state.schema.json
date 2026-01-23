@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://evidenceos.dev/schemas/uvp/canary_state.schema.json",
+  "title": "UVP Canary Pulse State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["total_settlements", "settlements_since_pulse"],
+  "properties": {
+    "total_settlements": {"type": "integer", "minimum": 0},
+    "settlements_since_pulse": {"type": "integer", "minimum": 0}
+  }
+}

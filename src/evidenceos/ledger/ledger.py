@@ -109,6 +109,8 @@ class ConservationLedger:
     evidence: EvidenceLane = field(default_factory=EvidenceLane)
     adaptivity: AdaptivityLane = field(default_factory=AdaptivityLane)
     privacy: PrivacyLane = field(default_factory=PrivacyLane)
+    leakage: "LeakageLane" = field(default_factory=lambda: LeakageLane())
+    credit: "CreditLane" = field(default_factory=lambda: CreditLane())
     integrity: IntegrityLane = field(default_factory=IntegrityLane)
     wealth: EvidenceWealthLedger = field(default_factory=EvidenceWealthLedger)
 
@@ -117,3 +119,51 @@ class ConservationLedger:
             raise LedgerViolation("integrity_corrupted:" + ",".join(self.integrity.flags))
         if self.wealth.is_bankrupt():
             raise LedgerViolation("ewl_bankrupt")
+
+
+@dataclass
+class LeakageLane:
+    total_bits: float = 0.0
+    max_bits: Optional[float] = None
+    per_dataset_bits: dict[str, float] = field(default_factory=dict)
+    per_dataset_max: dict[str, float] = field(default_factory=dict)
+
+    def charge(self, dataset_id: str, bits: float) -> None:
+        if not math.isfinite(bits) or bits < 0:
+            raise ValueError("bits must be >= 0 and finite")
+        if not dataset_id:
+            raise ValueError("dataset_id must be non-empty")
+        self.total_bits += bits
+        self.per_dataset_bits[dataset_id] = self.per_dataset_bits.get(dataset_id, 0.0) + bits
+        if self.max_bits is not None and self.total_bits > self.max_bits:
+            raise LedgerViolation("leakage_budget_exceeded")
+        dataset_max = self.per_dataset_max.get(dataset_id)
+        if dataset_max is not None and self.per_dataset_bits[dataset_id] > dataset_max:
+            raise LedgerViolation("leakage_budget_exceeded")
+
+
+@dataclass
+class CreditLane:
+    credits: int = 0
+    credits_spent: int = 0
+    stake: float = 0.0
+    admission_bond: float = 0.0
+
+    def mint(self, amount: int) -> None:
+        if amount < 0:
+            raise ValueError("amount must be >= 0")
+        self.credits += amount
+
+    def spend(self, amount: int) -> None:
+        if amount < 0:
+            raise ValueError("amount must be >= 0")
+        if amount > self.credits:
+            raise LedgerViolation("credit_budget_exceeded")
+        self.credits -= amount
+        self.credits_spent += amount
+
+    def post_stake(self, amount: float, *, bond: float = 0.0) -> None:
+        if amount < 0 or bond < 0:
+            raise ValueError("stake and bond must be >= 0")
+        self.stake += amount
+        self.admission_bond += bond

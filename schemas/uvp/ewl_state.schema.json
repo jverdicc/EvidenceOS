@@ -4,13 +4,24 @@
   "title": "UVP EWL State",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "wealth", "bankruptcy_floor", "last_increment", "updates", "bankrupt"],
+  "required": [
+    "version",
+    "wealth",
+    "bankruptcy_floor",
+    "last_increment",
+    "updates",
+    "bankrupt",
+    "leakage_bits",
+    "leakage_budget_bits"
+  ],
   "properties": {
     "version": {"type": "string", "minLength": 1},
     "wealth": {"type": "number", "minimum": 0},
     "bankruptcy_floor": {"type": "number", "minimum": 0},
     "last_increment": {"type": "number", "minimum": 0},
     "updates": {"type": "integer", "minimum": 0},
-    "bankrupt": {"type": "boolean"}
+    "bankrupt": {"type": "boolean"},
+    "leakage_bits": {"type": "number", "minimum": 0},
+    "leakage_budget_bits": {"type": "number", "minimum": 0}
   }
 }

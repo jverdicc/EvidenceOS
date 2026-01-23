@@ -1,3 +1,5 @@
+"""UVP domain models and syscall helpers."""
+
 from .safety_case import (
     AdversarialHypothesis,
     EvidenceWealthLedger,
@@ -5,8 +7,12 @@ from .safety_case import (
     SafetyCaseRunner,
     load_hypotheses_batch,
     load_hypotheses_batch_with_outcomes,
+)
+from .schema_helpers import validate_adversarial_hypothesis, validate_safety_property
 from .session_store import (
+    CANARY_STATE_SCHEMA,
     UVP_VERSION,
+    CanaryState,
     EWLState,
     GateReportEntry,
     SessionPaths,
@@ -15,11 +21,18 @@ from .session_store import (
     session_paths,
 )
 from .syscalls import (
-    EvaluationEntry,
     EWLPolicy,
+    EvaluationEntry,
     MeanEvaluator,
     SCCPayload,
+    UVPAnnouncement,
+    UVPCertification,
+    UVPEvaluation,
     UVPError,
+    UVPEvent,
+    UVPInterface,
+    UVPProposal,
+    UVPTranscript,
     bernoulli_e_increment,
     keypair_from_private_hex,
     scc_payload_for_verify,
@@ -28,9 +41,21 @@ from .syscalls import (
     uvp_evaluate,
     uvp_propose,
 )
+from .models import SafetyProperty
 
 __all__ = [
+    "AdversarialHypothesis",
+    "EvidenceWealthLedger",
+    "SCC",
+    "SafetyCaseRunner",
+    "SafetyProperty",
+    "load_hypotheses_batch",
+    "load_hypotheses_batch_with_outcomes",
+    "validate_adversarial_hypothesis",
+    "validate_safety_property",
+    "CANARY_STATE_SCHEMA",
     "UVP_VERSION",
+    "CanaryState",
     "EWLPolicy",
     "EWLState",
     "EvaluationEntry",
@@ -39,7 +64,14 @@ __all__ = [
     "SCCPayload",
     "SessionPaths",
     "SessionStoreError",
+    "UVPAnnouncement",
+    "UVPCertification",
+    "UVPEvaluation",
     "UVPError",
+    "UVPEvent",
+    "UVPInterface",
+    "UVPProposal",
+    "UVPTranscript",
     "bernoulli_e_increment",
     "init_session_dir",
     "keypair_from_private_hex",
@@ -49,40 +81,4 @@ __all__ = [
     "uvp_certify",
     "uvp_evaluate",
     "uvp_propose",
-"""UVP domain models and schema helpers."""
-
-from evidenceos.uvp.models import AdversarialHypothesis, SafetyProperty
-from evidenceos.uvp.schema_helpers import (
-    validate_adversarial_hypothesis,
-    validate_safety_property,
-)
-
-__all__ = [
-    "AdversarialHypothesis",
-    "EvidenceWealthLedger",
-    "load_hypotheses_batch",
-    "load_hypotheses_batch_with_outcomes",
-    "SCC",
-    "SafetyCaseRunner",
-    "SafetyProperty",
-    "validate_adversarial_hypothesis",
-    "validate_safety_property",
-from .syscalls import (
-    UVPAnnouncement,
-    UVPCertification,
-    UVPEvaluation,
-    UVPEvent,
-    UVPInterface,
-    UVPProposal,
-    UVPTranscript,
-)
-
-__all__ = [
-    "UVPAnnouncement",
-    "UVPCertification",
-    "UVPEvaluation",
-    "UVPEvent",
-    "UVPInterface",
-    "UVPProposal",
-    "UVPTranscript",
 ]

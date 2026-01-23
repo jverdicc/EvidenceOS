@@ -112,12 +112,24 @@ class PopperppTeam:
                 "adaptive_rounds_used": ledger.adaptivity.adaptive_rounds_used,
                 "adaptive_rounds_max": ledger.adaptivity.adaptive_rounds_max,
             },
+            "leakage": {
+                "total_bits": ledger.leakage.total_bits,
+                "max_bits": ledger.leakage.max_bits,
+                "per_dataset_bits": dict(ledger.leakage.per_dataset_bits),
+                "per_dataset_max": dict(ledger.leakage.per_dataset_max),
+            },
             "privacy": {
                 "enabled": ledger.privacy.enabled,
                 "epsilon_spent": ledger.privacy.epsilon_spent,
                 "delta_spent": ledger.privacy.delta_spent,
                 "epsilon_max": ledger.privacy.epsilon_max,
                 "delta_max": ledger.privacy.delta_max,
+            },
+            "credit": {
+                "credits": ledger.credit.credits,
+                "credits_spent": ledger.credit.credits_spent,
+                "stake": ledger.credit.stake,
+                "admission_bond": ledger.credit.admission_bond,
             },
             "integrity": {
                 "state": ledger.integrity.state,

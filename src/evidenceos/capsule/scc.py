@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from evidenceos.common.canonical_json import canonical_dumps_bytes, canonical_dumps_str
 from evidenceos.common.hashing import sha256_hex, sha256_prefixed
+from evidenceos.common.signing import Ed25519Keypair, sign_ed25519, verify_ed25519
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class StandardizedClaimCapsuleBuilder:
         ewl: Any,
         decision_trace: Any,
         build_utc: str,
+        signing_keypair: Ed25519Keypair | None = None,
     ) -> str:
         capsule_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +70,16 @@ class StandardizedClaimCapsuleBuilder:
 
         root = sha256_prefixed(canonical_dumps_bytes(manifest.to_obj()))
         (capsule_dir / "capsule_root.txt").write_text(root + "\n", encoding="utf-8")
+        if signing_keypair is not None:
+            signature = sign_ed25519(signing_keypair, manifest.to_obj())
+            sig_obj = {
+                "public_key": "ed25519:" + signing_keypair.public_key_bytes().hex(),
+                "signature": signature,
+            }
+            (capsule_dir / "capsule_signature.json").write_text(
+                canonical_dumps_str(sig_obj),
+                encoding="utf-8",
+            )
         return root
 
 
@@ -93,6 +105,17 @@ def verify_scc(capsule_dir: Path) -> None:
         actual = sha256_hex(path.read_bytes())
         if actual != expected_sha:
             raise RuntimeError(f"hash_mismatch:{rel}")
+
+    sig_path = capsule_dir / "capsule_signature.json"
+    if sig_path.exists():
+        sig_obj = json.loads(sig_path.read_text(encoding="utf-8"))
+        public_key = sig_obj.get("public_key", "")
+        signature = sig_obj.get("signature", "")
+        if not public_key.startswith("ed25519:"):
+            raise RuntimeError("invalid_capsule_signature")
+        public_key_bytes = bytes.fromhex(public_key.split(":", 1)[1])
+        if not verify_ed25519(public_key_bytes, manifest_obj, signature):
+            raise RuntimeError("invalid_capsule_signature")
 
 
 __all__ = ["StandardizedClaimCapsuleBuilder", "verify_scc"]

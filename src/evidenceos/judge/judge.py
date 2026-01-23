@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 from evidenceos.evidence.priors import compute_prior_threshold
@@ -16,6 +17,9 @@ class DecisionTrace:
     prior: Optional[float] = None
     threshold_multiplier: Optional[float] = None
     effective_threshold: Optional[float] = None
+    leakage_bits: Optional[float] = None
+    leakage_multiplier: Optional[float] = None
+    effective_alpha: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,10 @@ class Judge:
             return DecisionTrace(status="Invalid", reason="integrity_not_trusted", e_value=e_value)
 
         prior_threshold = compute_prior_threshold(alpha=self.policy.alpha, prior=prior)
+        leakage_bits = ledger.leakage.total_bits
+        leakage_multiplier = math.pow(2.0, leakage_bits)
+        effective_threshold = prior_threshold.effective_threshold * leakage_multiplier
+        effective_alpha = self.policy.alpha * math.pow(2.0, -leakage_bits)
 
         if e_value is None:
             return DecisionTrace(
@@ -56,7 +64,10 @@ class Judge:
                 e_value=None,
                 prior=prior_threshold.prior,
                 threshold_multiplier=prior_threshold.multiplier,
-                effective_threshold=prior_threshold.effective_threshold,
+                effective_threshold=effective_threshold,
+                leakage_bits=leakage_bits,
+                leakage_multiplier=leakage_multiplier,
+                effective_alpha=effective_alpha,
             )
 
         # DP-aware buffer rule
@@ -70,19 +81,24 @@ class Judge:
                     dp_noise_margin=margin,
                     prior=prior_threshold.prior,
                     threshold_multiplier=prior_threshold.multiplier,
-                    effective_threshold=prior_threshold.effective_threshold,
+                    effective_threshold=effective_threshold,
+                    leakage_bits=leakage_bits,
+                    leakage_multiplier=leakage_multiplier,
+                    effective_alpha=effective_alpha,
                 )
 
         # e-values: reject null if e_value >= 1/alpha
-        threshold = prior_threshold.effective_threshold
-        if e_value >= threshold:
+        if e_value >= effective_threshold:
             return DecisionTrace(
                 status="Supported",
                 reason="e_value_pass",
                 e_value=e_value,
                 prior=prior_threshold.prior,
                 threshold_multiplier=prior_threshold.multiplier,
-                effective_threshold=threshold,
+                effective_threshold=effective_threshold,
+                leakage_bits=leakage_bits,
+                leakage_multiplier=leakage_multiplier,
+                effective_alpha=effective_alpha,
             )
         return DecisionTrace(
             status="Rejected",
@@ -90,5 +106,8 @@ class Judge:
             e_value=e_value,
             prior=prior_threshold.prior,
             threshold_multiplier=prior_threshold.multiplier,
-            effective_threshold=threshold,
+            effective_threshold=effective_threshold,
+            leakage_bits=leakage_bits,
+            leakage_multiplier=leakage_multiplier,
+            effective_alpha=effective_alpha,
         )

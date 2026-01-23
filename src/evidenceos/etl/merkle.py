@@ -71,3 +71,33 @@ def verify_inclusion(leaf: str, proof: InclusionProof, root: str) -> bool:
             acc = node_hash(sib, acc)
         idx //= 2
     return acc == root
+
+
+@dataclass(frozen=True)
+class ConsistencyProof:
+    old_size: int
+    new_size: int
+    leaf_hashes: List[str]
+
+
+def consistency_proof(old_size: int, new_size: int, leaves: List[str]) -> ConsistencyProof:
+    if old_size < 0 or new_size < 0:
+        raise ValueError("sizes must be >= 0")
+    if old_size > new_size:
+        raise ValueError("old_size must be <= new_size")
+    if new_size > len(leaves):
+        raise ValueError("new_size exceeds leaves length")
+    # Reference implementation: return the leaf hashes needed to recompute both roots.
+    return ConsistencyProof(
+        old_size=old_size,
+        new_size=new_size,
+        leaf_hashes=leaves[:new_size],
+    )
+
+
+def verify_consistency(old_root: str, new_root: str, proof: ConsistencyProof) -> bool:
+    if proof.new_size != len(proof.leaf_hashes):
+        return False
+    old_leaves = proof.leaf_hashes[: proof.old_size]
+    new_leaves = proof.leaf_hashes
+    return build_root(old_leaves) == old_root and build_root(new_leaves) == new_root

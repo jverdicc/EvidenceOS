@@ -48,7 +48,8 @@
           "exclusiveMaximum": 1
         },
         "initial_wealth": {"type": "number", "exclusiveMinimum": 0},
-        "bankruptcy_floor": {"type": "number", "minimum": 0}
+        "bankruptcy_floor": {"type": "number", "minimum": 0},
+        "leakage_budget_bits": {"type": "number", "minimum": 0}
       }
     },
     "canary_config": {
@@ -69,7 +70,19 @@
           "type": "array",
           "items": {"$ref": "#/$defs/transform"}
         },
-        "evaluator": {"$ref": "#/$defs/evaluator"}
+        "evaluator": {"$ref": "#/$defs/evaluator"},
+        "pulse": {"$ref": "#/$defs/canary_pulse"}
+      }
+    },
+    "canary_pulse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["every_n_settlements", "probability"],
+      "properties": {
+        "every_n_settlements": {"type": "integer", "minimum": 0},
+        "probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "seed": {"type": "integer"},
+        "require_on_first": {"type": "boolean"}
       }
     },
     "transform": {

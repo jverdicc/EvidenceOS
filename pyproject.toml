@@ -25,6 +25,9 @@ dev = [
   "mkdocs-material>=9.5",
   "types-jsonschema",
 ]
+wasm = [
+  "wasmtime>=20.0",
+]
 
 [project.scripts]
 evidenceos = "evidenceos.cli:main"
