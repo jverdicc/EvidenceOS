@@ -78,16 +78,14 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
     let mut instruction_count: u64 = 0;
     let mut return_count: u64 = 0;
 
-    // Track which function body we are currently parsing.
-    let mut current_defined_func: Option<u32> = None;
-
     // wasmparser parses function bodies in order, but we need to map them to indices.
     // We'll compute this once we know the number of imported funcs.
     let mut next_defined_func_index: u32 = 0;
 
     let parser = Parser::new(0);
     for payload in parser.parse_all(wasm) {
-        let payload = payload.map_err(|e| EvidenceOSError::AspecRejected(format!("parse error: {e}")))?;
+        let payload =
+            payload.map_err(|e| EvidenceOSError::AspecRejected(format!("parse error: {e}")))?;
 
         match payload {
             Payload::ImportSection(s) => {
@@ -108,7 +106,9 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
                             }
                         }
                         TypeRef::Memory(_) => {
-                            reasons.push("memory imports are banned (define memory in-module)".to_string());
+                            reasons.push(
+                                "memory imports are banned (define memory in-module)".to_string(),
+                            );
                         }
                         TypeRef::Table(_) => {
                             reasons.push("table imports are banned".to_string());
@@ -130,7 +130,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
             }
             Payload::CodeSectionEntry(body) => {
                 let func_index = imported_funcs + next_defined_func_index;
-                current_defined_func = Some(func_index);
+                let caller = func_index;
                 next_defined_func_index += 1;
 
                 let mut reader = body.get_operators_reader().map_err(|e| {
@@ -235,15 +235,15 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
                         | Operator::F32Const { .. }
                         | Operator::F64Const { .. } => {
                             if matches!(policy.lane, AspecLane::HighAssurance) {
-                                reasons.push("floating point is banned in HighAssurance lane".to_string());
+                                reasons.push(
+                                    "floating point is banned in HighAssurance lane".to_string(),
+                                );
                             }
                         }
 
                         Operator::Call { function_index } => {
-                            if let Some(caller) = current_defined_func {
-                                if function_index >= imported_funcs {
-                                    call_edges.entry(caller).or_default().push(function_index);
-                                }
+                            if function_index >= imported_funcs {
+                                call_edges.entry(caller).or_default().push(function_index);
                             }
                         }
 
@@ -264,8 +264,6 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
                         _ => {}
                     }
                 }
-
-                current_defined_func = None;
             }
             Payload::End(_) => {}
             _ => {}
@@ -287,7 +285,9 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
             return;
         }
         if !visiting.insert(node) {
-            reasons.push(format!("recursion/cycle detected involving func index {node}"));
+            reasons.push(format!(
+                "recursion/cycle detected involving func index {node}"
+            ));
             return;
         }
         if let Some(neigh) = edges.get(&node) {
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn rejects_loop() {
         let wat = r#"(module
-            (func (export \"run\")
+            (func (export "run")
                 (loop
                     nop
                 )
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn accepts_straightline() {
         let wat = r#"(module
-            (func (export \"run\") (result i32)
+            (func (export "run") (result i32)
                 i32.const 7
                 return
             )

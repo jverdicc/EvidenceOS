@@ -113,8 +113,11 @@ impl ConservationLedger {
         if let Some(b) = self.k_bits_budget {
             if new_total > b + f64::EPSILON {
                 self.frozen = true;
-                self.events
-                    .push(LedgerEvent::leak("freeze_budget_exhausted", 0.0, Value::Null));
+                self.events.push(LedgerEvent::leak(
+                    "freeze_budget_exhausted",
+                    0.0,
+                    Value::Null,
+                ));
                 return Err(EvidenceOSError::Frozen);
             }
         }
@@ -125,11 +128,16 @@ impl ConservationLedger {
     }
 
     /// Settle an e-value into wealth.
-    pub fn settle_e_value(&mut self, e_value: f64, kind: &str, meta: Value) -> EvidenceOSResult<()> {
+    pub fn settle_e_value(
+        &mut self,
+        e_value: f64,
+        kind: &str,
+        meta: Value,
+    ) -> EvidenceOSResult<()> {
         if self.frozen {
             return Err(EvidenceOSError::Frozen);
         }
-        if !(e_value > 0.0) {
+        if e_value <= 0.0 {
             return Err(EvidenceOSError::InvalidArgument(
                 "e_value must be positive".to_string(),
             ));
@@ -160,7 +168,9 @@ mod tests {
 
     #[test]
     fn budget_freezes_fail_closed() {
-        let mut l = ConservationLedger::new(0.05).unwrap().with_budget(Some(3.0));
+        let mut l = ConservationLedger::new(0.05)
+            .unwrap()
+            .with_budget(Some(3.0));
         l.charge(2.0, "leak", Value::Null).unwrap();
         assert!(!l.frozen);
         let err = l.charge(2.0, "leak", Value::Null).unwrap_err();

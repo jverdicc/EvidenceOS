@@ -26,11 +26,8 @@ use pb::evidence_os_server::EvidenceOs;
 
 #[derive(Debug, Clone)]
 struct SessionConfig {
-    alpha: f64,
     oracle_buckets: u32,
     hysteresis_delta: f64,
-    epoch_size: u64,
-    joint_bits_budget: Option<f64>,
     binom_p1: f64,
 }
 
@@ -57,12 +54,13 @@ struct SessionState {
 }
 
 #[derive(Debug)]
-struct KernelState {
+pub(crate) struct KernelState {
     sessions: Mutex<HashMap<String, SessionState>>,
     etl: Mutex<Etl>,
 }
 
 impl KernelState {
+    #[allow(clippy::result_large_err)]
     fn new(etl_path: &str) -> Result<Self, Status> {
         let etl = Etl::open_or_create(etl_path)
             .map_err(|e| Status::internal(format!("etl init: {e}")))?;
@@ -79,11 +77,12 @@ pub struct EvidenceOsService {
 }
 
 impl EvidenceOsService {
-    pub fn new(state: Arc<KernelState>) -> Self {
+    pub(crate) fn new(state: Arc<KernelState>) -> Self {
         Self { state }
     }
 
-    pub fn build(etl_path: &str) -> Result<(Arc<KernelState>, Self), Status> {
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn build(etl_path: &str) -> Result<(Arc<KernelState>, Self), Status> {
         let state = Arc::new(KernelState::new(etl_path)?);
         let svc = Self::new(state.clone());
         Ok((state, svc))
@@ -119,13 +118,21 @@ impl EvidenceOs for EvidenceOsService {
         let req = request.into_inner();
 
         let alpha = if req.alpha == 0.0 { 0.05 } else { req.alpha };
-        let epoch_size = if req.epoch_size == 0 { 10_000 } else { req.epoch_size };
+        let epoch_size = if req.epoch_size == 0 {
+            10_000
+        } else {
+            req.epoch_size
+        };
         let hysteresis_delta = if req.hysteresis_delta < 0.0 {
             return Err(Status::invalid_argument("hysteresis_delta must be >= 0"));
         } else {
             req.hysteresis_delta
         };
-        let oracle_buckets = if req.oracle_buckets == 0 { 256 } else { req.oracle_buckets };
+        let oracle_buckets = if req.oracle_buckets == 0 {
+            256
+        } else {
+            req.oracle_buckets
+        };
 
         let joint_bits_budget = if req.joint_bits_budget == 0 {
             None
@@ -133,17 +140,18 @@ impl EvidenceOs for EvidenceOsService {
             Some(req.joint_bits_budget as f64)
         };
 
-        let binom_p1 = if req.binom_p1 == 0.0 { 0.60 } else { req.binom_p1 };
+        let binom_p1 = if req.binom_p1 == 0.0 {
+            0.60
+        } else {
+            req.binom_p1
+        };
         if !(binom_p1 > 0.5 && binom_p1 < 1.0) {
             return Err(Status::invalid_argument("binom_p1 must be in (0.5,1)"));
         }
 
         let cfg = SessionConfig {
-            alpha,
             oracle_buckets,
             hysteresis_delta,
-            epoch_size,
-            joint_bits_budget,
             binom_p1,
         };
 
@@ -162,7 +170,10 @@ impl EvidenceOs for EvidenceOsService {
             holdouts: HashMap::new(),
         };
 
-        self.state.sessions.lock().insert(session_id.clone(), session);
+        self.state
+            .sessions
+            .lock()
+            .insert(session_id.clone(), session);
 
         info!(session_id = %session_id, "session created");
 
@@ -184,11 +195,13 @@ impl EvidenceOs for EvidenceOsService {
 
         let holdout_id = Uuid::new_v4().to_string();
 
-        match pb::HoldoutKind::try_from(req.kind)
-            .unwrap_or(pb::HoldoutKind::HoldoutKindUnspecified)
-        {
-            pb::HoldoutKind::HoldoutKindLabels => {
-                let n = if req.size == 0 { 256 } else { req.size as usize };
+        match pb::HoldoutKind::try_from(req.kind).unwrap_or(pb::HoldoutKind::Unspecified) {
+            pb::HoldoutKind::Labels => {
+                let n = if req.size == 0 {
+                    256
+                } else {
+                    req.size as usize
+                };
                 let mut labels = Vec::with_capacity(n);
                 for _ in 0..n {
                     labels.push(if rng.gen::<bool>() { 1u8 } else { 0u8 });
@@ -207,7 +220,7 @@ impl EvidenceOs for EvidenceOsService {
                     },
                 );
             }
-            pb::HoldoutKind::HoldoutKindScalarBoundary => {
+            pb::HoldoutKind::ScalarBoundary => {
                 let b = rng.gen::<f64>();
                 let boundary = HoldoutBoundary::new(b).map_err(status_from_err)?;
                 let resolution_acc =
@@ -223,7 +236,7 @@ impl EvidenceOs for EvidenceOsService {
                     },
                 );
             }
-            pb::HoldoutKind::HoldoutKindUnspecified => {
+            pb::HoldoutKind::Unspecified => {
                 return Err(Status::invalid_argument("holdout kind unspecified"));
             }
         }
@@ -281,20 +294,13 @@ impl EvidenceOs for EvidenceOsService {
                 let bucket = resolution.quantize_unit_interval(raw);
 
                 let local = if let Some(ref last) = hysteresis.last_input {
-                    HoldoutLabels::hamming_distance(last, &preds)
-                        .map_err(status_from_err)?
-                        <= 1
+                    HoldoutLabels::hamming_distance(last, &preds).map_err(status_from_err)? <= 1
                 } else {
                     false
                 };
 
-                let out_bucket = hysteresis.apply(
-                    local,
-                    resolution.delta_sigma,
-                    raw,
-                    bucket,
-                    preds.clone(),
-                );
+                let out_bucket =
+                    hysteresis.apply(local, resolution.delta_sigma, raw, bucket, preds.clone());
 
                 let epoch = session.dlc.tick(10_000);
 
@@ -421,13 +427,8 @@ impl EvidenceOs for EvidenceOsService {
                     false
                 };
 
-                let out_bucket = hysteresis_acc.apply(
-                    local,
-                    resolution_acc.delta_sigma,
-                    raw,
-                    bucket,
-                    x,
-                );
+                let out_bucket =
+                    hysteresis_acc.apply(local, resolution_acc.delta_sigma, raw, bucket, x);
 
                 let epoch = session.dlc.tick(10_000);
 
@@ -486,9 +487,7 @@ impl EvidenceOs for EvidenceOsService {
         let mut correct: u64 = 0;
         for (p, y) in preds.iter().zip(labels.labels_bytes().iter()) {
             if *p != 0 && *p != 1 {
-                return Err(Status::invalid_argument(
-                    "predictions must be bytes of 0/1",
-                ));
+                return Err(Status::invalid_argument("predictions must be bytes of 0/1"));
             }
             if p == y {
                 correct += 1;
@@ -635,7 +634,11 @@ mod tests {
             .await
             .unwrap();
 
-        let health = client.health(pb::HealthRequest {}).await.unwrap().into_inner();
+        let health = client
+            .health(pb::HealthRequest {})
+            .await
+            .unwrap()
+            .into_inner();
         assert_eq!(health.status, "SERVING");
 
         let sess = client
@@ -654,7 +657,7 @@ mod tests {
         let hold = client
             .init_holdout(pb::InitHoldoutRequest {
                 session_id: sess.session_id.clone(),
-                kind: pb::HoldoutKind::HoldoutKindLabels as i32,
+                kind: pb::HoldoutKind::Labels as i32,
                 seed: 123,
                 size: 32,
             })

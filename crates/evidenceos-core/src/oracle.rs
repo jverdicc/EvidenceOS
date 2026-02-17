@@ -17,7 +17,7 @@ impl OracleResolution {
                 "num_buckets must be >= 2".to_string(),
             ));
         }
-        if !(delta_sigma >= 0.0) {
+        if delta_sigma < 0.0 {
             return Err(EvidenceOSError::InvalidArgument(
                 "delta_sigma must be >= 0".to_string(),
             ));
@@ -33,15 +33,7 @@ impl OracleResolution {
     }
 
     pub fn quantize_unit_interval(&self, v: f64) -> u32 {
-        let clamped = if v.is_nan() {
-            0.0
-        } else if v < 0.0 {
-            0.0
-        } else if v > 1.0 {
-            1.0
-        } else {
-            v
-        };
+        let clamped = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
         let max_idx = (self.num_buckets - 1) as f64;
         let idx = (clamped * max_idx).round();
         let idx_i = idx as i64;
@@ -59,7 +51,9 @@ pub struct HysteresisState<T> {
 impl<T: Clone> HysteresisState<T> {
     pub fn apply(&mut self, local: bool, delta_sigma: f64, raw: f64, bucket: u32, input: T) -> u32 {
         let out = match (local, self.last_raw, self.last_bucket) {
-            (true, Some(prev_raw), Some(prev_bucket)) if (raw - prev_raw).abs() < delta_sigma => prev_bucket,
+            (true, Some(prev_raw), Some(prev_bucket)) if (raw - prev_raw).abs() < delta_sigma => {
+                prev_bucket
+            }
             _ => bucket,
         };
         self.last_input = Some(input);
@@ -94,6 +88,10 @@ impl HoldoutLabels {
 
     pub fn len(&self) -> usize {
         self.labels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
     }
 
     /// Expose raw bytes for kernel-internal commitments.
@@ -150,7 +148,7 @@ pub struct HoldoutBoundary {
 
 impl HoldoutBoundary {
     pub fn new(b: f64) -> EvidenceOSResult<Self> {
-        if !(b >= 0.0 && b <= 1.0) {
+        if !(0.0..=1.0).contains(&b) {
             return Err(EvidenceOSError::InvalidArgument(
                 "boundary b must be in [0,1]".to_string(),
             ));
