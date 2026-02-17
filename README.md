@@ -1,89 +1,66 @@
-# EvidenceOS / SafeClaim
+# EvidenceOS (Rust)
 
-EvidenceOS (and its core protocol, **SafeClaim**) is a **verification operating system** for the age of AI: a computing substrate that makes evaluation **statistically valid under adaptivity**, **resistant to gaming**, **auditable**, and **cost-aware**.
+**EvidenceOS** is a *verification-kernel* reference implementation written in Rust.
 
-It is designed to be the “universal referee” for scientific and AI claims—across LLM evaluation, agentic discovery, benchmark leaderboards, and high‑stakes safety gates—by enforcing:
+It is designed around the UVP paper's kernel/userland split:
 
-- **Validity under adaptivity** (repeated, adaptive querying)
-- **Resistance to gaming** (oracle probing, leaderboard hacking, p‑hacking)
-- **Replayable provenance** (proof‑carrying capsules)
-- **Efficient evaluation** (multi‑fidelity + adaptive testing)
-- **Sovereign / federated evaluation** (multiple data vaults; no raw data centralization)
+- **EvidenceOS**: small trusted kernel exposing *quantized, metered* oracle access plus an append-only **Evidence Transparency Log (ETL)**.
+- **DiscOS** (separate repo): untrusted discovery/userland that interacts with the kernel via IPC.
 
-> Core idea: **Evidence is finite.** Every query “spends” information. EvidenceOS makes that spending explicit and enforceable via ledgers, secure oracles, deterministic judging, and transparency logs.
+This repository contains:
 
----
+- `evidenceos-core`: Conservation Ledger, OracleResolution + hysteresis, deterministic logical clock, ETL Merkle log, and an ASPEC-like Wasm verifier.
+- `evidenceos-daemon`: a gRPC service exposing the kernel API.
 
-## Quickstart (local dev)
+## Quickstart
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install -e ".[dev]"
-
-pytest
-ruff check .
-mypy src
-```
-
-Docs:
+### 1) Build
 
 ```bash
-mkdocs serve
+cargo build --workspace
 ```
 
-Run a demo (in-memory federated evaluation):
+### 2) Run the kernel
 
 ```bash
-python -m evidenceos.examples.federated_demo
+cargo run -p evidenceos-daemon -- \
+  --listen 127.0.0.1:50051 \
+  --etl-path ./data/etl.log
 ```
 
----
-
-## UVP interoperability
-
-UVP (Universal Verification Protocol) sessions are file-based for deterministic, language-agnostic
-integration. External pipelines write syscall JSON payloads and EvidenceOS certifies them into a
-Standardized Claim Capsule (SCC).
-
-CLI examples:
+### 3) Test
 
 ```bash
-# validate Reality Kernel inputs before spending resources
-evidenceos reality validate --physhir inputs/physhir.json --causal inputs/causal.json --config inputs/reality.json
-
-# certify a UVP session directory (syscalls + session.json)
-evidenceos uvp certify --session ./session
+cargo test --workspace
 ```
 
-For full details, see `docs/interop.md`.
+## IPC API
 
----
+EvidenceOS exposes gRPC/Protobuf APIs defined in:
 
-## Repository layout
+- `proto/evidenceos.proto`
 
-```text
-docs/                  # MkDocs site + RFCs
-docs/rfc/              # Protocol RFCs (source of truth)
-docs/diagrams/         # Architecture diagrams
-schemas/               # JSON Schema (Draft 2020-12)
-src/evidenceos/         # Reference kernel implementation
-  common/              # canonical JSON, hashing, signing, schema validation
-  federation/          # RFC-0011 coordinator, merger, vault stubs
-  ledger/              # RFC-0001 conservation ledger
-  judge/               # RFC-0004 DP-aware deterministic judge
-  capsule/             # RFC-0005 claim capsules
-  etl/                 # RFC-0006 Evidence Transparency Log
-  oracle/              # Oracle modes (Ladder, Multi-fidelity)
-tests/                 # pytest suites
-.github/workflows/      # CI + docs deployment
-```
+The DiscOS repository includes:
 
----
+- a Rust client
+- a Python client example
 
-## Status
+## Notes on security & determinism
 
-This repo is a **reference kernel**. It is intentionally conservative: deterministic where required, fail-closed on integrity, and test-driven.
+This is a **reference implementation**. Production deployments must:
 
-See `docs/rfc/` for protocol specifications and MUST/SHOULD requirements.
+- treat simulation endpoints (`InitHoldout`) as dev-only
+- isolate kernel execution (sandbox, seccomp, VM, etc.)
+- harden storage, auditing, and key management
+
+## License
+
+Apache-2.0
+
+## Protobuf toolchain
+
+This repo uses a **vendored protoc** (`protoc-bin-vendored`) so contributors and CI do not need to install `protoc`.
+
+## Container / deployment
+
+A `Dockerfile`, `docker-compose.yml`, and a hardened `systemd` unit are provided under `deploy/systemd/`.

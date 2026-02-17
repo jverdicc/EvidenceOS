@@ -1,0 +1,20 @@
+//! evidenceos-core
+//!
+//! A reference Rust implementation of the *EvidenceOS* verification-kernel core.
+//!
+//! This crate implements core protocol invariants:
+//! - Conservation Ledger (leakage `k`, evidence wealth `W`, certification barrier)
+//! - OracleResolution + output hysteresis (anti-probing)
+//! - Deterministic Logical Clock (DLC) + protocol-level PLN padding
+//! - Evidence Transparency Log (ETL): append-only log + Merkle root
+//! - A decidable ASPEC-like verifier for restricted WebAssembly modules
+
+pub mod aspec;
+pub mod capsule;
+pub mod dlc;
+pub mod etl;
+pub mod error;
+pub mod ledger;
+pub mod oracle;
+
+pub use crate::error::{EvidenceOSError, EvidenceOSResult};

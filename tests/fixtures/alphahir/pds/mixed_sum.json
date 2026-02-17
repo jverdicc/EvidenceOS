@@ -1,9 +1,0 @@
-{
-  "version": "0.1",
-  "nodes": [
-    {"id": "usd", "op": "input", "dtype": "float", "pds": "USD"},
-    {"id": "unitless", "op": "input", "dtype": "float", "pds": "1"},
-    {"id": "out", "op": "add", "args": ["usd", "unitless"], "dtype": "float", "pds": "USD"}
-  ],
-  "outputs": ["out"]
-}
