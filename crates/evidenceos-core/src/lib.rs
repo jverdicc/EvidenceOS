@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 //! evidenceos-core
 //!
 //! A reference Rust implementation of the *EvidenceOS* verification-kernel core.

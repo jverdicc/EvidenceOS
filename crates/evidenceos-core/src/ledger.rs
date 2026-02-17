@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

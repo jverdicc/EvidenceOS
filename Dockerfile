@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 # EvidenceOS daemon container
 
 FROM rust:1.78-bookworm AS builder
