@@ -1,4 +1,0 @@
-PCDB bundle fixture placeholder.
-
-This text file replaces a binary zip to keep fixtures human-readable.
-Add a real .zip when binary fixtures are supported.

@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package evidenceos.v1;
+
+// EvidenceOS is a verification kernel service.
+//
+// This is a reference IPC surface for a Rust kernel implementation.
+// Production deployments should harden and possibly split "simulation" endpoints
+// into a separate build/profile.
+
+service EvidenceOS {
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Create a new session (per identity / per workflow).
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+
+  // Simulation-only: create a synthetic holdout inside the kernel.
+  rpc InitHoldout(InitHoldoutRequest) returns (InitHoldoutResponse);
+
+  // Accuracy oracle for label-holdout datasets.
+  rpc OracleAccuracy(OracleAccuracyRequest) returns (OracleReply);
+
+  // Safety oracle for scalar-boundary datasets.
+  rpc OracleBoundarySafety(OracleBoundarySafetyRequest) returns (OracleReply);
+
+  // Accuracy oracle for scalar-boundary datasets.
+  rpc OracleBoundaryAccuracy(OracleBoundaryAccuracyRequest) returns (OracleReply);
+
+  // Final evaluation + certification attempt for label-holdout datasets.
+  rpc EvaluateAndCertify(EvaluateAndCertifyRequest) returns (EvaluateAndCertifyResponse);
+
+  // Read current ledger snapshot.
+  rpc GetLedger(GetLedgerRequest) returns (LedgerSnapshot);
+
+  // Read ETL (append-only log) root.
+  rpc GetEtlRoot(GetEtlRootRequest) returns (GetEtlRootResponse);
+}
+
+message HealthRequest {}
+message HealthResponse {
+  string status = 1; // "SERVING" or "NOT_SERVING"
+}
+
+message CreateSessionRequest {
+  // Risk target for certification.
+  double alpha = 1;
+
+  // Logical epoch size for deterministic logical clock (DLC).
+  uint64 epoch_size = 2;
+
+  // Hysteresis threshold (delta_sigma) for oracle output stalling.
+  double hysteresis_delta = 3;
+
+  // Number of oracle buckets for accuracy-style oracles.
+  uint32 oracle_buckets = 4;
+
+  // Joint information budget (bits). If 0, treat as "infinite" for baseline comparisons.
+  uint64 joint_bits_budget = 5;
+
+  // Fixed alternative hypothesis probability for the built-in binomial LR e-value.
+  // (p1 > 0.5). If 0, defaults to 0.60.
+  double binom_p1 = 6;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+}
+
+enum HoldoutKind {
+  HOLDOUT_KIND_UNSPECIFIED = 0;
+
+  // A private vector of binary labels; accuracy is computed from a submitted prediction vector.
+  HOLDOUT_KIND_LABELS = 1;
+
+  // A private scalar boundary b in [0,1]; used for cross-oracle probing simulations.
+  HOLDOUT_KIND_SCALAR_BOUNDARY = 2;
+}
+
+message InitHoldoutRequest {
+  string session_id = 1;
+  HoldoutKind kind = 2;
+
+  // Deterministic seed (simulation only).
+  uint64 seed = 3;
+
+  // For LABELS: number of labels. For SCALAR_BOUNDARY: ignored.
+  uint32 size = 4;
+}
+
+message InitHoldoutResponse {
+  string holdout_id = 1;
+}
+
+message OracleAccuracyRequest {
+  string session_id = 1;
+  string holdout_id = 2;
+
+  // Packed bits: each byte is 0 or 1.
+  bytes predictions = 3;
+}
+
+message OracleBoundarySafetyRequest {
+  string session_id = 1;
+  string holdout_id = 2;
+  double x = 3;
+}
+
+message OracleBoundaryAccuracyRequest {
+  string session_id = 1;
+  string holdout_id = 2;
+  double x = 3;
+}
+
+message OracleReply {
+  // Canonicalized bucket index in [0, num_buckets-1].
+  // For 1-bit oracles, num_buckets==2 and bucket is 0/1.
+  uint32 bucket = 1;
+  uint32 num_buckets = 2;
+
+  // Deterministic logical clock epoch counter.
+  uint64 logical_epoch = 3;
+
+  // Ledger debug: total k bits charged so far (joint pool).
+  double k_bits_total = 4;
+
+  // Ledger debug: current certification barrier (2^k / alpha).
+  double barrier = 5;
+
+  // If true, kernel has frozen the session due to budget exhaustion or safety trip.
+  bool frozen = 6;
+}
+
+message EvaluateAndCertifyRequest {
+  string session_id = 1;
+  string holdout_id = 2;
+  bytes predictions = 3;
+
+  // Claim metadata (opaque to kernel; stored in capsule).
+  string claim_name = 4;
+}
+
+message EvaluateAndCertifyResponse {
+  bool certified = 1;
+  double e_value = 2;
+  double wealth = 3;
+  double barrier = 4;
+  double k_bits_total = 5;
+
+  // If certified, the claim capsule hash (sha256 hex).
+  string capsule_hash = 6;
+
+  // If certified, the ETL leaf index.
+  uint64 etl_index = 7;
+}
+
+message GetLedgerRequest {
+  string session_id = 1;
+}
+
+message LedgerEvent {
+  string kind = 1;
+  double bits = 2;
+  string json_meta = 3;
+}
+
+message LedgerSnapshot {
+  double alpha = 1;
+  double alpha_prime = 2;
+  double k_bits_total = 3;
+  double barrier = 4;
+  double wealth = 5;
+  repeated LedgerEvent events = 6;
+}
+
+message GetEtlRootRequest {}
+message GetEtlRootResponse {
+  string root_hash_hex = 1;
+  uint64 tree_size = 2;
+}

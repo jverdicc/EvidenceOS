@@ -1,7 +1,0 @@
-{
-  "units": {
-    "USD": {"symbol": "USD", "dimension": "currency"},
-    "shares": {"symbol": "shares", "dimension": "equity"},
-    "returns": {"symbol": "returns", "dimension": "dimensionless"}
-  }
-}
