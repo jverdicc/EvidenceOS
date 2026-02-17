@@ -55,6 +55,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 impl ClaimCapsule {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: String,
         holdout_id: String,

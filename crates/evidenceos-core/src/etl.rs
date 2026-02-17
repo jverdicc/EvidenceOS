@@ -41,7 +41,7 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
     }
     let mut layer: Vec<Hash32> = leaves.to_vec();
     while layer.len() > 1 {
-        let mut next = Vec::with_capacity((layer.len() + 1) / 2);
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
         let mut i = 0;
         while i < layer.len() {
             if i + 1 < layer.len() {
@@ -90,9 +90,7 @@ impl Etl {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(e) => {
-                        return Err(EvidenceOSError::Internal(format!(
-                            "read etl length: {e}"
-                        )))
+                        return Err(EvidenceOSError::Internal(format!("read etl length: {e}")))
                     }
                 }
                 let len = u32::from_le_bytes(len_bytes) as usize;
@@ -158,15 +156,9 @@ impl Etl {
             match f.read_exact(&mut len_bytes) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(EvidenceOSError::NotFound(format!(
-                        "etl index {index}"
-                    )))
+                    return Err(EvidenceOSError::NotFound(format!("etl index {index}")))
                 }
-                Err(e) => {
-                    return Err(EvidenceOSError::Internal(format!(
-                        "etl read len: {e}"
-                    )))
-                }
+                Err(e) => return Err(EvidenceOSError::Internal(format!("etl read len: {e}"))),
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
             let mut data = vec![0u8; len];

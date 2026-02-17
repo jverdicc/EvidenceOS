@@ -56,7 +56,7 @@ impl DeterministicLogicalClock {
         if self.logical_instructions == 0 {
             0
         } else {
-            (self.logical_instructions + self.cfg.epoch_size - 1) / self.cfg.epoch_size
+            self.logical_instructions.div_ceil(self.cfg.epoch_size)
         }
     }
 
