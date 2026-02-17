@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 //! ASPEC-like verifier for restricted WebAssembly modules.
 //!
 //! This is a *decidable* verifier intended for high-assurance lanes.

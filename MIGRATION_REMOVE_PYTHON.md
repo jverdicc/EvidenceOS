@@ -1,3 +1,6 @@
+<!-- Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Migration note: removing legacy Python
 
 You requested that the original Python implementation be removed/evicted from GitHub.
