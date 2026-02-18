@@ -17,7 +17,6 @@ use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
 use evidenceos_core::etl::Etl;
 use evidenceos_core::ledger::ConservationLedger;
 use evidenceos_core::oracle::{HoldoutBoundary, HoldoutLabels, HysteresisState, OracleResolution};
-
 pub mod pb {
     tonic::include_proto!("evidenceos.v1");
 }
@@ -91,12 +90,26 @@ impl EvidenceOsService {
 
 fn status_from_err(e: evidenceos_core::EvidenceOSError) -> Status {
     use evidenceos_core::EvidenceOSError as E;
+    let code = e.code() as u32;
+    let details = code.to_le_bytes().to_vec();
     match e {
-        E::InvalidArgument(s) => Status::invalid_argument(s),
-        E::NotFound(s) => Status::not_found(s),
-        E::Frozen => Status::failed_precondition("session frozen"),
-        E::AspecRejected(s) => Status::failed_precondition(s),
-        E::Internal(s) => Status::internal(s),
+        E::InvalidArgument => Status::with_details(
+            tonic::Code::InvalidArgument,
+            "E_INVALID_ARGUMENT",
+            details.into(),
+        ),
+        E::NotFound => Status::with_details(tonic::Code::NotFound, "E_NOT_FOUND", details.into()),
+        E::Frozen => Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "E_SYSTEM_FROZEN",
+            details.into(),
+        ),
+        E::AspecRejected => Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "E_ASPEC_REJECTED",
+            details.into(),
+        ),
+        E::Internal => Status::with_details(tonic::Code::Internal, "E_INTERNAL", details.into()),
     }
 }
 

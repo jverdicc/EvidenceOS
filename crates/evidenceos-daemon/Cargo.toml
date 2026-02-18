@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 evidenceos-core = { path = "../evidenceos-core" }
+evidenceos-protocol = { path = "../evidenceos-protocol" }
 
 anyhow = "1"
 thiserror = "1"

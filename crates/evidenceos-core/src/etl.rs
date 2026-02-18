@@ -73,7 +73,7 @@ impl Etl {
             .read(true)
             .append(true)
             .open(&path)
-            .map_err(|e| EvidenceOSError::Internal(format!("open etl: {e}")))?;
+            .map_err(|_| EvidenceOSError::Internal)?;
 
         // Rebuild leaves.
         let mut leaves = Vec::new();
@@ -82,22 +82,20 @@ impl Etl {
                 OpenOptions::new()
                     .read(true)
                     .open(&path)
-                    .map_err(|e| EvidenceOSError::Internal(format!("open etl for read: {e}")))?,
+                    .map_err(|_| EvidenceOSError::Internal)?,
             );
             loop {
                 let mut len_bytes = [0u8; 4];
                 match reader.read_exact(&mut len_bytes) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => {
-                        return Err(EvidenceOSError::Internal(format!("read etl length: {e}")))
-                    }
+                    Err(_) => return Err(EvidenceOSError::Internal),
                 }
                 let len = u32::from_le_bytes(len_bytes) as usize;
                 let mut data = vec![0u8; len];
                 reader
                     .read_exact(&mut data)
-                    .map_err(|e| EvidenceOSError::Internal(format!("read etl entry: {e}")))?;
+                    .map_err(|_| EvidenceOSError::Internal)?;
                 leaves.push(leaf_hash(&data));
             }
         }
@@ -109,16 +107,14 @@ impl Etl {
         let len: u32 = data
             .len()
             .try_into()
-            .map_err(|_| EvidenceOSError::InvalidArgument("entry too large".to_string()))?;
+            .map_err(|_| EvidenceOSError::InvalidArgument)?;
         self.file
             .write_all(&len.to_le_bytes())
-            .map_err(|e| EvidenceOSError::Internal(format!("etl write len: {e}")))?;
+            .map_err(|_| EvidenceOSError::Internal)?;
         self.file
             .write_all(data)
-            .map_err(|e| EvidenceOSError::Internal(format!("etl write data: {e}")))?;
-        self.file
-            .flush()
-            .map_err(|e| EvidenceOSError::Internal(format!("etl flush: {e}")))?;
+            .map_err(|_| EvidenceOSError::Internal)?;
+        self.file.flush().map_err(|_| EvidenceOSError::Internal)?;
 
         let h = leaf_hash(data);
         let idx = self.leaves.len() as u64;
@@ -147,23 +143,23 @@ impl Etl {
         let mut f = OpenOptions::new()
             .read(true)
             .open(&self.path)
-            .map_err(|e| EvidenceOSError::Internal(format!("etl open read: {e}")))?;
+            .map_err(|_| EvidenceOSError::Internal)?;
         f.seek(SeekFrom::Start(0))
-            .map_err(|e| EvidenceOSError::Internal(format!("etl seek: {e}")))?;
+            .map_err(|_| EvidenceOSError::Internal)?;
         let mut i = 0u64;
         loop {
             let mut len_bytes = [0u8; 4];
             match f.read_exact(&mut len_bytes) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Err(EvidenceOSError::NotFound(format!("etl index {index}")))
+                    return Err(EvidenceOSError::NotFound)
                 }
-                Err(e) => return Err(EvidenceOSError::Internal(format!("etl read len: {e}"))),
+                Err(_) => return Err(EvidenceOSError::Internal),
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
             let mut data = vec![0u8; len];
             f.read_exact(&mut data)
-                .map_err(|e| EvidenceOSError::Internal(format!("etl read data: {e}")))?;
+                .map_err(|_| EvidenceOSError::Internal)?;
             if i == index {
                 return Ok(data);
             }

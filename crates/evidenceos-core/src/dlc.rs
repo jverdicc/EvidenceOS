@@ -19,9 +19,7 @@ pub struct DlcConfig {
 impl DlcConfig {
     pub fn new(epoch_size: u64) -> EvidenceOSResult<Self> {
         if epoch_size == 0 {
-            return Err(EvidenceOSError::InvalidArgument(
-                "epoch_size must be positive".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self {
             epoch_size,

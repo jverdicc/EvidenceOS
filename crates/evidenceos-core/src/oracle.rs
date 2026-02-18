@@ -13,14 +13,10 @@ pub struct OracleResolution {
 impl OracleResolution {
     pub fn new(num_buckets: u32, delta_sigma: f64) -> EvidenceOSResult<Self> {
         if num_buckets < 2 {
-            return Err(EvidenceOSError::InvalidArgument(
-                "num_buckets must be >= 2".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         if delta_sigma < 0.0 {
-            return Err(EvidenceOSError::InvalidArgument(
-                "delta_sigma must be >= 0".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self {
             num_buckets,
@@ -72,15 +68,11 @@ pub struct HoldoutLabels {
 impl HoldoutLabels {
     pub fn new(labels: Vec<u8>) -> EvidenceOSResult<Self> {
         if labels.is_empty() {
-            return Err(EvidenceOSError::InvalidArgument(
-                "labels must be non-empty".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         for &b in &labels {
             if b != 0 && b != 1 {
-                return Err(EvidenceOSError::InvalidArgument(
-                    "labels must be binary (0/1)".to_string(),
-                ));
+                return Err(EvidenceOSError::InvalidArgument);
             }
         }
         Ok(Self { labels })
@@ -103,19 +95,13 @@ impl HoldoutLabels {
 
     pub fn accuracy(&self, predictions: &[u8]) -> EvidenceOSResult<f64> {
         if predictions.len() != self.labels.len() {
-            return Err(EvidenceOSError::InvalidArgument(format!(
-                "predictions length {} != labels length {}",
-                predictions.len(),
-                self.labels.len()
-            )));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         let mut correct = 0u64;
         for (p, y) in predictions.iter().zip(self.labels.iter()) {
             let pb = *p;
             if pb != 0 && pb != 1 {
-                return Err(EvidenceOSError::InvalidArgument(
-                    "predictions must be bytes of 0/1".to_string(),
-                ));
+                return Err(EvidenceOSError::InvalidArgument);
             }
             if pb == *y {
                 correct += 1;
@@ -126,9 +112,7 @@ impl HoldoutLabels {
 
     pub fn hamming_distance(a: &[u8], b: &[u8]) -> EvidenceOSResult<u64> {
         if a.len() != b.len() {
-            return Err(EvidenceOSError::InvalidArgument(
-                "hamming_distance: length mismatch".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         let mut d = 0u64;
         for (x, y) in a.iter().zip(b.iter()) {
@@ -149,9 +133,7 @@ pub struct HoldoutBoundary {
 impl HoldoutBoundary {
     pub fn new(b: f64) -> EvidenceOSResult<Self> {
         if !(0.0..=1.0).contains(&b) {
-            return Err(EvidenceOSError::InvalidArgument(
-                "boundary b must be in [0,1]".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self { b })
     }
