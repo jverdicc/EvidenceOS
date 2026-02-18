@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Verdicchio"
+  given-names: "Joseph"
+title: "EvidenceOS: A Universal Verification Protocol Kernel"
+version: 0.1.0-alpha
+doi: 10.5281/zenodo.18676017
+date-released: 2026-02-17
+url: "https://github.com/jverdicc/EvidenceOS"
