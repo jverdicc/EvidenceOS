@@ -16,6 +16,9 @@ pub type HoldoutHandle = [u8; 32];
 pub type TopicId = [u8; 32];
 pub type CapsuleHash = [u8; 32];
 
+pub const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
+pub const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
