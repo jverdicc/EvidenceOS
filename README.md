@@ -14,7 +14,7 @@ It is designed around the UVP paper's kernel/userland split:
 
 This repository contains:
 
-- `evidenceos-core`: Conservation Ledger, OracleResolution + hysteresis, deterministic logical clock, ETL Merkle log, and an ASPEC-like Wasm verifier.
+- `evidenceos-core`: Conservation Ledger primitives, deterministic logical clock, ETL Merkle log, and an ASPEC-like Wasm verifier.
 - `evidenceos-daemon`: a gRPC service exposing the kernel API.
 
 ## Quickstart
@@ -30,7 +30,7 @@ cargo build --workspace
 ```bash
 cargo run -p evidenceos-daemon -- \
   --listen 127.0.0.1:50051 \
-  --etl-path ./data/etl.log
+  --data-dir ./data
 ```
 
 ### 3) Test
@@ -50,13 +50,13 @@ The DiscOS repository includes:
 - a Rust client
 - a Python client example
 
-## Notes on security & determinism
+## Claim lifecycle API
 
-This is a **reference implementation**. Production deployments must:
+The daemon exposes a one-way claim lifecycle:
 
-- treat simulation endpoints (`InitHoldout`) as dev-only
-- isolate kernel execution (sandbox, seccomp, VM, etc.)
-- harden storage, auditing, and key management
+`CreateClaim -> CommitArtifacts -> FreezeGates -> SealClaim -> ExecuteClaim`
+
+Read APIs are available for capsule retrieval, signed tree heads, inclusion proofs, consistency checks, and revocation feeds.
 
 ## Research & Citation
 

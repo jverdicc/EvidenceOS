@@ -12,17 +12,14 @@ use server::EvidenceOsService;
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-daemon")]
-#[command(about = "EvidenceOS Rust verification-kernel daemon (reference implementation)")]
+#[command(about = "EvidenceOS Rust verification-kernel daemon")]
 struct Args {
-    /// Listen address, e.g. 127.0.0.1:50051
     #[arg(long, default_value = "127.0.0.1:50051")]
     listen: String,
 
-    /// Path to the Evidence Transparency Log (ETL) file.
-    #[arg(long, default_value = "./data/etl.log")]
-    etl_path: String,
+    #[arg(long, default_value = "./data")]
+    data_dir: String,
 
-    /// Log filter (tracing-subscriber EnvFilter syntax).
     #[arg(long, default_value = "info")]
     log: String,
 }
@@ -35,15 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::new(args.log))
         .init();
 
-    // Ensure parent dir exists.
-    if let Some(parent) = std::path::Path::new(&args.etl_path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(&args.data_dir)?;
 
     let addr: SocketAddr = args.listen.parse()?;
-    let (_state, svc) = EvidenceOsService::build(&args.etl_path)?;
+    let svc = EvidenceOsService::build(&args.data_dir)?;
 
-    tracing::info!(%addr, etl_path=%args.etl_path, "starting EvidenceOS gRPC server");
+    tracing::info!(%addr, data_dir=%args.data_dir, "starting EvidenceOS gRPC server");
 
     tonic::transport::Server::builder()
         .add_service(EvidenceOsServer::new(svc))

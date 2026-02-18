@@ -1,72 +1,172 @@
+#![allow(clippy::result_large_err)]
+
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rand::Rng;
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
-use uuid::Uuid;
 
-use evidenceos_core::capsule::ClaimCapsule;
-use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
 use evidenceos_core::etl::Etl;
-use evidenceos_core::ledger::ConservationLedger;
-use evidenceos_core::oracle::{HoldoutBoundary, HoldoutLabels, HysteresisState, OracleResolution};
+
 pub mod pb {
     tonic::include_proto!("evidenceos.v1");
 }
 
 use pb::evidence_os_server::EvidenceOs;
 
-#[derive(Debug, Clone)]
-struct SessionConfig {
-    oracle_buckets: u32,
-    hysteresis_delta: f64,
-    binom_p1: f64,
+const MAX_ARTIFACTS: usize = 128;
+const MAX_REASON_CODES: usize = 32;
+const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v1";
+const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ClaimState {
+    Uncommitted,
+    Committed,
+    Sealed,
+    Executing,
+    Settled,
+    Certified,
+    Revoked,
+    Tainted,
+    Stale,
+    Frozen,
 }
 
-#[derive(Debug)]
-enum Holdout {
-    Labels {
-        labels: HoldoutLabels,
-        hysteresis: HysteresisState<Vec<u8>>,
-        resolution: OracleResolution,
-    },
-    ScalarBoundary {
-        boundary: HoldoutBoundary,
-        hysteresis_acc: HysteresisState<f64>,
-        resolution_acc: OracleResolution,
-    },
+impl ClaimState {
+    fn to_proto(self) -> i32 {
+        match self {
+            ClaimState::Uncommitted => pb::ClaimState::Uncommitted as i32,
+            ClaimState::Committed => pb::ClaimState::Committed as i32,
+            ClaimState::Sealed => pb::ClaimState::Sealed as i32,
+            ClaimState::Executing => pb::ClaimState::Executing as i32,
+            ClaimState::Settled => pb::ClaimState::Settled as i32,
+            ClaimState::Certified => pb::ClaimState::Certified as i32,
+            ClaimState::Revoked => pb::ClaimState::Revoked as i32,
+            ClaimState::Tainted => pb::ClaimState::Tainted as i32,
+            ClaimState::Stale => pb::ClaimState::Stale as i32,
+            ClaimState::Frozen => pb::ClaimState::Frozen as i32,
+        }
+    }
 }
 
-#[derive(Debug)]
-struct SessionState {
-    cfg: SessionConfig,
-    ledger: ConservationLedger,
-    dlc: DeterministicLogicalClock,
-    holdouts: HashMap<String, Holdout>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourceLedger {
+    log2_wealth: f64,
+    leakage_bits: u64,
+    epsilon: f64,
+    delta: f64,
+    access_credit: u64,
+    alpha: f64,
 }
 
-#[derive(Debug)]
-pub(crate) struct KernelState {
-    sessions: Mutex<HashMap<String, SessionState>>,
-    etl: Mutex<Etl>,
-}
-
-impl KernelState {
-    #[allow(clippy::result_large_err)]
-    fn new(etl_path: &str) -> Result<Self, Status> {
-        let etl = Etl::open_or_create(etl_path)
-            .map_err(|e| Status::internal(format!("etl init: {e}")))?;
+impl ResourceLedger {
+    fn new(alpha: f64, access_credit: u64) -> Result<Self, Status> {
+        if !(alpha > 0.0 && alpha < 1.0) {
+            return Err(Status::invalid_argument("alpha must be in (0,1)"));
+        }
+        if access_credit == 0 {
+            return Err(Status::invalid_argument("access_credit must be > 0"));
+        }
         Ok(Self {
-            sessions: Mutex::new(HashMap::new()),
-            etl: Mutex::new(etl),
+            log2_wealth: 0.0,
+            leakage_bits: 0,
+            epsilon: 0.0,
+            delta: 0.0,
+            access_credit,
+            alpha,
         })
+    }
+
+    fn charge_leakage(&mut self, bits: u64) -> Result<(), Status> {
+        if bits == 0 {
+            return Err(Status::invalid_argument("bits must be > 0"));
+        }
+        if self.access_credit < bits {
+            return Err(Status::failed_precondition("access credit exhausted"));
+        }
+        self.access_credit -= bits;
+        self.leakage_bits = self
+            .leakage_bits
+            .checked_add(bits)
+            .ok_or_else(|| Status::internal("leakage overflow"))?;
+        Ok(())
+    }
+
+    fn settle_e_value(&mut self, e_value: f64) -> Result<(), Status> {
+        if e_value <= 0.0 {
+            return Err(Status::invalid_argument("e_value must be > 0"));
+        }
+        self.log2_wealth += e_value.log2();
+        Ok(())
+    }
+
+    fn certifiable(&self) -> bool {
+        let log2_barrier = self.leakage_bits as f64 - self.alpha.log2();
+        self.log2_wealth >= log2_barrier
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Claim {
+    claim_id: [u8; 32],
+    topic_id: [u8; 32],
+    holdout_handle_id: [u8; 32],
+    phys_hir_hash: [u8; 32],
+    epoch_size: u64,
+    oracle_num_symbols: u32,
+    state: ClaimState,
+    artifacts: Vec<([u8; 32], String)>,
+    ledger: ResourceLedger,
+    capsule_bytes: Option<Vec<u8>>,
+    capsule_hash: Option<[u8; 32]>,
+    etl_index: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Capsule {
+    version: u32,
+    claim_id: [u8; 32],
+    code_hash: [u8; 32],
+    ir_manifest_hashes: Vec<[u8; 32]>,
+    leakage_bits: u64,
+    log2_wealth: f64,
+    epsilon: f64,
+    delta: f64,
+    access_credit: u64,
+    decision: u32,
+    reason_codes: Vec<u32>,
+    canonical_output: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedState {
+    claims: Vec<Claim>,
+    revocations: Vec<([u8; 32], u64)>,
+    signing_key: [u8; 32],
+}
+
+#[derive(Debug)]
+struct KernelState {
+    claims: Mutex<HashMap<[u8; 32], Claim>>,
+    etl: Mutex<Etl>,
+    data_path: PathBuf,
+    revocations: Mutex<Vec<([u8; 32], u64)>>,
+    lock_file: File,
+    signing_key: [u8; 32],
+}
+
+impl Drop for KernelState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.data_path.join("kernel.lock"));
+        let _ = self.lock_file.metadata();
     }
 }
 
@@ -76,41 +176,136 @@ pub struct EvidenceOsService {
 }
 
 impl EvidenceOsService {
-    pub(crate) fn new(state: Arc<KernelState>) -> Self {
-        Self { state }
-    }
-
     #[allow(clippy::result_large_err)]
-    pub(crate) fn build(etl_path: &str) -> Result<(Arc<KernelState>, Self), Status> {
-        let state = Arc::new(KernelState::new(etl_path)?);
-        let svc = Self::new(state.clone());
-        Ok((state, svc))
+    pub(crate) fn build(data_dir: &str) -> Result<Self, Status> {
+        let root = PathBuf::from(data_dir);
+        std::fs::create_dir_all(&root).map_err(|_| Status::internal("mkdir failed"))?;
+
+        let lock_path = root.join("kernel.lock");
+        let lock_file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|_| Status::failed_precondition("another writer already holds kernel lock"))?;
+
+        let state_file = root.join("state.json");
+        let persisted = if state_file.exists() {
+            let bytes =
+                std::fs::read(&state_file).map_err(|_| Status::internal("read state failed"))?;
+            serde_json::from_slice::<PersistedState>(&bytes)
+                .map_err(|_| Status::internal("decode state failed"))?
+        } else {
+            PersistedState::default()
+        };
+
+        let signing_key = if persisted.signing_key == [0u8; 32] {
+            sha256_domain(b"evidenceos:signing-key", data_dir.as_bytes())
+        } else {
+            persisted.signing_key
+        };
+
+        let etl_path = root.join("etl.log");
+        let etl =
+            Etl::open_or_create(&etl_path).map_err(|_| Status::internal("etl init failed"))?;
+
+        let state = Arc::new(KernelState {
+            claims: Mutex::new(
+                persisted
+                    .claims
+                    .into_iter()
+                    .map(|c| (c.claim_id, c))
+                    .collect(),
+            ),
+            etl: Mutex::new(etl),
+            data_path: root,
+            revocations: Mutex::new(persisted.revocations),
+            lock_file,
+            signing_key,
+        });
+        persist_all(&state)?;
+        Ok(Self { state })
     }
 }
 
-fn status_from_err(e: evidenceos_core::EvidenceOSError) -> Status {
-    use evidenceos_core::EvidenceOSError as E;
-    let code = e.code() as u32;
-    let details = code.to_le_bytes().to_vec();
-    match e {
-        E::InvalidArgument => Status::with_details(
-            tonic::Code::InvalidArgument,
-            "E_INVALID_ARGUMENT",
-            details.into(),
-        ),
-        E::NotFound => Status::with_details(tonic::Code::NotFound, "E_NOT_FOUND", details.into()),
-        E::Frozen => Status::with_details(
-            tonic::Code::FailedPrecondition,
-            "E_SYSTEM_FROZEN",
-            details.into(),
-        ),
-        E::AspecRejected => Status::with_details(
-            tonic::Code::FailedPrecondition,
-            "E_ASPEC_REJECTED",
-            details.into(),
-        ),
-        E::Internal => Status::with_details(tonic::Code::Internal, "E_INTERNAL", details.into()),
+fn persist_all(state: &KernelState) -> Result<(), Status> {
+    let persisted = PersistedState {
+        claims: state.claims.lock().values().cloned().collect(),
+        revocations: state.revocations.lock().clone(),
+        signing_key: state.signing_key,
+    };
+    let bytes = serde_json::to_vec_pretty(&persisted)
+        .map_err(|_| Status::internal("serialize state failed"))?;
+    let tmp_path = state.data_path.join("state.json.tmp");
+    let final_path = state.data_path.join("state.json");
+    std::fs::write(&tmp_path, bytes).map_err(|_| Status::internal("write state failed"))?;
+    std::fs::rename(&tmp_path, &final_path).map_err(|_| Status::internal("rename state failed"))?;
+    Ok(())
+}
+
+fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
+    if bytes.len() != 32 {
+        return Err(Status::invalid_argument(format!(
+            "{field} must be 32 bytes"
+        )));
     }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(domain);
+    h.update(payload);
+    let out = h.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&out);
+    hash
+}
+
+fn assert_transition(from: ClaimState, to: ClaimState) -> Result<(), Status> {
+    let ok = matches!(
+        (from, to),
+        (ClaimState::Uncommitted, ClaimState::Committed)
+            | (ClaimState::Committed, ClaimState::Sealed)
+            | (ClaimState::Sealed, ClaimState::Executing)
+            | (ClaimState::Executing, ClaimState::Settled)
+            | (ClaimState::Settled, ClaimState::Certified)
+            | (_, ClaimState::Frozen)
+            | (_, ClaimState::Revoked)
+            | (_, ClaimState::Tainted)
+            | (_, ClaimState::Stale)
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(Status::failed_precondition(
+            "invalid claim state transition",
+        ))
+    }
+}
+
+fn canonical_len_for_symbols(num_symbols: u32) -> Result<usize, Status> {
+    if num_symbols < 2 {
+        return Err(Status::invalid_argument("oracle_num_symbols must be >= 2"));
+    }
+    let bits = 32 - (num_symbols - 1).leading_zeros();
+    Ok((bits as usize).div_ceil(8))
+}
+
+fn decode_canonical_symbol(canonical: &[u8], num_symbols: u32) -> Result<u32, Status> {
+    let expected_len = canonical_len_for_symbols(num_symbols)?;
+    if canonical.len() != expected_len {
+        return Err(Status::invalid_argument("canonical output length mismatch"));
+    }
+    let mut value: u32 = 0;
+    for b in canonical {
+        value = (value << 8) | u32::from(*b);
+    }
+    if value >= num_symbols {
+        return Err(Status::invalid_argument("canonical symbol out of range"));
+    }
+    Ok(value)
 }
 
 #[tonic::async_trait]
@@ -124,489 +319,330 @@ impl EvidenceOs for EvidenceOsService {
         }))
     }
 
-    async fn create_session(
+    async fn create_claim(
         &self,
-        request: Request<pb::CreateSessionRequest>,
-    ) -> Result<Response<pb::CreateSessionResponse>, Status> {
+        request: Request<pb::CreateClaimRequest>,
+    ) -> Result<Response<pb::CreateClaimResponse>, Status> {
         let req = request.into_inner();
-
-        let alpha = if req.alpha == 0.0 { 0.05 } else { req.alpha };
-        let epoch_size = if req.epoch_size == 0 {
-            10_000
-        } else {
-            req.epoch_size
-        };
-        let hysteresis_delta = if req.hysteresis_delta < 0.0 {
-            return Err(Status::invalid_argument("hysteresis_delta must be >= 0"));
-        } else {
-            req.hysteresis_delta
-        };
-        let oracle_buckets = if req.oracle_buckets == 0 {
-            256
-        } else {
-            req.oracle_buckets
-        };
-
-        let joint_bits_budget = if req.joint_bits_budget == 0 {
-            None
-        } else {
-            Some(req.joint_bits_budget as f64)
-        };
-
-        let binom_p1 = if req.binom_p1 == 0.0 {
-            0.60
-        } else {
-            req.binom_p1
-        };
-        if !(binom_p1 > 0.5 && binom_p1 < 1.0) {
-            return Err(Status::invalid_argument("binom_p1 must be in (0.5,1)"));
+        if req.epoch_size == 0 {
+            return Err(Status::invalid_argument("epoch_size must be > 0"));
         }
+        let topic_id = parse_hash32(&req.topic_id, "topic_id")?;
+        let holdout_handle_id = parse_hash32(&req.holdout_handle_id, "holdout_handle_id")?;
+        let phys_hir_hash = parse_hash32(&req.phys_hir_hash, "phys_hir_hash")?;
+        let _ = canonical_len_for_symbols(req.oracle_num_symbols)?;
+        let ledger = ResourceLedger::new(req.alpha, req.access_credit)?;
 
-        let cfg = SessionConfig {
-            oracle_buckets,
-            hysteresis_delta,
-            binom_p1,
-        };
+        let mut id_payload = Vec::new();
+        id_payload.extend_from_slice(&topic_id);
+        id_payload.extend_from_slice(&holdout_handle_id);
+        id_payload.extend_from_slice(&phys_hir_hash);
+        id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
+        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
-        let mut ledger = ConservationLedger::new(alpha).map_err(status_from_err)?;
-        ledger = ledger.with_budget(joint_bits_budget);
-
-        let dlc_cfg = DlcConfig::new(epoch_size).map_err(status_from_err)?;
-        let dlc = DeterministicLogicalClock::new(dlc_cfg);
-
-        let session_id = Uuid::new_v4().to_string();
-
-        let session = SessionState {
-            cfg,
+        let claim = Claim {
+            claim_id,
+            topic_id,
+            holdout_handle_id,
+            phys_hir_hash,
+            epoch_size: req.epoch_size,
+            oracle_num_symbols: req.oracle_num_symbols,
+            state: ClaimState::Uncommitted,
+            artifacts: Vec::new(),
             ledger,
-            dlc,
-            holdouts: HashMap::new(),
+            capsule_bytes: None,
+            capsule_hash: None,
+            etl_index: None,
         };
 
-        self.state
-            .sessions
-            .lock()
-            .insert(session_id.clone(), session);
+        self.state.claims.lock().insert(claim_id, claim.clone());
+        persist_all(&self.state)?;
 
-        info!(session_id = %session_id, "session created");
-
-        Ok(Response::new(pb::CreateSessionResponse { session_id }))
+        Ok(Response::new(pb::CreateClaimResponse {
+            claim_id: claim_id.to_vec(),
+            state: claim.state.to_proto(),
+        }))
     }
 
-    async fn init_holdout(
+    async fn commit_artifacts(
         &self,
-        request: Request<pb::InitHoldoutRequest>,
-    ) -> Result<Response<pb::InitHoldoutResponse>, Status> {
+        request: Request<pb::CommitArtifactsRequest>,
+    ) -> Result<Response<pb::CommitArtifactsResponse>, Status> {
         let req = request.into_inner();
-        let session_id = req.session_id;
-        let mut sessions = self.state.sessions.lock();
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let mut rng = ChaCha20Rng::seed_from_u64(req.seed);
-
-        let holdout_id = Uuid::new_v4().to_string();
-
-        match pb::HoldoutKind::try_from(req.kind).unwrap_or(pb::HoldoutKind::Unspecified) {
-            pb::HoldoutKind::Labels => {
-                let n = if req.size == 0 {
-                    256
-                } else {
-                    req.size as usize
-                };
-                let mut labels = Vec::with_capacity(n);
-                for _ in 0..n {
-                    labels.push(if rng.gen::<bool>() { 1u8 } else { 0u8 });
-                }
-                let labels = HoldoutLabels::new(labels).map_err(status_from_err)?;
-                let resolution =
-                    OracleResolution::new(session.cfg.oracle_buckets, session.cfg.hysteresis_delta)
-                        .map_err(status_from_err)?;
-
-                session.holdouts.insert(
-                    holdout_id.clone(),
-                    Holdout::Labels {
-                        labels,
-                        hysteresis: HysteresisState::default(),
-                        resolution,
-                    },
-                );
-            }
-            pb::HoldoutKind::ScalarBoundary => {
-                let b = rng.gen::<f64>();
-                let boundary = HoldoutBoundary::new(b).map_err(status_from_err)?;
-                let resolution_acc =
-                    OracleResolution::new(session.cfg.oracle_buckets, session.cfg.hysteresis_delta)
-                        .map_err(status_from_err)?;
-
-                session.holdouts.insert(
-                    holdout_id.clone(),
-                    Holdout::ScalarBoundary {
-                        boundary,
-                        hysteresis_acc: HysteresisState::default(),
-                        resolution_acc,
-                    },
-                );
-            }
-            pb::HoldoutKind::Unspecified => {
-                return Err(Status::invalid_argument("holdout kind unspecified"));
-            }
+        if req.artifacts.is_empty() || req.artifacts.len() > MAX_ARTIFACTS {
+            return Err(Status::invalid_argument(
+                "artifacts count must be in [1,128]",
+            ));
         }
-
-        // Charge a small fixed cost to the logical clock for dataset initialization.
-        let _epoch = session.dlc.tick(1_000);
-
-        info!(session_id=%session_id, holdout_id=%holdout_id, "holdout initialized");
-
-        Ok(Response::new(pb::InitHoldoutResponse { holdout_id }))
-    }
-
-    async fn oracle_accuracy(
-        &self,
-        request: Request<pb::OracleAccuracyRequest>,
-    ) -> Result<Response<pb::OracleReply>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id;
-        let holdout_id = req.holdout_id;
-        let preds = req.predictions;
-
-        let mut sessions = self.state.sessions.lock();
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let holdout = session
-            .holdouts
-            .get_mut(&holdout_id)
-            .ok_or_else(|| Status::not_found("holdout not found"))?;
-
-        match holdout {
-            Holdout::Labels {
-                labels,
-                hysteresis,
-                resolution,
-            } => {
-                let k_bits = resolution.bits_per_call();
-                if let Err(_e) = session.ledger.charge(
-                    k_bits,
-                    "oracle_accuracy",
-                    serde_json::json!({"holdout_id": holdout_id}),
-                ) {
-                    return Ok(Response::new(pb::OracleReply {
-                        bucket: 0,
-                        num_buckets: resolution.num_buckets,
-                        logical_epoch: session.dlc.current_epoch(),
-                        k_bits_total: session.ledger.k_bits_total,
-                        barrier: session.ledger.barrier(),
-                        frozen: true,
-                    }));
+        let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            assert_transition(claim.state, ClaimState::Committed)?;
+            claim.artifacts.clear();
+            for artifact in req.artifacts {
+                if artifact.kind.is_empty() || artifact.kind.len() > 64 {
+                    return Err(Status::invalid_argument("artifact kind must be in [1,64]"));
                 }
-
-                let raw = labels.accuracy(&preds).map_err(status_from_err)?;
-                let bucket = resolution.quantize_unit_interval(raw);
-
-                let local = if let Some(ref last) = hysteresis.last_input {
-                    HoldoutLabels::hamming_distance(last, &preds).map_err(status_from_err)? <= 1
-                } else {
-                    false
-                };
-
-                let out_bucket =
-                    hysteresis.apply(local, resolution.delta_sigma, raw, bucket, preds.clone());
-
-                let epoch = session.dlc.tick(10_000);
-
-                Ok(Response::new(pb::OracleReply {
-                    bucket: out_bucket,
-                    num_buckets: resolution.num_buckets,
-                    logical_epoch: epoch,
-                    k_bits_total: session.ledger.k_bits_total,
-                    barrier: session.ledger.barrier(),
-                    frozen: session.ledger.frozen,
-                }))
-            }
-            _ => Err(Status::failed_precondition(
-                "oracle_accuracy is only defined for LABELS holdouts",
-            )),
-        }
-    }
-
-    async fn oracle_boundary_safety(
-        &self,
-        request: Request<pb::OracleBoundarySafetyRequest>,
-    ) -> Result<Response<pb::OracleReply>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id;
-        let holdout_id = req.holdout_id;
-        let x = req.x;
-
-        let mut sessions = self.state.sessions.lock();
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let holdout = session
-            .holdouts
-            .get_mut(&holdout_id)
-            .ok_or_else(|| Status::not_found("holdout not found"))?;
-
-        match holdout {
-            Holdout::ScalarBoundary { boundary, .. } => {
-                let k_bits = 1.0;
-                if let Err(_e) = session.ledger.charge(
-                    k_bits,
-                    "oracle_boundary_safety",
-                    serde_json::json!({"holdout_id": holdout_id}),
-                ) {
-                    return Ok(Response::new(pb::OracleReply {
-                        bucket: 0,
-                        num_buckets: 2,
-                        logical_epoch: session.dlc.current_epoch(),
-                        k_bits_total: session.ledger.k_bits_total,
-                        barrier: session.ledger.barrier(),
-                        frozen: true,
-                    }));
-                }
-
-                let safe = boundary.safety_det(x);
-                let bucket = if safe { 1 } else { 0 };
-
-                let epoch = session.dlc.tick(10_000);
-
-                Ok(Response::new(pb::OracleReply {
-                    bucket,
-                    num_buckets: 2,
-                    logical_epoch: epoch,
-                    k_bits_total: session.ledger.k_bits_total,
-                    barrier: session.ledger.barrier(),
-                    frozen: session.ledger.frozen,
-                }))
-            }
-            _ => Err(Status::failed_precondition(
-                "oracle_boundary_safety is only defined for SCALAR_BOUNDARY holdouts",
-            )),
-        }
-    }
-
-    async fn oracle_boundary_accuracy(
-        &self,
-        request: Request<pb::OracleBoundaryAccuracyRequest>,
-    ) -> Result<Response<pb::OracleReply>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id;
-        let holdout_id = req.holdout_id;
-        let x = req.x;
-
-        let mut sessions = self.state.sessions.lock();
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let holdout = session
-            .holdouts
-            .get_mut(&holdout_id)
-            .ok_or_else(|| Status::not_found("holdout not found"))?;
-
-        match holdout {
-            Holdout::ScalarBoundary {
-                boundary,
-                hysteresis_acc,
-                resolution_acc,
-            } => {
-                let k_bits = resolution_acc.bits_per_call();
-                if let Err(_e) = session.ledger.charge(
-                    k_bits,
-                    "oracle_boundary_accuracy",
-                    serde_json::json!({"holdout_id": holdout_id}),
-                ) {
-                    return Ok(Response::new(pb::OracleReply {
-                        bucket: 0,
-                        num_buckets: resolution_acc.num_buckets,
-                        logical_epoch: session.dlc.current_epoch(),
-                        k_bits_total: session.ledger.k_bits_total,
-                        barrier: session.ledger.barrier(),
-                        frozen: true,
-                    }));
-                }
-
-                let raw = boundary.accuracy_det(x);
-                let bucket = resolution_acc.quantize_unit_interval(raw);
-
-                // Locality for scalar x: within epsilon.
-                let local = if let Some(last_x) = hysteresis_acc.last_input {
-                    (x - last_x).abs() <= 1e-6
-                } else {
-                    false
-                };
-
-                let out_bucket =
-                    hysteresis_acc.apply(local, resolution_acc.delta_sigma, raw, bucket, x);
-
-                let epoch = session.dlc.tick(10_000);
-
-                Ok(Response::new(pb::OracleReply {
-                    bucket: out_bucket,
-                    num_buckets: resolution_acc.num_buckets,
-                    logical_epoch: epoch,
-                    k_bits_total: session.ledger.k_bits_total,
-                    barrier: session.ledger.barrier(),
-                    frozen: session.ledger.frozen,
-                }))
-            }
-            _ => Err(Status::failed_precondition(
-                "oracle_boundary_accuracy is only defined for SCALAR_BOUNDARY holdouts",
-            )),
-        }
-    }
-
-    async fn evaluate_and_certify(
-        &self,
-        request: Request<pb::EvaluateAndCertifyRequest>,
-    ) -> Result<Response<pb::EvaluateAndCertifyResponse>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id;
-        let holdout_id = req.holdout_id;
-        let preds = req.predictions;
-        let claim_name = req.claim_name;
-
-        let mut sessions = self.state.sessions.lock();
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let holdout = session
-            .holdouts
-            .get(&holdout_id)
-            .ok_or_else(|| Status::not_found("holdout not found"))?;
-
-        let labels = match holdout {
-            Holdout::Labels { labels, .. } => labels,
-            _ => {
-                return Err(Status::failed_precondition(
-                    "evaluate_and_certify only supported for LABELS holdouts",
+                claim.artifacts.push((
+                    parse_hash32(&artifact.artifact_hash, "artifact_hash")?,
+                    artifact.kind,
                 ));
             }
+            claim.state = ClaimState::Committed;
+        }
+        persist_all(&self.state)?;
+        let state = self
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .map(|c| c.state.to_proto())
+            .ok_or_else(|| Status::internal("claim disappeared"))?;
+        Ok(Response::new(pb::CommitArtifactsResponse { state }))
+    }
+
+    async fn freeze_gates(
+        &self,
+        request: Request<pb::FreezeGatesRequest>,
+    ) -> Result<Response<pb::FreezeGatesResponse>, Status> {
+        let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
+        let state = self
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .ok_or_else(|| Status::not_found("claim not found"))?
+            .state;
+        if state != ClaimState::Committed {
+            return Err(Status::failed_precondition("claim must be COMMITTED"));
+        }
+        Ok(Response::new(pb::FreezeGatesResponse {
+            state: state.to_proto(),
+        }))
+    }
+
+    async fn seal_claim(
+        &self,
+        request: Request<pb::SealClaimRequest>,
+    ) -> Result<Response<pb::SealClaimResponse>, Status> {
+        let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
+        {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            assert_transition(claim.state, ClaimState::Sealed)?;
+            if claim.artifacts.is_empty() {
+                return Err(Status::failed_precondition(
+                    "cannot seal without committed artifacts",
+                ));
+            }
+            claim.state = ClaimState::Sealed;
+        }
+        persist_all(&self.state)?;
+        let state = self
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .map(|c| c.state.to_proto())
+            .ok_or_else(|| Status::internal("claim disappeared"))?;
+        Ok(Response::new(pb::SealClaimResponse { state }))
+    }
+
+    async fn execute_claim(
+        &self,
+        request: Request<pb::ExecuteClaimRequest>,
+    ) -> Result<Response<pb::ExecuteClaimResponse>, Status> {
+        let req = request.into_inner();
+        let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        if req.reason_codes.len() > MAX_REASON_CODES {
+            return Err(Status::invalid_argument("reason_codes length exceeds 32"));
+        }
+        if req.decision == pb::Decision::Unspecified as i32 {
+            return Err(Status::invalid_argument("decision must not be UNSPECIFIED"));
+        }
+
+        let (capsule_hash, etl_index, state) = {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            assert_transition(claim.state, ClaimState::Executing)?;
+            let _ = decode_canonical_symbol(&req.canonical_output, claim.oracle_num_symbols)?;
+
+            claim.state = ClaimState::Executing;
+            let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as u64;
+            claim.ledger.charge_leakage(charge_bits)?;
+            claim
+                .ledger
+                .settle_e_value(if req.decision == pb::Decision::Approve as i32 {
+                    2.0
+                } else {
+                    1.25
+                })?;
+            claim.state = ClaimState::Settled;
+            if claim.ledger.certifiable() {
+                claim.state = ClaimState::Certified;
+            }
+
+            let mut manifests = Vec::new();
+            for (hash, kind) in &claim.artifacts {
+                if kind.contains("manifest") {
+                    manifests.push(*hash);
+                }
+            }
+            let capsule = Capsule {
+                version: 1,
+                claim_id,
+                code_hash: claim.artifacts[0].0,
+                ir_manifest_hashes: manifests,
+                leakage_bits: claim.ledger.leakage_bits,
+                log2_wealth: claim.ledger.log2_wealth,
+                epsilon: claim.ledger.epsilon,
+                delta: claim.ledger.delta,
+                access_credit: claim.ledger.access_credit,
+                decision: req.decision as u32,
+                reason_codes: req.reason_codes,
+                canonical_output: req.canonical_output,
+            };
+            let capsule_bytes =
+                serde_json::to_vec(&capsule).map_err(|_| Status::internal("serialize failed"))?;
+            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let etl_index = {
+                let mut etl = self.state.etl.lock();
+                let (idx, _leaf) = etl
+                    .append(&capsule_bytes)
+                    .map_err(|_| Status::internal("etl append failed"))?;
+                idx
+            };
+            claim.capsule_bytes = Some(capsule_bytes);
+            claim.capsule_hash = Some(capsule_hash);
+            claim.etl_index = Some(etl_index);
+            (capsule_hash, etl_index, claim.state)
         };
 
-        if preds.len() != labels.len() {
-            return Err(Status::invalid_argument(format!(
-                "predictions length {} != labels length {}",
-                preds.len(),
-                labels.len()
-            )));
-        }
+        persist_all(&self.state)?;
 
-        let mut correct: u64 = 0;
-        for (p, y) in preds.iter().zip(labels.labels_bytes().iter()) {
-            if *p != 0 && *p != 1 {
-                return Err(Status::invalid_argument("predictions must be bytes of 0/1"));
-            }
-            if p == y {
-                correct += 1;
-            }
-        }
-
-        let n = labels.len() as f64;
-        let k = correct as f64;
-        let raw_acc = k / n;
-
-        // Binomial likelihood ratio e-value.
-        let p0 = 0.5;
-        let p1 = session.cfg.binom_p1;
-
-        let ln_e = k * (p1 / p0).ln() + (n - k) * ((1.0 - p1) / (1.0 - p0)).ln();
-        let e_value = ln_e.exp().min(f64::MAX);
-
-        if let Err(e) = session.ledger.settle_e_value(
-            e_value,
-            "evaluate",
-            serde_json::json!({"holdout_id": holdout_id, "raw_acc": raw_acc}),
-        ) {
-            warn!("settle_e_value failed: {e}");
-            return Err(status_from_err(e));
-        }
-
-        let certified = session.ledger.can_certify();
-
-        let mut capsule_hash = String::new();
-        let mut etl_index = 0u64;
-
-        if certified {
-            let capsule = ClaimCapsule::new(
-                session_id.clone(),
-                holdout_id.clone(),
-                claim_name,
-                &preds,
-                labels.labels_bytes(),
-                &session.ledger,
-                e_value,
-                true,
-            );
-            capsule_hash = capsule.capsule_hash_hex();
-
-            let capsule_bytes = capsule.to_json_bytes();
-            let mut etl = self.state.etl.lock();
-            let (idx, _leaf) = etl.append(&capsule_bytes).map_err(status_from_err)?;
-            etl_index = idx;
-            info!(session_id=%session_id, holdout_id=%holdout_id, etl_index=etl_index, "CERTIFIED");
-        } else {
-            info!(session_id=%session_id, holdout_id=%holdout_id, "not certified");
-        }
-
-        let _epoch = session.dlc.tick(50_000);
-
-        Ok(Response::new(pb::EvaluateAndCertifyResponse {
-            certified,
-            e_value,
-            wealth: session.ledger.wealth,
-            barrier: session.ledger.barrier(),
-            k_bits_total: session.ledger.k_bits_total,
-            capsule_hash,
+        Ok(Response::new(pb::ExecuteClaimResponse {
+            state: state.to_proto(),
+            capsule_hash: capsule_hash.to_vec(),
             etl_index,
         }))
     }
 
-    async fn get_ledger(
+    async fn get_capsule(
         &self,
-        request: Request<pb::GetLedgerRequest>,
-    ) -> Result<Response<pb::LedgerSnapshot>, Status> {
-        let req = request.into_inner();
-        let session_id = req.session_id;
-        let sessions = self.state.sessions.lock();
-        let session = sessions
-            .get(&session_id)
-            .ok_or_else(|| Status::not_found("session not found"))?;
-
-        let events = session
-            .ledger
-            .events
-            .iter()
-            .map(|e| pb::LedgerEvent {
-                kind: e.kind.clone(),
-                bits: e.bits,
-                json_meta: serde_json::to_string(&e.meta).unwrap_or_else(|_| "null".to_string()),
-            })
-            .collect();
-
-        Ok(Response::new(pb::LedgerSnapshot {
-            alpha: session.ledger.alpha,
-            alpha_prime: session.ledger.alpha_prime(),
-            k_bits_total: session.ledger.k_bits_total,
-            barrier: session.ledger.barrier(),
-            wealth: session.ledger.wealth,
-            events,
+        request: Request<pb::GetCapsuleRequest>,
+    ) -> Result<Response<pb::GetCapsuleResponse>, Status> {
+        let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
+        let claims = self.state.claims.lock();
+        let claim = claims
+            .get(&claim_id)
+            .ok_or_else(|| Status::not_found("claim not found"))?;
+        let capsule_bytes = claim
+            .capsule_bytes
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("capsule not available"))?;
+        let capsule_hash = claim
+            .capsule_hash
+            .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?;
+        let etl_index = claim
+            .etl_index
+            .ok_or_else(|| Status::failed_precondition("etl index unavailable"))?;
+        Ok(Response::new(pb::GetCapsuleResponse {
+            capsule_bytes,
+            capsule_hash: capsule_hash.to_vec(),
+            etl_index,
         }))
     }
 
-    async fn get_etl_root(
+    async fn get_signed_tree_head(
         &self,
-        _request: Request<pb::GetEtlRootRequest>,
-    ) -> Result<Response<pb::GetEtlRootResponse>, Status> {
+        _request: Request<pb::GetSignedTreeHeadRequest>,
+    ) -> Result<Response<pb::GetSignedTreeHeadResponse>, Status> {
         let etl = self.state.etl.lock();
-        Ok(Response::new(pb::GetEtlRootResponse {
-            root_hash_hex: etl.root_hex(),
-            tree_size: etl.tree_size(),
+        let tree_size = etl.tree_size();
+        let root_hash = etl.root_hash();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&tree_size.to_be_bytes());
+        payload.extend_from_slice(&root_hash);
+        let signature = sha256_domain(&self.state.signing_key, &payload);
+        Ok(Response::new(pb::GetSignedTreeHeadResponse {
+            tree_size,
+            root_hash: root_hash.to_vec(),
+            signature: signature.to_vec(),
+        }))
+    }
+
+    async fn get_inclusion_proof(
+        &self,
+        request: Request<pb::GetInclusionProofRequest>,
+    ) -> Result<Response<pb::GetInclusionProofResponse>, Status> {
+        let req = request.into_inner();
+        let etl = self.state.etl.lock();
+        let leaf_hash = etl
+            .leaf_hash_at(req.leaf_index)
+            .map_err(|_| Status::not_found("leaf index not found"))?;
+        let proof = etl
+            .inclusion_proof(req.leaf_index)
+            .map_err(|_| Status::not_found("leaf index not found"))?;
+        Ok(Response::new(pb::GetInclusionProofResponse {
+            leaf_hash: leaf_hash.to_vec(),
+            sibling_hashes: proof.into_iter().map(|h| h.to_vec()).collect(),
+            root_hash: etl.root_hash().to_vec(),
+        }))
+    }
+
+    async fn get_consistency_proof(
+        &self,
+        request: Request<pb::GetConsistencyProofRequest>,
+    ) -> Result<Response<pb::GetConsistencyProofResponse>, Status> {
+        let req = request.into_inner();
+        if req.first_tree_size > req.second_tree_size {
+            return Err(Status::invalid_argument(
+                "first_tree_size must be <= second_tree_size",
+            ));
+        }
+        let etl = self.state.etl.lock();
+        let first_root = etl
+            .root_at_size(req.first_tree_size)
+            .map_err(|_| Status::invalid_argument("first_tree_size out of bounds"))?;
+        let second_root = etl
+            .root_at_size(req.second_tree_size)
+            .map_err(|_| Status::invalid_argument("second_tree_size out of bounds"))?;
+        let consistent = req.first_tree_size == req.second_tree_size && first_root == second_root
+            || req.first_tree_size < req.second_tree_size;
+        Ok(Response::new(pb::GetConsistencyProofResponse {
+            consistent,
+            first_root_hash: first_root.to_vec(),
+            second_root_hash: second_root.to_vec(),
+        }))
+    }
+
+    async fn get_revocation_feed(
+        &self,
+        _request: Request<pb::GetRevocationFeedRequest>,
+    ) -> Result<Response<pb::GetRevocationFeedResponse>, Status> {
+        let entries_raw = self.state.revocations.lock().clone();
+        let mut payload = Vec::new();
+        let mut entries = Vec::new();
+        for (claim_id, timestamp_unix) in entries_raw {
+            payload.extend_from_slice(&claim_id);
+            payload.extend_from_slice(&timestamp_unix.to_be_bytes());
+            entries.push(pb::RevocationEntry {
+                claim_id: claim_id.to_vec(),
+                timestamp_unix,
+            });
+        }
+        let signature = sha256_domain(&self.state.signing_key, &payload);
+        Ok(Response::new(pb::GetRevocationFeedResponse {
+            entries,
+            signature: signature.to_vec(),
         }))
     }
 }
@@ -615,83 +651,42 @@ impl EvidenceOs for EvidenceOsService {
 mod tests {
     use super::*;
 
-    use tokio::sync::oneshot;
+    #[test]
+    fn canonical_encoding_rejects_invalid_without_charge() {
+        let mut ledger = ResourceLedger::new(0.1, 16).expect("valid ledger");
+        assert!(decode_canonical_symbol(&[0xFF], 2).is_err());
+        assert_eq!(ledger.leakage_bits, 0);
+        ledger.charge_leakage(1).expect("charge should pass");
+        assert_eq!(ledger.leakage_bits, 1);
+    }
 
-    #[tokio::test]
-    async fn grpc_smoke_create_session_and_holdout() {
-        let dir = tempfile::tempdir().unwrap();
-        let etl_path = dir.path().join("etl.log");
-        let (_state, svc) = EvidenceOsService::build(etl_path.to_str().unwrap()).unwrap();
-
-        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        let local_addr = listener.local_addr().unwrap();
-
-        let (tx, rx) = oneshot::channel::<()>();
-
-        tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(pb::evidence_os_server::EvidenceOsServer::new(svc))
-                .serve_with_incoming_shutdown(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                    async {
-                        let _ = rx.await;
-                    },
-                )
-                .await
-                .unwrap();
-        });
-
-        let endpoint = format!("http://{}", local_addr);
-        let mut client = pb::evidence_os_client::EvidenceOsClient::connect(endpoint)
-            .await
-            .unwrap();
-
-        let health = client
-            .health(pb::HealthRequest {})
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(health.status, "SERVING");
-
-        let sess = client
-            .create_session(pb::CreateSessionRequest {
-                alpha: 0.05,
-                epoch_size: 10_000,
-                hysteresis_delta: 0.0,
-                oracle_buckets: 256,
-                joint_bits_budget: 0,
-                binom_p1: 0.6,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-
-        let hold = client
-            .init_holdout(pb::InitHoldoutRequest {
-                session_id: sess.session_id.clone(),
-                kind: pb::HoldoutKind::Labels as i32,
-                seed: 123,
-                size: 32,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-
-        // Query once.
-        let preds = vec![0u8; 32];
-        let reply = client
-            .oracle_accuracy(pb::OracleAccuracyRequest {
-                session_id: sess.session_id.clone(),
-                holdout_id: hold.holdout_id.clone(),
-                predictions: preds,
-            })
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(reply.num_buckets, 256);
-
-        // Shutdown.
-        let _ = tx.send(());
+    #[test]
+    fn persistence_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create dir");
+        let data_dir_str = data_dir.to_string_lossy().to_string();
+        {
+            let svc = EvidenceOsService::build(&data_dir_str).expect("build service");
+            let resp = tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(async {
+                    svc.create_claim(Request::new(pb::CreateClaimRequest {
+                        topic_id: [1u8; 32].to_vec(),
+                        holdout_handle_id: [2u8; 32].to_vec(),
+                        phys_hir_hash: [3u8; 32].to_vec(),
+                        epoch_size: 100,
+                        oracle_num_symbols: 4,
+                        alpha: 0.05,
+                        access_credit: 32,
+                    }))
+                    .await
+                })
+                .expect("create claim")
+                .into_inner();
+            assert_eq!(resp.claim_id.len(), 32);
+        }
+        let svc2 = EvidenceOsService::build(&data_dir_str).expect("rebuild service");
+        assert_eq!(svc2.state.claims.lock().len(), 1);
     }
 }

@@ -5,178 +5,131 @@ syntax = "proto3";
 
 package evidenceos.v1;
 
-// EvidenceOS is a verification kernel service.
-//
-// This is a reference IPC surface for a Rust kernel implementation.
-// Production deployments should harden and possibly split "simulation" endpoints
-// into a separate build/profile.
-
 service EvidenceOS {
   rpc Health(HealthRequest) returns (HealthResponse);
-
-  // Create a new session (per identity / per workflow).
-  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
-
-  // Simulation-only: create a synthetic holdout inside the kernel.
-  rpc InitHoldout(InitHoldoutRequest) returns (InitHoldoutResponse);
-
-  // Accuracy oracle for label-holdout datasets.
-  rpc OracleAccuracy(OracleAccuracyRequest) returns (OracleReply);
-
-  // Safety oracle for scalar-boundary datasets.
-  rpc OracleBoundarySafety(OracleBoundarySafetyRequest) returns (OracleReply);
-
-  // Accuracy oracle for scalar-boundary datasets.
-  rpc OracleBoundaryAccuracy(OracleBoundaryAccuracyRequest) returns (OracleReply);
-
-  // Final evaluation + certification attempt for label-holdout datasets.
-  rpc EvaluateAndCertify(EvaluateAndCertifyRequest) returns (EvaluateAndCertifyResponse);
-
-  // Read current ledger snapshot.
-  rpc GetLedger(GetLedgerRequest) returns (LedgerSnapshot);
-
-  // Read ETL (append-only log) root.
-  rpc GetEtlRoot(GetEtlRootRequest) returns (GetEtlRootResponse);
+  rpc CreateClaim(CreateClaimRequest) returns (CreateClaimResponse);
+  rpc CommitArtifacts(CommitArtifactsRequest) returns (CommitArtifactsResponse);
+  rpc FreezeGates(FreezeGatesRequest) returns (FreezeGatesResponse);
+  rpc SealClaim(SealClaimRequest) returns (SealClaimResponse);
+  rpc ExecuteClaim(ExecuteClaimRequest) returns (ExecuteClaimResponse);
+  rpc GetCapsule(GetCapsuleRequest) returns (GetCapsuleResponse);
+  rpc GetSignedTreeHead(GetSignedTreeHeadRequest) returns (GetSignedTreeHeadResponse);
+  rpc GetInclusionProof(GetInclusionProofRequest) returns (GetInclusionProofResponse);
+  rpc GetConsistencyProof(GetConsistencyProofRequest) returns (GetConsistencyProofResponse);
+  rpc GetRevocationFeed(GetRevocationFeedRequest) returns (GetRevocationFeedResponse);
 }
 
 message HealthRequest {}
-message HealthResponse {
-  string status = 1; // "SERVING" or "NOT_SERVING"
+message HealthResponse { string status = 1; }
+
+enum ClaimState {
+  CLAIM_STATE_UNSPECIFIED = 0;
+  CLAIM_STATE_UNCOMMITTED = 1;
+  CLAIM_STATE_COMMITTED = 2;
+  CLAIM_STATE_SEALED = 3;
+  CLAIM_STATE_EXECUTING = 4;
+  CLAIM_STATE_SETTLED = 5;
+  CLAIM_STATE_CERTIFIED = 6;
+  CLAIM_STATE_REVOKED = 7;
+  CLAIM_STATE_TAINTED = 8;
+  CLAIM_STATE_STALE = 9;
+  CLAIM_STATE_FROZEN = 10;
 }
 
-message CreateSessionRequest {
-  // Risk target for certification.
-  double alpha = 1;
-
-  // Logical epoch size for deterministic logical clock (DLC).
-  uint64 epoch_size = 2;
-
-  // Hysteresis threshold (delta_sigma) for oracle output stalling.
-  double hysteresis_delta = 3;
-
-  // Number of oracle buckets for accuracy-style oracles.
-  uint32 oracle_buckets = 4;
-
-  // Joint information budget (bits). If 0, treat as "infinite" for baseline comparisons.
-  uint64 joint_bits_budget = 5;
-
-  // Fixed alternative hypothesis probability for the built-in binomial LR e-value.
-  // (p1 > 0.5). If 0, defaults to 0.60.
-  double binom_p1 = 6;
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_APPROVE = 1;
+  DECISION_REJECT = 2;
+  DECISION_DEFER = 3;
 }
 
-message CreateSessionResponse {
-  string session_id = 1;
+message CreateClaimRequest {
+  bytes topic_id = 1;         // 32 bytes
+  bytes holdout_handle_id = 2; // 32 bytes
+  bytes phys_hir_hash = 3;    // 32 bytes
+  uint64 epoch_size = 4;
+  uint32 oracle_num_symbols = 5;
+  double alpha = 6;
+  uint64 access_credit = 7;
 }
 
-enum HoldoutKind {
-  HOLDOUT_KIND_UNSPECIFIED = 0;
-
-  // A private vector of binary labels; accuracy is computed from a submitted prediction vector.
-  HOLDOUT_KIND_LABELS = 1;
-
-  // A private scalar boundary b in [0,1]; used for cross-oracle probing simulations.
-  HOLDOUT_KIND_SCALAR_BOUNDARY = 2;
+message CreateClaimResponse {
+  bytes claim_id = 1; // 32 bytes
+  ClaimState state = 2;
 }
 
-message InitHoldoutRequest {
-  string session_id = 1;
-  HoldoutKind kind = 2;
-
-  // Deterministic seed (simulation only).
-  uint64 seed = 3;
-
-  // For LABELS: number of labels. For SCALAR_BOUNDARY: ignored.
-  uint32 size = 4;
+message Artifact {
+  bytes artifact_hash = 1; // 32 bytes
+  string kind = 2;
 }
 
-message InitHoldoutResponse {
-  string holdout_id = 1;
+message CommitArtifactsRequest {
+  bytes claim_id = 1;
+  repeated Artifact artifacts = 2;
 }
 
-message OracleAccuracyRequest {
-  string session_id = 1;
-  string holdout_id = 2;
+message CommitArtifactsResponse { ClaimState state = 1; }
 
-  // Packed bits: each byte is 0 or 1.
-  bytes predictions = 3;
+message FreezeGatesRequest { bytes claim_id = 1; }
+message FreezeGatesResponse { ClaimState state = 1; }
+
+message SealClaimRequest { bytes claim_id = 1; }
+message SealClaimResponse { ClaimState state = 1; }
+
+message ExecuteClaimRequest {
+  bytes claim_id = 1;
+  Decision decision = 2;
+  repeated uint32 reason_codes = 3;
+  bytes canonical_output = 4;
 }
 
-message OracleBoundarySafetyRequest {
-  string session_id = 1;
-  string holdout_id = 2;
-  double x = 3;
+message ExecuteClaimResponse {
+  ClaimState state = 1;
+  bytes capsule_hash = 2;
+  uint64 etl_index = 3;
 }
 
-message OracleBoundaryAccuracyRequest {
-  string session_id = 1;
-  string holdout_id = 2;
-  double x = 3;
+message GetCapsuleRequest { bytes claim_id = 1; }
+message GetCapsuleResponse {
+  bytes capsule_bytes = 1;
+  bytes capsule_hash = 2;
+  uint64 etl_index = 3;
 }
 
-message OracleReply {
-  // Canonicalized bucket index in [0, num_buckets-1].
-  // For 1-bit oracles, num_buckets==2 and bucket is 0/1.
-  uint32 bucket = 1;
-  uint32 num_buckets = 2;
-
-  // Deterministic logical clock epoch counter.
-  uint64 logical_epoch = 3;
-
-  // Ledger debug: total k bits charged so far (joint pool).
-  double k_bits_total = 4;
-
-  // Ledger debug: current certification barrier (2^k / alpha).
-  double barrier = 5;
-
-  // If true, kernel has frozen the session due to budget exhaustion or safety trip.
-  bool frozen = 6;
+message GetSignedTreeHeadRequest {}
+message GetSignedTreeHeadResponse {
+  uint64 tree_size = 1;
+  bytes root_hash = 2;
+  bytes signature = 3;
 }
 
-message EvaluateAndCertifyRequest {
-  string session_id = 1;
-  string holdout_id = 2;
-  bytes predictions = 3;
-
-  // Claim metadata (opaque to kernel; stored in capsule).
-  string claim_name = 4;
+message GetInclusionProofRequest {
+  uint64 leaf_index = 1;
 }
 
-message EvaluateAndCertifyResponse {
-  bool certified = 1;
-  double e_value = 2;
-  double wealth = 3;
-  double barrier = 4;
-  double k_bits_total = 5;
-
-  // If certified, the claim capsule hash (sha256 hex).
-  string capsule_hash = 6;
-
-  // If certified, the ETL leaf index.
-  uint64 etl_index = 7;
+message GetInclusionProofResponse {
+  bytes leaf_hash = 1;
+  repeated bytes sibling_hashes = 2;
+  bytes root_hash = 3;
 }
 
-message GetLedgerRequest {
-  string session_id = 1;
+message GetConsistencyProofRequest {
+  uint64 first_tree_size = 1;
+  uint64 second_tree_size = 2;
 }
 
-message LedgerEvent {
-  string kind = 1;
-  double bits = 2;
-  string json_meta = 3;
+message GetConsistencyProofResponse {
+  bool consistent = 1;
+  bytes first_root_hash = 2;
+  bytes second_root_hash = 3;
 }
 
-message LedgerSnapshot {
-  double alpha = 1;
-  double alpha_prime = 2;
-  double k_bits_total = 3;
-  double barrier = 4;
-  double wealth = 5;
-  repeated LedgerEvent events = 6;
+message GetRevocationFeedRequest {}
+message RevocationEntry {
+  bytes claim_id = 1;
+  uint64 timestamp_unix = 2;
 }
-
-message GetEtlRootRequest {}
-message GetEtlRootResponse {
-  string root_hash_hex = 1;
-  uint64 tree_size = 2;
+message GetRevocationFeedResponse {
+  repeated RevocationEntry entries = 1;
+  bytes signature = 2;
 }
