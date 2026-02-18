@@ -33,59 +33,60 @@ pub fn node_hash(left: &Hash32, right: &Hash32) -> Hash32 {
 }
 
 pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
-    if leaves.is_empty() {
-        return sha256(b"");
-    }
-    let mut layer: Vec<Hash32> = leaves.to_vec();
-    while layer.len() > 1 {
-        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
-        let mut i = 0;
-        while i < layer.len() {
-            if i + 1 < layer.len() {
-                next.push(node_hash(&layer[i], &layer[i + 1]));
-            } else {
-                next.push(layer[i]);
-            }
-            i += 2;
+    merkle_root_ct(leaves)
+}
+
+fn largest_power_of_two_less_than(n: usize) -> usize {
+    debug_assert!(n > 1);
+    1usize << (usize::BITS - 1 - (n - 1).leading_zeros())
+}
+
+pub fn merkle_root_ct(leaves: &[Hash32]) -> Hash32 {
+    match leaves.len() {
+        0 => sha256(b""),
+        1 => leaves[0],
+        n => {
+            let k = largest_power_of_two_less_than(n);
+            let left = merkle_root_ct(&leaves[..k]);
+            let right = merkle_root_ct(&leaves[k..]);
+            node_hash(&left, &right)
         }
-        layer = next;
     }
-    layer[0]
 }
 
 pub fn merkle_root_prefix(leaves: &[Hash32], tree_size: usize) -> Hash32 {
-    merkle_root(&leaves[..tree_size.min(leaves.len())])
+    merkle_root_ct(&leaves[..tree_size.min(leaves.len())])
 }
 
 pub fn inclusion_proof(leaves: &[Hash32], leaf_index: usize) -> EvidenceOSResult<Vec<Hash32>> {
-    if leaf_index >= leaves.len() {
+    inclusion_proof_ct(leaves, leaf_index, leaves.len())
+}
+
+fn inclusion_proof_ct_inner(leaves: &[Hash32], leaf_index: usize) -> Vec<Hash32> {
+    if leaves.len() <= 1 {
+        return Vec::new();
+    }
+    let k = largest_power_of_two_less_than(leaves.len());
+    if leaf_index < k {
+        let mut p = inclusion_proof_ct_inner(&leaves[..k], leaf_index);
+        p.push(merkle_root_ct(&leaves[k..]));
+        p
+    } else {
+        let mut p = inclusion_proof_ct_inner(&leaves[k..], leaf_index - k);
+        p.push(merkle_root_ct(&leaves[..k]));
+        p
+    }
+}
+
+pub fn inclusion_proof_ct(
+    leaves: &[Hash32],
+    leaf_index: usize,
+    tree_size: usize,
+) -> EvidenceOSResult<Vec<Hash32>> {
+    if tree_size == 0 || tree_size > leaves.len() || leaf_index >= tree_size {
         return Err(EvidenceOSError::NotFound);
     }
-    let mut layer = leaves.to_vec();
-    let mut idx = leaf_index;
-    let mut proof = Vec::new();
-    while layer.len() > 1 {
-        if idx.is_multiple_of(2) {
-            if idx + 1 < layer.len() {
-                proof.push(layer[idx + 1]);
-            }
-        } else {
-            proof.push(layer[idx - 1]);
-        }
-        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
-        let mut i = 0;
-        while i < layer.len() {
-            if i + 1 < layer.len() {
-                next.push(node_hash(&layer[i], &layer[i + 1]));
-            } else {
-                next.push(layer[i]);
-            }
-            i += 2;
-        }
-        layer = next;
-        idx /= 2;
-    }
-    Ok(proof)
+    Ok(inclusion_proof_ct_inner(&leaves[..tree_size], leaf_index))
 }
 
 pub fn verify_inclusion_proof(
@@ -95,23 +96,45 @@ pub fn verify_inclusion_proof(
     tree_size: usize,
     root: &Hash32,
 ) -> bool {
+    verify_inclusion_proof_ct(leaf, leaf_index, tree_size, proof, root)
+}
+
+pub fn verify_inclusion_proof_ct(
+    leaf_hash: &Hash32,
+    leaf_index: usize,
+    tree_size: usize,
+    audit_path: &[Hash32],
+    root: &Hash32,
+) -> bool {
     if tree_size == 0 || leaf_index >= tree_size {
         return false;
     }
-    if tree_size == 1 {
-        return proof.is_empty() && leaf == root;
+
+    let mut fn_idx = leaf_index;
+    let mut sn_idx = tree_size - 1;
+    let mut path_pos = 0usize;
+    let mut hash = *leaf_hash;
+
+    while sn_idx > 0 {
+        if fn_idx % 2 == 1 {
+            let Some(sibling) = audit_path.get(path_pos) else {
+                return false;
+            };
+            hash = node_hash(sibling, &hash);
+            path_pos += 1;
+        } else if fn_idx < sn_idx {
+            let Some(sibling) = audit_path.get(path_pos) else {
+                return false;
+            };
+            hash = node_hash(&hash, sibling);
+            path_pos += 1;
+        }
+
+        fn_idx /= 2;
+        sn_idx /= 2;
     }
-    let mut idx = leaf_index;
-    let mut cur = *leaf;
-    for sib in proof {
-        cur = if idx.is_multiple_of(2) {
-            node_hash(&cur, sib)
-        } else {
-            node_hash(sib, &cur)
-        };
-        idx /= 2;
-    }
-    &cur == root
+
+    path_pos == audit_path.len() && &hash == root
 }
 
 pub fn consistency_proof(
@@ -119,16 +142,54 @@ pub fn consistency_proof(
     old_size: usize,
     new_size: usize,
 ) -> EvidenceOSResult<Vec<Hash32>> {
-    if old_size >= new_size || new_size > leaves.len() {
+    consistency_proof_ct(leaves, old_size, new_size)
+}
+
+fn consistency_proof_ct_inner(
+    leaves: &[Hash32],
+    old_size: usize,
+    include_self: bool,
+) -> Vec<Hash32> {
+    let n = leaves.len();
+    if old_size == n {
+        if include_self {
+            Vec::new()
+        } else {
+            vec![merkle_root_ct(leaves)]
+        }
+    } else {
+        let k = largest_power_of_two_less_than(n);
+        if old_size <= k {
+            let mut proof = consistency_proof_ct_inner(&leaves[..k], old_size, include_self);
+            proof.push(merkle_root_ct(&leaves[k..]));
+            proof
+        } else {
+            let mut proof = consistency_proof_ct_inner(&leaves[k..], old_size - k, false);
+            proof.push(merkle_root_ct(&leaves[..k]));
+            proof
+        }
+    }
+}
+
+pub fn consistency_proof_ct(
+    leaves: &[Hash32],
+    old_size: usize,
+    new_size: usize,
+) -> EvidenceOSResult<Vec<Hash32>> {
+    if old_size > new_size || new_size > leaves.len() {
         return Err(EvidenceOSError::InvalidArgument);
     }
     if old_size == 0 {
         return Ok(Vec::new());
     }
-    Ok(vec![
-        merkle_root_prefix(leaves, old_size),
-        merkle_root_prefix(leaves, new_size),
-    ])
+    if old_size == new_size {
+        return Ok(Vec::new());
+    }
+    Ok(consistency_proof_ct_inner(
+        &leaves[..new_size],
+        old_size,
+        true,
+    ))
 }
 
 pub fn verify_consistency_proof(
@@ -138,13 +199,70 @@ pub fn verify_consistency_proof(
     new_size: usize,
     proof: &[Hash32],
 ) -> bool {
-    if old_size >= new_size {
+    verify_consistency_proof_ct(old_root, new_root, old_size, new_size, proof)
+}
+
+pub fn verify_consistency_proof_ct(
+    old_root: &Hash32,
+    new_root: &Hash32,
+    old_size: usize,
+    new_size: usize,
+    path: &[Hash32],
+) -> bool {
+    if old_size > new_size {
         return false;
     }
-    if proof.len() != 2 {
-        return false;
+    if old_size == 0 {
+        return path.is_empty() && *old_root == sha256(b"");
     }
-    &proof[0] == old_root && &proof[1] == new_root
+    if old_size == new_size {
+        return path.is_empty() && old_root == new_root;
+    }
+
+    let mut fn_idx = old_size - 1;
+    let mut sn_idx = new_size - 1;
+    while fn_idx & 1 == 1 {
+        fn_idx >>= 1;
+        sn_idx >>= 1;
+    }
+
+    let mut it = path.iter();
+    let mut fr;
+    let mut sr;
+    if fn_idx == 0 {
+        fr = *old_root;
+        sr = *old_root;
+    } else {
+        let Some(first) = it.next() else {
+            return false;
+        };
+        fr = *first;
+        sr = *first;
+    }
+
+    while fn_idx > 0 {
+        let Some(p) = it.next() else {
+            return false;
+        };
+        if fn_idx & 1 == 1 {
+            fr = node_hash(p, &fr);
+            sr = node_hash(p, &sr);
+        } else if fn_idx < sn_idx {
+            sr = node_hash(&sr, p);
+        }
+        fn_idx >>= 1;
+        sn_idx >>= 1;
+    }
+
+    while sn_idx > 0 {
+        let Some(p) = it.next() else {
+            return false;
+        };
+        sr = node_hash(&sr, p);
+        sn_idx >>= 1;
+    }
+
+    it.next().is_none() && &fr == old_root && &sr == new_root
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +293,7 @@ impl Etl {
         let mut leaves = Vec::new();
         let mut offsets = Vec::new();
         let mut pos = 0u64;
+        let mut revoked = HashSet::new();
         let mut reader = BufReader::new(
             OpenOptions::new()
                 .read(true)
@@ -198,6 +317,11 @@ impl Etl {
                 .read_exact(&mut data)
                 .map_err(|_| EvidenceOSError::Internal)?;
             leaves.push(leaf_hash(&data));
+            if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(&data) {
+                if !revocation.claim_hash_hex.is_empty() {
+                    revoked.insert(revocation.claim_hash_hex);
+                }
+            }
             pos = pos.saturating_add(4 + len as u64);
         }
         Ok(Self {
@@ -205,7 +329,7 @@ impl Etl {
             file,
             leaves,
             offsets,
-            revoked: HashSet::new(),
+            revoked,
         })
     }
 
@@ -304,7 +428,19 @@ impl Etl {
         &self.path
     }
     pub fn inclusion_proof(&self, leaf_index: u64) -> EvidenceOSResult<Vec<Hash32>> {
-        inclusion_proof(&self.leaves, leaf_index as usize)
+        inclusion_proof_ct(&self.leaves, leaf_index as usize, self.leaves.len())
+    }
+
+    pub fn inclusion_proof_at_size(
+        &self,
+        leaf_index: u64,
+        tree_size: u64,
+    ) -> EvidenceOSResult<Vec<Hash32>> {
+        inclusion_proof_ct(&self.leaves, leaf_index as usize, tree_size as usize)
+    }
+
+    pub fn consistency_proof(&self, old_size: u64, new_size: u64) -> EvidenceOSResult<Vec<Hash32>> {
+        consistency_proof_ct(&self.leaves, old_size as usize, new_size as usize)
     }
 
     pub fn leaf_hash_at(&self, leaf_index: u64) -> EvidenceOSResult<Hash32> {
@@ -340,36 +476,197 @@ impl Etl {
 mod tests {
     use super::*;
 
-    #[test]
-    fn verify_inclusion_proof_two_leaves_left() {
-        let leaves = vec![leaf_hash(b"a"), leaf_hash(b"b")];
-        let proof = inclusion_proof(&leaves, 0).expect("proof");
-        assert!(verify_inclusion_proof(
-            &proof,
-            &leaves[0],
-            0,
-            2,
-            &merkle_root(&leaves)
-        ));
+    fn test_leaves(n: usize) -> Vec<Hash32> {
+        (0..n)
+            .map(|i| leaf_hash(format!("leaf-{i}").as_bytes()))
+            .collect()
     }
 
-    #[test]
-    fn revocation_marks_hash() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("etl.log");
-        let mut etl = Etl::open_or_create(&path).expect("etl");
-        etl.revoke("abc123", "bad").expect("revoke");
-        assert!(etl.is_revoked("abc123"));
-    }
-
-    #[test]
-    fn etl_offset_seek_correctness() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("etl.log");
-        let mut etl = Etl::open_or_create(&path).expect("etl");
-        for i in 0..100u64 {
-            etl.append(format!("entry-{i}").as_bytes()).expect("append");
+    fn mth_ref(leaves: &[Hash32]) -> Hash32 {
+        match leaves.len() {
+            0 => sha256(b""),
+            1 => leaves[0],
+            n => {
+                let k = 1usize << (usize::BITS - 1 - (n - 1).leading_zeros());
+                let left = mth_ref(&leaves[..k]);
+                let right = mth_ref(&leaves[k..]);
+                node_hash(&left, &right)
+            }
         }
-        assert_eq!(etl.read_entry(50).expect("read"), b"entry-50");
+    }
+
+    fn verify_inclusion_ref(
+        leaf_hash: &Hash32,
+        leaf_index: usize,
+        tree_size: usize,
+        audit_path: &[Hash32],
+        root: &Hash32,
+    ) -> bool {
+        if tree_size == 0 || leaf_index >= tree_size {
+            return false;
+        }
+        let mut fn_idx = leaf_index;
+        let mut sn_idx = tree_size - 1;
+        let mut hash = *leaf_hash;
+        let mut used = 0usize;
+        while sn_idx > 0 {
+            if fn_idx % 2 == 1 {
+                let Some(s) = audit_path.get(used) else {
+                    return false;
+                };
+                hash = node_hash(s, &hash);
+                used += 1;
+            } else if fn_idx < sn_idx {
+                let Some(s) = audit_path.get(used) else {
+                    return false;
+                };
+                hash = node_hash(&hash, s);
+                used += 1;
+            }
+            fn_idx /= 2;
+            sn_idx /= 2;
+        }
+        used == audit_path.len() && &hash == root
+    }
+
+    #[test]
+    fn fixed_vectors_for_three_leaves() {
+        let a = leaf_hash(b"a");
+        let b = leaf_hash(b"b");
+        let c = leaf_hash(b"c");
+        assert_eq!(
+            hex::encode(a),
+            "022a6979e6dab7aa5ae4c3e5e45f7e977112a7e63593820dbec1ec738a24f93c"
+        );
+        assert_eq!(
+            hex::encode(b),
+            "57eb35615d47f34ec714cacdf5fd74608a5e8e102724e80b24b287c0c27b6a31"
+        );
+        assert_eq!(
+            hex::encode(c),
+            "597fcb31282d34654c200d3418fca5705c648ebf326ec73d8ddef11841f876d8"
+        );
+        let leaves = vec![a, b, c];
+        let root = merkle_root_ct(&leaves);
+        assert_eq!(
+            hex::encode(root),
+            "36642e73c2540ab121e3a6bf9545b0a24982cd830eb13d3cd19de3ce6c021ec1"
+        );
+
+        let proof = inclusion_proof_ct(&leaves, 1, 3).expect("proof");
+        assert_eq!(proof.len(), 2);
+        assert_eq!(
+            hex::encode(proof[0]),
+            "022a6979e6dab7aa5ae4c3e5e45f7e977112a7e63593820dbec1ec738a24f93c"
+        );
+        assert_eq!(
+            hex::encode(proof[1]),
+            "597fcb31282d34654c200d3418fca5705c648ebf326ec73d8ddef11841f876d8"
+        );
+        assert!(verify_inclusion_proof_ct(&leaves[1], 1, 3, &proof, &root));
+    }
+
+    #[test]
+    fn ct_merkle_root_matches_reference_for_full_range() {
+        for n in 0..=64 {
+            let leaves = test_leaves(n);
+            assert_eq!(merkle_root_ct(&leaves), mth_ref(&leaves), "n={n}");
+        }
+    }
+
+    #[test]
+    fn inclusion_proof_full_space_and_tamper_resistance() {
+        for n in 1..=64 {
+            let leaves = test_leaves(n);
+            let root = merkle_root_ct(&leaves);
+            for i in 0..n {
+                let proof = inclusion_proof_ct(&leaves, i, n).expect("proof");
+                assert!(verify_inclusion_proof_ct(&leaves[i], i, n, &proof, &root));
+                assert!(verify_inclusion_ref(&leaves[i], i, n, &proof, &root));
+
+                let mut bad_leaf = leaves[i];
+                bad_leaf[0] ^= 0x01;
+                assert!(!verify_inclusion_proof_ct(&bad_leaf, i, n, &proof, &root));
+
+                if !proof.is_empty() {
+                    let mut bad_proof = proof.clone();
+                    bad_proof[0][0] ^= 0x01;
+                    assert!(!verify_inclusion_proof_ct(
+                        &leaves[i], i, n, &bad_proof, &root
+                    ));
+                }
+
+                let wrong_index = (i + 1) % n;
+                assert!(!verify_inclusion_proof_ct(
+                    &leaves[i],
+                    wrong_index,
+                    n,
+                    &proof,
+                    &root
+                ));
+
+                let wrong_tree_size = if n > 1 { n - 1 } else { n + 1 };
+                assert!(!verify_inclusion_proof_ct(
+                    &leaves[i],
+                    i,
+                    wrong_tree_size,
+                    &proof,
+                    &root
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn consistency_proof_full_space_and_tamper_resistance() {
+        for new_size in 0..=64 {
+            let leaves = test_leaves(new_size);
+            let new_root = mth_ref(&leaves);
+            for old_size in 0..=new_size {
+                let proof = consistency_proof_ct(&leaves, old_size, new_size).expect("proof");
+                let old_root = mth_ref(&leaves[..old_size]);
+                assert!(verify_consistency_proof_ct(
+                    &old_root, &new_root, old_size, new_size, &proof
+                ));
+
+                if !proof.is_empty() {
+                    let mut bad = proof.clone();
+                    bad[0][0] ^= 0x01;
+                    assert!(!verify_consistency_proof_ct(
+                        &old_root, &new_root, old_size, new_size, &bad
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn etl_persistence_restores_entries_root_and_revocations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl.log");
+        let entries: Vec<Vec<u8>> = (0..20).map(|i| format!("entry-{i}").into_bytes()).collect();
+        let revoked = ["abc123", "deadbeef", "42"];
+
+        let root_before;
+        {
+            let mut etl = Etl::open_or_create(&path).expect("etl");
+            for entry in &entries {
+                etl.append(entry).expect("append");
+            }
+            for id in revoked {
+                etl.revoke(id, "reason").expect("revoke");
+                assert!(etl.is_revoked(id));
+            }
+            root_before = etl.root_hash();
+        }
+
+        let etl = Etl::open_or_create(&path).expect("reopen");
+        assert_eq!(etl.root_hash(), root_before);
+        for (idx, expected) in entries.iter().enumerate() {
+            assert_eq!(etl.read_entry(idx as u64).expect("read"), *expected);
+        }
+        for id in revoked {
+            assert!(etl.is_revoked(id));
+        }
     }
 }
