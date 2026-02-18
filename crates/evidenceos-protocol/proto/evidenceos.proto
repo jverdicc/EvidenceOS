@@ -8,10 +8,12 @@ package evidenceos.v1;
 service EvidenceOS {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc CreateClaim(CreateClaimRequest) returns (CreateClaimResponse);
+  rpc CreateClaimV2(CreateClaimV2Request) returns (CreateClaimV2Response);
   rpc CommitArtifacts(CommitArtifactsRequest) returns (CommitArtifactsResponse);
   rpc FreezeGates(FreezeGatesRequest) returns (FreezeGatesResponse);
   rpc SealClaim(SealClaimRequest) returns (SealClaimResponse);
   rpc ExecuteClaim(ExecuteClaimRequest) returns (ExecuteClaimResponse);
+  rpc ExecuteClaimV2(ExecuteClaimV2Request) returns (ExecuteClaimV2Response);
   // v1 legacy endpoints preserved for backward compatibility.
   rpc GetCapsule(GetCapsuleRequest) returns (GetCapsuleResponse);
   rpc GetSignedTreeHead(GetSignedTreeHeadRequest) returns (GetSignedTreeHeadResponse);
@@ -65,6 +67,35 @@ message CreateClaimResponse {
   ClaimState state = 2;
 }
 
+message ClaimMetadataV2 {
+  string lane = 1;
+  uint32 alpha_micros = 2;
+  string epoch_config_ref = 3;
+  string output_schema_id = 4;
+}
+
+message TopicSignalsV2 {
+  bytes semantic_hash = 1;
+  bytes phys_hir_signature_hash = 2;
+  bytes dependency_merkle_root = 3;
+}
+
+message CreateClaimV2Request {
+  string claim_name = 1;
+  ClaimMetadataV2 metadata = 2;
+  TopicSignalsV2 signals = 3;
+  string holdout_ref = 4;
+  uint64 epoch_size = 5;
+  uint32 oracle_num_symbols = 6;
+  uint64 access_credit = 7;
+}
+
+message CreateClaimV2Response {
+  bytes claim_id = 1;
+  bytes topic_id = 2;
+  ClaimState state = 3;
+}
+
 message Artifact {
   bytes artifact_hash = 1;
   string kind = 2;
@@ -107,6 +138,21 @@ message ExecuteClaimResponse {
   ClaimState state = 1;
   bytes capsule_hash = 2;
   uint64 etl_index = 3;
+}
+
+message ExecuteClaimV2Request {
+  bytes claim_id = 1;
+}
+
+message ExecuteClaimV2Response {
+  ClaimState state = 1;
+  Decision decision = 2;
+  repeated uint32 reason_codes = 3;
+  bytes canonical_output = 4;
+  double e_value = 5;
+  bool certified = 6;
+  bytes capsule_hash = 7;
+  uint64 etl_index = 8;
 }
 
 message GetCapsuleRequest {

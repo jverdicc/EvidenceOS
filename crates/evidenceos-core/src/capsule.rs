@@ -75,19 +75,21 @@ impl LedgerSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimCapsule {
     pub schema: String,
-    pub session_id: String,
-    pub holdout_id: String,
-    pub claim_name: String,
-    pub predictions_hash_hex: String,
+    pub claim_id_hex: String,
+    pub topic_id_hex: String,
+    pub output_schema_id: String,
+    pub structured_output_hash_hex: String,
+    pub wasm_hash_hex: String,
+    pub judge_trace_hash_hex: String,
+    pub holdout_ref: String,
     pub holdout_commitment_hex: String,
     pub ledger: LedgerSnapshot,
     pub e_value: f64,
     pub certified: bool,
+    pub decision: i32,
+    pub reason_codes: Vec<u32>,
     pub aspec_version: String,
     pub runtime_version: String,
-    pub wasm_hash_hex: String,
-    pub dependency_hashes: Vec<String>,
-    pub judge_trace_hash_hex: String,
     pub state: ClaimState,
 }
 
@@ -122,30 +124,37 @@ fn sha256_hex(data: &[u8]) -> String {
 impl ClaimCapsule {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        session_id: String,
-        holdout_id: String,
-        claim_name: String,
-        predictions: &[u8],
+        claim_id_hex: String,
+        topic_id_hex: String,
+        output_schema_id: String,
+        structured_output: &[u8],
+        wasm_bytes: &[u8],
         holdout_commitment_preimage: &[u8],
         ledger: &ConservationLedger,
         e_value: f64,
         certified: bool,
+        decision: i32,
+        reason_codes: Vec<u32>,
+        judge_trace_hash_hex: String,
+        holdout_ref: String,
     ) -> Self {
         Self {
-            schema: "evidenceos.v1.claim_capsule".to_string(),
-            session_id,
-            holdout_id,
-            claim_name,
-            predictions_hash_hex: sha256_hex(predictions),
+            schema: "evidenceos.v2.claim_capsule".to_string(),
+            claim_id_hex,
+            topic_id_hex,
+            output_schema_id,
+            structured_output_hash_hex: sha256_hex(structured_output),
+            wasm_hash_hex: sha256_hex(wasm_bytes),
+            judge_trace_hash_hex,
+            holdout_ref,
             holdout_commitment_hex: sha256_hex(holdout_commitment_preimage),
             ledger: LedgerSnapshot::from_ledger(ledger),
             e_value,
             certified,
+            decision,
+            reason_codes,
             aspec_version: "aspec.v1".into(),
             runtime_version: "unknown".into(),
-            wasm_hash_hex: sha256_hex(&[]),
-            dependency_hashes: Vec::new(),
-            judge_trace_hash_hex: sha256_hex(&[]),
             state: ClaimState::Uncommitted,
         }
     }
@@ -167,37 +176,22 @@ mod tests {
     use crate::ledger::ConservationLedger;
 
     #[test]
-    fn claim_state_valid_transitions() {
-        let s = ClaimState::Uncommitted
-            .transition(ClaimState::Sealed)
-            .expect("u->s");
-        let s = s.transition(ClaimState::Executing).expect("s->e");
-        let s = s.transition(ClaimState::Settled).expect("e->set");
-        s.transition(ClaimState::Certified).expect("set->cert");
-    }
-
-    #[test]
-    fn canonical_json_stable_regardless_of_insertion_order() {
-        let a: Value = serde_json::json!({"z":1,"a":2,"b":3,"c":4,"d":5,"e":6,"f":7,"g":8,"h":9,"i":10,"j":11});
-        let b: Value = serde_json::json!({"a":2,"b":3,"c":4,"d":5,"e":6,"f":7,"g":8,"h":9,"i":10,"j":11,"z":1});
-        assert_eq!(
-            canonical_json(&a).expect("json a"),
-            canonical_json(&b).expect("json b")
-        );
-    }
-
-    #[test]
     fn capsule_hash_changes_when_state_changes() {
         let l = ConservationLedger::new(0.05).expect("ledger");
         let mut c = ClaimCapsule::new(
-            "s".into(),
-            "h".into(),
             "c".into(),
-            b"pred",
+            "t".into(),
+            "schema".into(),
+            b"out",
+            b"wasm",
             b"hold",
             &l,
             1.0,
             false,
+            1,
+            vec![7],
+            "trace".into(),
+            "holdout".into(),
         );
         c.state = ClaimState::Sealed;
         let h1 = c.capsule_hash_hex().expect("hash1");

@@ -23,5 +23,6 @@ pub mod error;
 pub mod etl;
 pub mod ledger;
 pub mod oracle;
+pub mod topicid;
 
 pub use crate::error::{EvidenceOSError, EvidenceOSResult};
