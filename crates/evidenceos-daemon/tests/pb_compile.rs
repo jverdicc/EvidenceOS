@@ -25,6 +25,13 @@ fn protocol_crate_exports_client_and_server_stubs() {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
+        async fn create_claim_v2(
+            &self,
+            _request: tonic::Request<pb::CreateClaimV2Request>,
+        ) -> Result<tonic::Response<pb::CreateClaimV2Response>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
         async fn commit_artifacts(
             &self,
             _request: tonic::Request<pb::CommitArtifactsRequest>,
@@ -53,10 +60,24 @@ fn protocol_crate_exports_client_and_server_stubs() {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
+        async fn execute_claim_v2(
+            &self,
+            _request: tonic::Request<pb::ExecuteClaimV2Request>,
+        ) -> Result<tonic::Response<pb::ExecuteClaimV2Response>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
         async fn get_capsule(
             &self,
             _request: tonic::Request<pb::GetCapsuleRequest>,
         ) -> Result<tonic::Response<pb::GetCapsuleResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
+        async fn get_public_key(
+            &self,
+            _request: tonic::Request<pb::GetPublicKeyRequest>,
+        ) -> Result<tonic::Response<pb::GetPublicKeyResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
@@ -111,7 +132,6 @@ fn protocol_crate_exports_client_and_server_stubs() {
     }
 
     assert_service_trait::<Dummy>();
-    let _ = pb::evidence_os_client::EvidenceOsClient::new(tonic::transport::Channel::from_static(
-        "http://127.0.0.1:50051",
-    ));
+    let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+    let _ = pb::evidence_os_client::EvidenceOsClient::new(channel);
 }

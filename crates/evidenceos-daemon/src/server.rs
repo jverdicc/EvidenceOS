@@ -34,6 +34,10 @@ use pb::evidence_os_server::EvidenceOs;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
+const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
+const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
+const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
+const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Lane {
@@ -143,7 +147,7 @@ pub struct EvidenceOsService {
 }
 
 impl EvidenceOsService {
-    pub(crate) fn build(data_dir: &str) -> Result<Self, Status> {
+    pub fn build(data_dir: &str) -> Result<Self, Status> {
         let root = PathBuf::from(data_dir);
         std::fs::create_dir_all(&root).map_err(|_| Status::internal("mkdir failed"))?;
 
@@ -321,6 +325,41 @@ fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     hash
 }
 
+fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn append_len_prefixed_str(out: &mut Vec<u8>, value: &str) {
+    append_len_prefixed_bytes(out, value.as_bytes());
+}
+
+fn sth_signature_payload(tree_size: u64, root_hash: &[u8; 32]) -> [u8; 32] {
+    let mut payload = Vec::with_capacity(40);
+    payload.extend_from_slice(&tree_size.to_be_bytes());
+    payload.extend_from_slice(root_hash);
+    sha256_domain(DOMAIN_STH_V1, &payload)
+}
+
+fn revocations_signature_payload(entries: &[pb::RevocationEntry]) -> [u8; 32] {
+    let mut payload = Vec::new();
+    for entry in entries {
+        append_len_prefixed_bytes(&mut payload, &entry.claim_id);
+        payload.extend_from_slice(&entry.timestamp_unix.to_be_bytes());
+        append_len_prefixed_str(&mut payload, &entry.reason);
+    }
+    sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
+}
+
+fn key_id_from_verifying_key(verifying_key: &VerifyingKey) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(verifying_key.to_bytes());
+    let out = h.finalize();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&out);
+    hash
+}
+
 fn sign_payload(signing_key: &SigningKey, payload: &[u8]) -> [u8; 64] {
     let sig: Signature = signing_key.sign(payload);
     sig.to_bytes()
@@ -329,14 +368,34 @@ fn sign_payload(signing_key: &SigningKey, payload: &[u8]) -> [u8; 64] {
 fn build_signed_tree_head(etl: &Etl, signing_key: &SigningKey) -> pb::SignedTreeHead {
     let tree_size = etl.tree_size();
     let root_hash = etl.root_hash();
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&tree_size.to_be_bytes());
-    payload.extend_from_slice(&root_hash);
+    let payload = sth_signature_payload(tree_size, &root_hash);
     let signature = sign_payload(signing_key, &payload);
     pb::SignedTreeHead {
         tree_size,
         root_hash: root_hash.to_vec(),
         signature: signature.to_vec(),
+    }
+}
+
+fn build_revocations_snapshot(
+    signing_key: &SigningKey,
+    revocations: Vec<([u8; 32], u64, String)>,
+    signed_tree_head: pb::SignedTreeHead,
+) -> pb::WatchRevocationsResponse {
+    let entries: Vec<pb::RevocationEntry> = revocations
+        .into_iter()
+        .map(|(claim_id, timestamp_unix, reason)| pb::RevocationEntry {
+            claim_id: claim_id.to_vec(),
+            timestamp_unix,
+            reason,
+        })
+        .collect();
+    let payload = revocations_signature_payload(&entries);
+    let signature = sign_payload(signing_key, &payload);
+    pb::WatchRevocationsResponse {
+        entries,
+        signature: signature.to_vec(),
+        signed_tree_head: Some(signed_tree_head),
     }
 }
 
@@ -1039,12 +1098,23 @@ impl EvidenceOs for EvidenceOsService {
         }))
     }
 
+    async fn get_public_key(
+        &self,
+        _request: Request<pb::GetPublicKeyRequest>,
+    ) -> Result<Response<pb::GetPublicKeyResponse>, Status> {
+        let verifying_key = self.etl_verifying_key_bytes();
+        let key_id = key_id_from_verifying_key(&self.state.verifying_key);
+        Ok(Response::new(pb::GetPublicKeyResponse {
+            ed25519_public_key: verifying_key.to_vec(),
+            key_id: key_id.to_vec(),
+        }))
+    }
+
     async fn get_signed_tree_head(
         &self,
         _request: Request<pb::GetSignedTreeHeadRequest>,
     ) -> Result<Response<pb::GetSignedTreeHeadResponse>, Status> {
         let etl = self.state.etl.lock();
-        let _vk = self.etl_verifying_key_bytes();
         let sth = build_signed_tree_head(&etl, &self.state.signing_key);
         Ok(Response::new(pb::GetSignedTreeHeadResponse {
             tree_size: sth.tree_size,
@@ -1116,10 +1186,9 @@ impl EvidenceOs for EvidenceOsService {
             .await?;
         let mut stream = response.into_inner();
         let item = stream
-            .message()
+            .next()
             .await
-            .map_err(|_| Status::internal("revocation stream failure"))?
-            .ok_or_else(|| Status::not_found("no revocations"))?;
+            .ok_or_else(|| Status::not_found("no revocations"))??;
         Ok(Response::new(pb::GetRevocationFeedResponse {
             entries: item.entries,
             signature: item.signature,
@@ -1218,21 +1287,12 @@ impl EvidenceOs for EvidenceOsService {
         persist_all(&self.state)?;
 
         let message = {
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&claim_id);
-            payload.extend_from_slice(&timestamp_unix.to_be_bytes());
-            payload.extend_from_slice(req.reason.as_bytes());
-            let signature = sign_payload(&self.state.signing_key, &payload);
             let etl = self.state.etl.lock();
-            pb::WatchRevocationsResponse {
-                entries: vec![pb::RevocationEntry {
-                    claim_id: claim_id.to_vec(),
-                    timestamp_unix,
-                    reason: req.reason,
-                }],
-                signature: signature.to_vec(),
-                signed_tree_head: Some(build_signed_tree_head(&etl, &self.state.signing_key)),
-            }
+            build_revocations_snapshot(
+                &self.state.signing_key,
+                vec![(claim_id, timestamp_unix, req.reason)],
+                build_signed_tree_head(&etl, &self.state.signing_key),
+            )
         };
 
         let subscribers = self.state.revocation_subscribers.lock().clone();
@@ -1254,25 +1314,12 @@ impl EvidenceOs for EvidenceOsService {
         self.state.revocation_subscribers.lock().push(tx.clone());
 
         let entries_raw = self.state.revocations.lock().clone();
-        let mut payload = Vec::new();
-        let mut entries = Vec::new();
-        for (claim_id, timestamp_unix, reason) in entries_raw {
-            payload.extend_from_slice(&claim_id);
-            payload.extend_from_slice(&timestamp_unix.to_be_bytes());
-            payload.extend_from_slice(reason.as_bytes());
-            entries.push(pb::RevocationEntry {
-                claim_id: claim_id.to_vec(),
-                timestamp_unix,
-                reason,
-            });
-        }
-        let signature = sign_payload(&self.state.signing_key, &payload);
         let etl = self.state.etl.lock();
-        let snapshot = pb::WatchRevocationsResponse {
-            entries,
-            signature: signature.to_vec(),
-            signed_tree_head: Some(build_signed_tree_head(&etl, &self.state.signing_key)),
-        };
+        let snapshot = build_revocations_snapshot(
+            &self.state.signing_key,
+            entries_raw,
+            build_signed_tree_head(&etl, &self.state.signing_key),
+        );
         let _ = tx.try_send(snapshot);
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx).map(Ok))))
@@ -1284,6 +1331,7 @@ use tokio_stream::StreamExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signature, Verifier};
 
     #[test]
     fn canonical_encoding_rejects_invalid_without_charge() {
@@ -1294,5 +1342,59 @@ mod tests {
             .charge(1.0, "structured_output", json!({}))
             .expect("charge should pass");
         assert_eq!(ledger.k_bits_total, 1.0);
+    }
+
+    #[test]
+    fn signed_tree_head_signature_verifies_and_tamper_fails() {
+        let secret = [7u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let root_hash = [11u8; 32];
+        let digest = sth_signature_payload(42, &root_hash);
+        let sig = Signature::from_bytes(&sign_payload(&signing_key, &digest));
+        signing_key
+            .verifying_key()
+            .verify(&digest, &sig)
+            .expect("verify should pass");
+
+        let mut tampered = digest;
+        tampered[0] ^= 0x01;
+        assert!(signing_key.verifying_key().verify(&tampered, &sig).is_err());
+    }
+
+    #[test]
+    fn revocation_payload_is_unambiguous_for_multiple_entries() {
+        let entries_ab = vec![
+            pb::RevocationEntry {
+                claim_id: vec![1],
+                timestamp_unix: 2,
+                reason: "34".to_string(),
+            },
+            pb::RevocationEntry {
+                claim_id: vec![5],
+                timestamp_unix: 6,
+                reason: "7".to_string(),
+            },
+        ];
+        let entries_a_b = vec![pb::RevocationEntry {
+            claim_id: vec![1],
+            timestamp_unix: 2,
+            reason: "345".to_string(),
+        }];
+
+        let digest_ab = revocations_signature_payload(&entries_ab);
+        let digest_a_b = revocations_signature_payload(&entries_a_b);
+        assert_ne!(digest_ab, digest_a_b);
+
+        let secret = [9u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let sig = Signature::from_bytes(&sign_payload(&signing_key, &digest_ab));
+        signing_key
+            .verifying_key()
+            .verify(&digest_ab, &sig)
+            .expect("verify should pass");
+
+        let mut tampered = digest_ab;
+        tampered[31] ^= 0x80;
+        assert!(signing_key.verifying_key().verify(&tampered, &sig).is_err());
     }
 }
