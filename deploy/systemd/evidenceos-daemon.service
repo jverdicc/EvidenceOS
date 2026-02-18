@@ -10,7 +10,7 @@ Type=simple
 User=evidenceos
 Group=evidenceos
 WorkingDirectory=/var/lib/evidenceos
-ExecStart=/usr/local/bin/evidenceos-daemon --listen 0.0.0.0:50051 --etl-path /var/lib/evidenceos/etl.log
+ExecStart=/usr/local/bin/evidenceos-daemon --listen 0.0.0.0:50051 --data-dir /var/lib/evidenceos
 Restart=on-failure
 RestartSec=2
 

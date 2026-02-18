@@ -24,4 +24,4 @@ EXPOSE 50051
 VOLUME ["/data"]
 
 ENTRYPOINT ["/usr/local/bin/evidenceos-daemon"]
-CMD ["--listen", "0.0.0.0:50051", "--etl-path", "/data/etl.log"]
+CMD ["--listen", "0.0.0.0:50051", "--data-dir", "/data"]

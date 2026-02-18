@@ -20,13 +20,27 @@ struct Args {
     #[arg(long, default_value = "./data")]
     data_dir: String,
 
+    /// Deprecated: path to ETL log file. Use --data-dir instead.
+    #[arg(long, hide = true)]
+    etl_path: Option<String>,
+
     #[arg(long, default_value = "info")]
     log: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if let Some(etl_path) = args.etl_path.take() {
+        let etl_path = std::path::PathBuf::from(etl_path);
+        let data_dir = etl_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        args.data_dir = data_dir.to_string_lossy().into_owned();
+        tracing::warn!("--etl-path is deprecated; use --data-dir (derived from etl path parent)");
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(args.log))

@@ -8,4 +8,4 @@ services:
       - "50051:50051"
     volumes:
       - ./data:/data
-    command: ["--listen", "0.0.0.0:50051", "--etl-path", "/data/etl.log"]
+    command: ["--listen", "0.0.0.0:50051", "--data-dir", "/data"]
