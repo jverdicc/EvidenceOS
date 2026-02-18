@@ -69,9 +69,9 @@ impl LedgerSnapshot {
             barrier: l.barrier(),
             wealth: l.wealth,
             w_max: l.w_max,
-            epsilon_total: 0.0,
-            delta_total: 0.0,
-            access_credit_spent: 0.0,
+            epsilon_total: l.epsilon_total,
+            delta_total: l.delta_total,
+            access_credit_spent: l.access_credit_spent,
         }
     }
 }
