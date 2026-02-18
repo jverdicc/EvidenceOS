@@ -7,6 +7,10 @@
 
 use core::fmt;
 
+pub mod pb {
+    tonic::include_proto!("evidenceos.v1");
+}
+
 pub type ClaimId = [u8; 32];
 pub type HoldoutHandle = [u8; 32];
 pub type TopicId = [u8; 32];
@@ -105,26 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn encoding_length_constant_for_all_symbols() {
-        let symbols = [DemoSymbol::A, DemoSymbol::B, DemoSymbol::C];
-        for sym in symbols {
-            let encoded = DemoSymbol::encode_symbol(sym);
-            assert_eq!(encoded.as_array().len(), 1);
+    fn canonical_codec_roundtrip() {
+        let syms = [DemoSymbol::A, DemoSymbol::B, DemoSymbol::C];
+        for s in syms {
+            let encoded = DemoSymbol::encode_symbol(s);
+            let decoded = DemoSymbol::decode_symbol(encoded).expect("decode should succeed");
+            assert_eq!(decoded, s);
         }
     }
 
     #[test]
-    fn decode_encode_round_trip() {
-        let symbols = [DemoSymbol::A, DemoSymbol::B, DemoSymbol::C];
-        for sym in symbols {
-            let encoded = DemoSymbol::encode_symbol(sym);
-            let decoded = DemoSymbol::decode_symbol(encoded).expect("decode must succeed");
-            assert_eq!(decoded, sym);
-        }
-    }
-
-    #[test]
-    fn malformed_or_ambiguous_rejected() {
+    fn canonical_codec_rejects_malformed() {
         let malformed = CanonicalBytes::<1>::new([255]);
         assert_eq!(
             DemoSymbol::decode_symbol(malformed),
