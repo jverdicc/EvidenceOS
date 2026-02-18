@@ -26,7 +26,7 @@ git commit -m "Initial EvidenceOS Rust kernel"
 
 ```bash
 cargo test --workspace
-cargo run -p evidenceos-daemon -- --listen 127.0.0.1:50051 --etl-path ./data/etl.log
+cargo run -p evidenceos-daemon -- --listen 127.0.0.1:50051 --data-dir ./data
 ```
 
 ## 4) Protobuf

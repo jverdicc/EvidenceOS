@@ -78,3 +78,5 @@ This repo uses a **vendored protoc** (`protoc-bin-vendored`) so contributors and
 ## Container / deployment
 
 A `Dockerfile`, `docker-compose.yml`, and a hardened `systemd` unit are provided under `deploy/systemd/`.
+
+All deployment entrypoints should pass `--data-dir` (not the removed `--etl-path`) so the daemon manages `etl.log` and state files under one directory.

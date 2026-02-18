@@ -24,3 +24,42 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --all-targets
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build container
+        run: docker build -t evidenceos:ci .
+
+      - name: Start daemon container
+        run: |
+          docker run -d --rm --name evidenceos-smoke -p 50051:50051 evidenceos:ci
+
+      - name: Wait for service port
+        run: |
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 50051; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "service did not start in time"
+          docker logs evidenceos-smoke || true
+          exit 1
+
+      - name: Check Health RPC returns SERVING
+        run: |
+          docker run --rm --network host fullstorydev/grpcurl:latest \
+            -plaintext -d '{}' 127.0.0.1:50051 evidenceos.v1.EvidenceOS/Health \
+            | tee /tmp/health.json
+          grep -q '"status": "SERVING"' /tmp/health.json
+
+      - name: Show daemon logs
+        if: always()
+        run: docker logs evidenceos-smoke || true
+
+      - name: Stop daemon container
+        if: always()
+        run: docker stop evidenceos-smoke || true
