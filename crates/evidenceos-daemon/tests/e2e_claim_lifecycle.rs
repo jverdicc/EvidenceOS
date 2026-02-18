@@ -6,7 +6,6 @@ use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
-use evidenceos_protocol::DOMAIN_CAPSULE_HASH;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -50,11 +49,6 @@ fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
         append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
     }
     sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(payload);
-    hasher.finalize().to_vec()
 }
 
 fn sha256(payload: &[u8]) -> Vec<u8> {
@@ -293,10 +287,7 @@ async fn e2e_claim_lifecycle_blackbox() {
         .await
         .expect("fetch capsule a")
         .into_inner();
-    assert_eq!(
-        capsule_a.capsule_hash,
-        sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
-    );
+    assert_eq!(capsule_a.capsule_hash, sha256(&capsule_a.capsule_bytes));
 
     let old_sth = capsule_a.signed_tree_head.clone().expect("sth a");
     let old_size = old_sth.tree_size;

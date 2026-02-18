@@ -22,20 +22,19 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
-use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState};
+use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::ConservationLedger;
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::{pb, DOMAIN_CAPSULE_HASH, DOMAIN_CLAIM_ID};
+use evidenceos_protocol::pb;
 
 use pb::evidence_os_server::EvidenceOs;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
-const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
 
@@ -103,6 +102,8 @@ struct Claim {
     oracle_num_symbols: u32,
     state: ClaimState,
     artifacts: Vec<([u8; 32], String)>,
+    #[serde(default)]
+    dependency_capsule_hashes: Vec<String>,
     wasm_module: Vec<u8>,
     aspec_rejection: Option<String>,
     lane: Lane,
@@ -237,9 +238,11 @@ impl EvidenceOsService {
     fn record_incident(&self, claim: &mut Claim, reason: &str) -> Result<(), Status> {
         claim.state = ClaimState::Frozen;
         claim.ledger.frozen = true;
-        let mut etl = self.state.etl.lock();
-        etl.revoke(&hex::encode(claim.claim_id), reason)
-            .map_err(|_| Status::internal("etl incident append failed"))?;
+        if let Some(capsule_hash) = claim.last_capsule_hash {
+            let mut etl = self.state.etl.lock();
+            etl.revoke(&hex::encode(capsule_hash), reason)
+                .map_err(|_| Status::internal("etl incident append failed"))?;
+        }
         Ok(())
     }
 }
@@ -267,6 +270,12 @@ fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
     let mut out = [0u8; 32];
     out.copy_from_slice(bytes);
     Ok(out)
+}
+
+fn decode_hex_hash32(value: &str, field: &str) -> Result<[u8; 32], Status> {
+    let bytes =
+        hex::decode(value).map_err(|_| Status::internal(format!("{field} is not valid hex")))?;
+    parse_hash32(&bytes, field)
 }
 
 const ETL_SIGNING_KEY_REL_PATH: &str = "keys/etl_signing_ed25519";
@@ -535,6 +544,7 @@ impl EvidenceOs for EvidenceOsService {
             oracle_num_symbols: req.oracle_num_symbols,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: Lane::Fast,
@@ -567,6 +577,15 @@ impl EvidenceOs for EvidenceOsService {
             return Err(Status::invalid_argument("wasm_module is required"));
         }
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let capsule_hash = {
+            let claims = self.state.claims.lock();
+            let claim = claims
+                .get(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            claim
+                .last_capsule_hash
+                .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?
+        };
         {
             let mut claims = self.state.claims.lock();
             let claim = claims
@@ -769,6 +788,15 @@ impl EvidenceOs for EvidenceOsService {
                 hex::encode(claim.claim_id),
                 hex::encode(claim.topic_id),
                 claim.output_schema_id.clone(),
+                claim
+                    .artifacts
+                    .iter()
+                    .map(|(hash, kind)| ManifestEntry {
+                        kind: kind.clone(),
+                        hash_hex: hex::encode(hash),
+                    })
+                    .collect(),
+                claim.dependency_capsule_hashes.clone(),
                 &canonical_output,
                 &claim.wasm_module,
                 &claim.holdout_handle_id,
@@ -777,11 +805,13 @@ impl EvidenceOs for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 req.decision,
                 req.reason_codes.clone(),
-                hex::encode(trace_hash),
+                &trace_hash,
                 claim.holdout_ref.clone(),
+                format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
+                "aspec.v1".to_string(),
+                "evidenceos.v1".to_string(),
+                fuel_used as f64,
             );
-            capsule.aspec_version = "aspec.v1".to_string();
-            capsule.runtime_version = format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION"));
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -790,7 +820,12 @@ impl EvidenceOs for EvidenceOsService {
             let capsule_bytes = capsule
                 .to_json_bytes()
                 .map_err(|_| Status::internal("capsule serialization failed"))?;
-            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let capsule_hash = decode_hex_hash32(
+                &capsule
+                    .capsule_hash_hex()
+                    .map_err(|_| Status::internal("capsule hashing failed"))?,
+                "capsule_hash",
+            )?;
             let etl_index = {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
@@ -835,7 +870,6 @@ impl EvidenceOs for EvidenceOsService {
             claim.last_capsule_hash = Some(capsule_hash);
             claim.capsule_bytes = Some(capsule_bytes);
             claim.etl_index = Some(etl_index);
-            let _ = fuel_used;
             (capsule_hash, etl_index, claim.state)
         };
 
@@ -939,6 +973,7 @@ impl EvidenceOs for EvidenceOsService {
             oracle_num_symbols: req.oracle_num_symbols,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: if topic.escalate_to_heavy {
@@ -985,7 +1020,7 @@ impl EvidenceOs for EvidenceOsService {
                 return Err(Status::failed_precondition("execution already settled"));
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
-            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(
+            let (canonical_output, fuel_used, trace_hash) = execute_wasm(
                 &claim.wasm_module,
                 claim.epoch_size,
                 execution_limits(claim, None)?,
@@ -1027,6 +1062,15 @@ impl EvidenceOs for EvidenceOsService {
                 hex::encode(claim.claim_id),
                 hex::encode(claim.topic_id),
                 claim.output_schema_id.clone(),
+                claim
+                    .artifacts
+                    .iter()
+                    .map(|(hash, kind)| ManifestEntry {
+                        kind: kind.clone(),
+                        hash_hex: hex::encode(hash),
+                    })
+                    .collect(),
+                claim.dependency_capsule_hashes.clone(),
                 &canonical_output,
                 &claim.wasm_module,
                 &claim.holdout_handle_id,
@@ -1035,8 +1079,12 @@ impl EvidenceOs for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 decision,
                 reason_codes.clone(),
-                hex::encode(trace_hash),
+                &trace_hash,
                 claim.holdout_ref.clone(),
+                format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
+                "aspec.v1".to_string(),
+                "evidenceos.v1".to_string(),
+                fuel_used as f64,
             );
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
@@ -1046,7 +1094,12 @@ impl EvidenceOs for EvidenceOsService {
             let capsule_bytes = capsule
                 .to_json_bytes()
                 .map_err(|_| Status::internal("capsule serialization failed"))?;
-            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let capsule_hash = decode_hex_hash32(
+                &capsule
+                    .capsule_hash_hex()
+                    .map_err(|_| Status::internal("capsule hashing failed"))?,
+                "capsule_hash",
+            )?;
             let etl_index = {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
@@ -1262,6 +1315,15 @@ impl EvidenceOs for EvidenceOsService {
             return Err(Status::invalid_argument("reason must be in [1,256]"));
         }
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let capsule_hash = {
+            let claims = self.state.claims.lock();
+            let claim = claims
+                .get(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            claim
+                .last_capsule_hash
+                .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?
+        };
         {
             let mut claims = self.state.claims.lock();
             let claim = claims
@@ -1276,21 +1338,33 @@ impl EvidenceOs for EvidenceOsService {
 
         {
             let mut etl = self.state.etl.lock();
-            etl.revoke(&hex::encode(claim_id), &req.reason)
+            etl.revoke(&hex::encode(capsule_hash), &req.reason)
                 .map_err(|_| Status::internal("etl revoke failed"))?;
+            let tainted = etl.taint_descendants(&hex::encode(capsule_hash));
+            if !tainted.is_empty() {
+                let mut claims = self.state.claims.lock();
+                for claim in claims.values_mut() {
+                    if let Some(hash) = claim.last_capsule_hash {
+                        let hash_hex = hex::encode(hash);
+                        if tainted.iter().any(|t| t == &hash_hex) {
+                            claim.state = ClaimState::Tainted;
+                        }
+                    }
+                }
+            }
         }
 
         self.state
             .revocations
             .lock()
-            .push((claim_id, timestamp_unix, req.reason.clone()));
+            .push((capsule_hash, timestamp_unix, req.reason.clone()));
         persist_all(&self.state)?;
 
         let message = {
             let etl = self.state.etl.lock();
             build_revocations_snapshot(
                 &self.state.signing_key,
-                vec![(claim_id, timestamp_unix, req.reason)],
+                vec![(capsule_hash, timestamp_unix, req.reason)],
                 build_signed_tree_head(&etl, &self.state.signing_key),
             )
         };
