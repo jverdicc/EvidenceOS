@@ -23,6 +23,9 @@ use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::ConservationLedger;
+use evidenceos_core::topicid::{
+    compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
+};
 use evidenceos_protocol::pb;
 
 use pb::evidence_os_server::EvidenceOs;
@@ -88,6 +91,9 @@ struct Claim {
     claim_id: [u8; 32],
     topic_id: [u8; 32],
     holdout_handle_id: [u8; 32],
+    holdout_ref: String,
+    claim_name: String,
+    output_schema_id: String,
     phys_hir_hash: [u8; 32],
     epoch_size: u64,
     oracle_num_symbols: u32,
@@ -133,6 +139,7 @@ impl Drop for KernelState {
 #[derive(Debug, Clone)]
 pub struct EvidenceOsService {
     state: Arc<KernelState>,
+    insecure_v1_enabled: bool,
 }
 
 impl EvidenceOsService {
@@ -180,7 +187,13 @@ impl EvidenceOsService {
             revocation_subscribers: Mutex::new(Vec::new()),
         });
         persist_all(&state)?;
-        Ok(Self { state })
+        let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        Ok(Self {
+            state,
+            insecure_v1_enabled,
+        })
     }
 
     fn etl_verifying_key_bytes(&self) -> [u8; 32] {
@@ -354,16 +367,16 @@ fn execute_wasm(wasm: &[u8], expected: &[u8]) -> Result<(Vec<u8>, u64, [u8; 32])
     if wasm.is_empty() {
         return Err(Status::failed_precondition("wasm module not committed"));
     }
-    if expected.is_empty() {
-        return Err(Status::invalid_argument(
-            "canonical_output must be provided",
-        ));
-    }
+    let emitted = if expected.is_empty() {
+        vec![1]
+    } else {
+        expected.to_vec()
+    };
     let mut trace_payload = Vec::new();
     trace_payload.extend_from_slice(wasm);
-    trace_payload.extend_from_slice(expected);
-    let trace_hash = sha256_domain(b"evidenceos:trace:v1", &trace_payload);
-    Ok((expected.to_vec(), wasm.len() as u64, trace_hash))
+    trace_payload.extend_from_slice(&emitted);
+    let trace_hash = sha256_domain(b"evidenceos:trace:v2", &trace_payload);
+    Ok((emitted, wasm.len() as u64, trace_hash))
 }
 
 #[tonic::async_trait]
@@ -413,6 +426,9 @@ impl EvidenceOs for EvidenceOsService {
             claim_id,
             topic_id,
             holdout_handle_id,
+            holdout_ref: hex::encode(holdout_handle_id),
+            claim_name: "legacy-v1".to_string(),
+            output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             epoch_size: req.epoch_size,
             oracle_num_symbols: req.oracle_num_symbols,
@@ -547,6 +563,11 @@ impl EvidenceOs for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimRequest>,
     ) -> Result<Response<pb::ExecuteClaimResponse>, Status> {
+        if !self.insecure_v1_enabled {
+            return Err(Status::unimplemented(
+                "v1 ExecuteClaim disabled; use ExecuteClaimV2",
+            ));
+        }
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         if req.reason_codes.len() > MAX_REASON_CODES {
@@ -624,32 +645,23 @@ impl EvidenceOs for EvidenceOsService {
                 Self::transition_claim(claim, ClaimState::Certified)?;
             }
 
-            let code_hash = claim
-                .artifacts
-                .first()
-                .map(|v| v.0)
-                .ok_or_else(|| Status::failed_precondition("missing artifact hash"))?;
-            let dependency_hashes: Vec<String> = claim
-                .artifacts
-                .iter()
-                .skip(1)
-                .map(|(h, _)| hex::encode(h))
-                .collect();
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),
-                hex::encode(claim.holdout_handle_id),
-                "discOS-claim".to_string(),
+                hex::encode(claim.topic_id),
+                claim.output_schema_id.clone(),
                 &canonical_output,
-                &claim.topic_id,
+                &claim.wasm_module,
+                &claim.holdout_handle_id,
                 &claim.ledger,
                 e_value,
                 claim.state == ClaimState::Certified,
+                req.decision,
+                req.reason_codes.clone(),
+                hex::encode(trace_hash),
+                claim.holdout_ref.clone(),
             );
             capsule.aspec_version = "aspec.v1".to_string();
             capsule.runtime_version = format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION"));
-            capsule.wasm_hash_hex = hex::encode(sha256_domain(b"wasm", &claim.wasm_module));
-            capsule.dependency_hashes = dependency_hashes;
-            capsule.judge_trace_hash_hex = hex::encode(trace_hash);
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -710,6 +722,237 @@ impl EvidenceOs for EvidenceOsService {
         persist_all(&self.state)?;
         Ok(Response::new(pb::ExecuteClaimResponse {
             state: state.to_proto(),
+            capsule_hash: capsule_hash.to_vec(),
+            etl_index,
+        }))
+    }
+
+    async fn create_claim_v2(
+        &self,
+        request: Request<pb::CreateClaimV2Request>,
+    ) -> Result<Response<pb::CreateClaimV2Response>, Status> {
+        let req = request.into_inner();
+        if req.claim_name.is_empty() || req.claim_name.len() > 128 {
+            return Err(Status::invalid_argument("claim_name must be in [1,128]"));
+        }
+        if req.epoch_size == 0 {
+            return Err(Status::invalid_argument("epoch_size must be > 0"));
+        }
+        if req.holdout_ref.is_empty() || req.holdout_ref.len() > 128 {
+            return Err(Status::invalid_argument("holdout_ref must be in [1,128]"));
+        }
+        let metadata = req
+            .metadata
+            .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
+        let signals = req
+            .signals
+            .ok_or_else(|| Status::invalid_argument("signals are required"))?;
+        if signals.phys_hir_signature_hash.len() != 32 {
+            return Err(Status::invalid_argument(
+                "signals.phys_hir_signature_hash must be 32 bytes",
+            ));
+        }
+        let semantic_hash = if signals.semantic_hash.is_empty() {
+            None
+        } else if signals.semantic_hash.len() == 32 {
+            let mut b = [0u8; 32];
+            b.copy_from_slice(&signals.semantic_hash);
+            Some(b)
+        } else {
+            return Err(Status::invalid_argument(
+                "signals.semantic_hash must be 0 or 32 bytes",
+            ));
+        };
+        let dependency_merkle_root = if signals.dependency_merkle_root.is_empty() {
+            None
+        } else if signals.dependency_merkle_root.len() == 32 {
+            let mut b = [0u8; 32];
+            b.copy_from_slice(&signals.dependency_merkle_root);
+            Some(b)
+        } else {
+            return Err(Status::invalid_argument(
+                "signals.dependency_merkle_root must be 0 or 32 bytes",
+            ));
+        };
+        let mut phys = [0u8; 32];
+        phys.copy_from_slice(&signals.phys_hir_signature_hash);
+        let topic = compute_topic_id(
+            &CoreClaimMetadataV2 {
+                lane: metadata.lane,
+                alpha_micros: metadata.alpha_micros,
+                epoch_config_ref: metadata.epoch_config_ref,
+                output_schema_id: metadata.output_schema_id.clone(),
+            },
+            &TopicSignals {
+                semantic_hash,
+                phys_hir_signature_hash: phys,
+                dependency_merkle_root,
+            },
+        );
+
+        let alpha = (metadata.alpha_micros as f64) / 1_000_000.0;
+        let ledger = ConservationLedger::new(alpha)
+            .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
+            .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
+        let mut holdout_hasher = Sha256::new();
+        holdout_hasher.update(req.holdout_ref.as_bytes());
+        let mut holdout_handle_id = [0u8; 32];
+        holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
+
+        let mut id_payload = Vec::new();
+        id_payload.extend_from_slice(&topic.topic_id);
+        id_payload.extend_from_slice(&holdout_handle_id);
+        id_payload.extend_from_slice(&phys);
+        id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
+        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
+
+        let claim = Claim {
+            claim_id,
+            topic_id: topic.topic_id,
+            holdout_handle_id,
+            holdout_ref: req.holdout_ref,
+            claim_name: req.claim_name,
+            output_schema_id: metadata.output_schema_id,
+            phys_hir_hash: phys,
+            epoch_size: req.epoch_size,
+            oracle_num_symbols: req.oracle_num_symbols,
+            state: ClaimState::Uncommitted,
+            artifacts: Vec::new(),
+            wasm_module: Vec::new(),
+            aspec_rejection: None,
+            lane: if topic.escalate_to_heavy {
+                Lane::Heavy
+            } else {
+                Lane::Fast
+            },
+            ledger,
+            last_decision: None,
+            last_capsule_hash: None,
+            capsule_bytes: None,
+            etl_index: None,
+        };
+        self.state.claims.lock().insert(claim_id, claim.clone());
+        persist_all(&self.state)?;
+        Ok(Response::new(pb::CreateClaimV2Response {
+            claim_id: claim_id.to_vec(),
+            topic_id: claim.topic_id.to_vec(),
+            state: claim.state.to_proto(),
+        }))
+    }
+
+    async fn execute_claim_v2(
+        &self,
+        request: Request<pb::ExecuteClaimV2Request>,
+    ) -> Result<Response<pb::ExecuteClaimV2Response>, Status> {
+        let req = request.into_inner();
+        let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let (
+            state,
+            decision,
+            reason_codes,
+            canonical_output,
+            e_value,
+            certified,
+            capsule_hash,
+            etl_index,
+        ) = {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            if claim.state == ClaimState::Settled || claim.state == ClaimState::Certified {
+                return Err(Status::failed_precondition("execution already settled"));
+            }
+            Self::transition_claim(claim, ClaimState::Executing)?;
+            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(&claim.wasm_module, &[])?;
+            let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
+            let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            claim
+                .ledger
+                .charge(
+                    charge_bits,
+                    "structured_output",
+                    json!({"post_canonical_bits": charge_bits}),
+                )
+                .map_err(|_| Status::failed_precondition("ledger budget exhausted"))?;
+            let decision = if canonical_output.first().copied().unwrap_or(0) == 0 {
+                pb::Decision::Reject as i32
+            } else {
+                pb::Decision::Approve as i32
+            };
+            let reason_codes = if decision == pb::Decision::Approve as i32 {
+                vec![1]
+            } else {
+                vec![2]
+            };
+            let e_value = if decision == pb::Decision::Approve as i32 {
+                2.0
+            } else {
+                1.25
+            };
+            claim
+                .ledger
+                .settle_e_value(e_value, "decision", json!({"decision": decision}))
+                .map_err(|_| Status::invalid_argument("invalid e-value"))?;
+            Self::transition_claim(claim, ClaimState::Settled)?;
+            if claim.ledger.can_certify() {
+                Self::transition_claim(claim, ClaimState::Certified)?;
+            }
+            let mut capsule = ClaimCapsule::new(
+                hex::encode(claim.claim_id),
+                hex::encode(claim.topic_id),
+                claim.output_schema_id.clone(),
+                &canonical_output,
+                &claim.wasm_module,
+                &claim.holdout_handle_id,
+                &claim.ledger,
+                e_value,
+                claim.state == ClaimState::Certified,
+                decision,
+                reason_codes.clone(),
+                hex::encode(trace_hash),
+                claim.holdout_ref.clone(),
+            );
+            capsule.state = if claim.state == ClaimState::Certified {
+                CoreClaimState::Certified
+            } else {
+                CoreClaimState::Settled
+            };
+            let capsule_bytes = capsule
+                .to_json_bytes()
+                .map_err(|_| Status::internal("capsule serialization failed"))?;
+            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let etl_index = {
+                let mut etl = self.state.etl.lock();
+                let (idx, _) = etl
+                    .append(&capsule_bytes)
+                    .map_err(|_| Status::internal("etl append failed"))?;
+                idx
+            };
+            claim.last_decision = Some(decision);
+            claim.last_capsule_hash = Some(capsule_hash);
+            claim.capsule_bytes = Some(capsule_bytes);
+            claim.etl_index = Some(etl_index);
+            (
+                claim.state,
+                decision,
+                reason_codes,
+                canonical_output,
+                e_value,
+                claim.state == ClaimState::Certified,
+                capsule_hash,
+                etl_index,
+            )
+        };
+        persist_all(&self.state)?;
+        Ok(Response::new(pb::ExecuteClaimV2Response {
+            state: state.to_proto(),
+            decision,
+            reason_codes,
+            canonical_output,
+            e_value,
+            certified,
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
         }))

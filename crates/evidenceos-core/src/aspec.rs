@@ -91,8 +91,8 @@ impl Default for AspecPolicy {
         let mut allowed = HashSet::new();
         for module in ["kernel", "env"] {
             allowed.insert((module.to_string(), "oracle_query".to_string()));
-            allowed.insert((module.to_string(), "ledger_commit".to_string()));
             allowed.insert((module.to_string(), "emit_structured_claim".to_string()));
+            allowed.insert((module.to_string(), "get_logical_epoch".to_string()));
         }
         Self {
             lane: AspecLane::HighAssurance,

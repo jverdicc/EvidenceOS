@@ -80,3 +80,11 @@ This repo uses a **vendored protoc** (`protoc-bin-vendored`) so contributors and
 A `Dockerfile`, `docker-compose.yml`, and a hardened `systemd` unit are provided under `deploy/systemd/`.
 
 All deployment entrypoints should pass `--data-dir` (not the removed `--etl-path`) so the daemon manages `etl.log` and state files under one directory.
+
+
+## Migration notes (V2 claim execution)
+
+- New secure RPCs are available: `CreateClaimV2` and `ExecuteClaimV2`.
+- Legacy `ExecuteClaim` (v1) is disabled by default and can be re-enabled only with `EVIDENCEOS_ENABLE_INSECURE_V1=true`.
+- `topic_id` should now be kernel-computed from V2 metadata and topic signals.
+- CI and local validation are standardized via `./scripts/test_evidence.sh` with a 95% line-coverage gate.

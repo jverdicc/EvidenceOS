@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  unit:
+  test-evidence:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,85 +16,14 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Unit and integration tests
-        run: cargo test --workspace --all-targets
-
-  system:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Daemon system tests
-        run: cargo test -p evidenceos-daemon --test e2e_claim_lifecycle
-
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 
-      - name: Generate workspace coverage
-        run: cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+      - name: Run test evidence gate
+        run: ./scripts/test_evidence.sh
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llvm-cov-lcov
-          path: target/llvm-cov/lcov.info
-
-  container-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build container
-        run: docker build -t evidenceos:ci .
-
-      - name: Start daemon container
-        run: |
-          docker run -d --rm --name evidenceos-smoke -p 50051:50051 evidenceos:ci
-
-      - name: Wait for service port
-        run: |
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 50051; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "service did not start in time"
-          docker logs evidenceos-smoke || true
-          exit 1
-
-      - name: Check Health RPC returns SERVING
-        run: |
-          docker run --rm --network host fullstorydev/grpcurl:latest \
-            -plaintext -d '{}' 127.0.0.1:50051 evidenceos.v1.EvidenceOS/Health \
-            | tee /tmp/health.json
-          grep -q '"status": "SERVING"' /tmp/health.json
-
-      - name: Show daemon logs
-        if: always()
-        run: docker logs evidenceos-smoke || true
-
-      - name: Stop daemon container
-        if: always()
-        run: docker stop evidenceos-smoke || true
+          name: coverage-lcov
+          path: target/coverage.lcov
