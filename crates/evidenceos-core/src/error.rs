@@ -20,6 +20,12 @@ pub enum EvidenceOSError {
     #[error("ASPEC verification failed")]
     AspecRejected,
 
+    #[error("invalid canonical encoding")]
+    InvalidCanonicalEncoding,
+
+    #[error("NaN values are not allowed")]
+    NaNNotAllowed,
+
     #[error("internal error")]
     Internal,
 }
@@ -31,6 +37,8 @@ impl EvidenceOSError {
             EvidenceOSError::NotFound => ErrorCode::ENotFound,
             EvidenceOSError::Frozen => ErrorCode::ESystemFrozen,
             EvidenceOSError::AspecRejected => ErrorCode::EAspecRejected,
+            EvidenceOSError::InvalidCanonicalEncoding => ErrorCode::EInvalidArgument,
+            EvidenceOSError::NaNNotAllowed => ErrorCode::EInvalidArgument,
             EvidenceOSError::Internal => ErrorCode::EInternal,
         }
     }

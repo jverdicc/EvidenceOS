@@ -26,3 +26,5 @@ pub mod oracle;
 pub mod topicid;
 
 pub use crate::error::{EvidenceOSError, EvidenceOSResult};
+
+pub use crate::oracle::{OracleResolution, TieBreaker};
