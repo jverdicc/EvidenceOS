@@ -50,7 +50,9 @@ fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
         append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
     }
     sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> Vec<u8> {
+}
+
+fn sha256_domain_vec(domain: &[u8], payload: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update(payload);
@@ -66,13 +68,15 @@ fn sha256(payload: &[u8]) -> Vec<u8> {
 fn valid_wasm() -> Vec<u8> {
     wat::parse_str(
         r#"(module
-          (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
+          (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
           (memory (export "memory") 1)
           (data (i32.const 0) "\01")
           (func (export "run")
             i32.const 0
             i32.const 1
-            call $emit)
+            call $emit
+            drop)
         )"#,
     )
     .expect("valid wat")
@@ -90,7 +94,7 @@ fn rejected_wasm_modules() -> Vec<Vec<u8>> {
         .expect("wat"),
         wat::parse_str(
             r#"(module
-              (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
+              (import "env" "emit_structured_claim" (func $emit (param i32 i32)))
               (type $t (func))
               (table 1 funcref)
               (elem (i32.const 0) $f)
@@ -104,7 +108,7 @@ fn rejected_wasm_modules() -> Vec<Vec<u8>> {
         .expect("wat"),
         wat::parse_str(
             r#"(module
-              (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
+              (import "env" "emit_structured_claim" (func $emit (param i32 i32)))
               (memory (export "memory") 1)
               (func (export "run")
                 i32.const 1
@@ -115,7 +119,7 @@ fn rejected_wasm_modules() -> Vec<Vec<u8>> {
         .expect("wat"),
         wat::parse_str(
             r#"(module
-              (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
+              (import "env" "emit_structured_claim" (func $emit (param i32 i32)))
               (memory (export "memory") 1)
               (func (export "run")
                 f32.const 1.0
@@ -295,7 +299,7 @@ async fn e2e_claim_lifecycle_blackbox() {
         .into_inner();
     assert_eq!(
         capsule_a.capsule_hash,
-        sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
+        sha256_domain_vec(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
     );
 
     let old_sth = capsule_a.signed_tree_head.clone().expect("sth a");

@@ -1,0 +1,397 @@
+// Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use wasmtime::{
+    Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+};
+
+use evidenceos_core::oracle::{
+    AccuracyOracleState, EValueFn, HoldoutLabels, NullSpec, OracleResolution,
+};
+
+const TRACE_DOMAIN: &[u8] = b"evidenceos:judge_trace:v2";
+const TRACE_INPUT_CAP_BYTES: usize = 64;
+const WASM_PAGE_BYTES: u64 = 65_536;
+
+#[derive(Debug, Clone, Copy)]
+pub struct VaultConfig {
+    pub max_fuel: u64,
+    pub max_memory_bytes: u64,
+    pub max_output_bytes: u32,
+    pub max_oracle_calls: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct VaultExecutionContext {
+    pub holdout_labels: Vec<u8>,
+    pub oracle_num_buckets: u32,
+    pub oracle_delta_sigma: f64,
+    pub oracle_null_accuracy: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultExecutionResult {
+    pub canonical_output: Vec<u8>,
+    pub judge_trace_hash: [u8; 32],
+    pub fuel_used: u64,
+    pub oracle_calls: u32,
+    pub output_bytes: u32,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum VaultError {
+    #[error("invalid vault configuration: {0}")]
+    InvalidConfig(String),
+    #[error("invalid wasm module: {0}")]
+    InvalidModule(String),
+    #[error("wasm trap: {0}")]
+    Trap(String),
+    #[error("fuel exhausted")]
+    FuelExhausted,
+    #[error("guest memory out-of-bounds")]
+    MemoryOob,
+    #[error("output exceeds maximum bytes")]
+    OutputTooLarge,
+    #[error("output already emitted")]
+    OutputAlreadyEmitted,
+    #[error("structured output was not emitted")]
+    OutputMissing,
+    #[error("oracle call limit exceeded")]
+    OracleCallLimitExceeded,
+    #[error("invalid oracle input")]
+    InvalidOracleInput,
+    #[error("missing required export: run")]
+    MissingRunExport,
+}
+
+#[derive(Debug, Clone)]
+enum HostCallRecord {
+    OracleBucket {
+        input_preview: Vec<u8>,
+        bucket: u32,
+    },
+    EmitStructuredClaim {
+        output_preview: Vec<u8>,
+        output_len: u32,
+    },
+}
+
+#[derive(Debug)]
+struct VaultHostState {
+    config: VaultConfig,
+    store_limits: StoreLimits,
+    oracle_state: AccuracyOracleState,
+    holdout_len: usize,
+    oracle_calls: u32,
+    output: Option<Vec<u8>>,
+    host_error: Option<VaultError>,
+    leakage_bits: f64,
+    accumulated_e_value: f64,
+    call_trace: Vec<HostCallRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VaultEngine {
+    engine: Engine,
+}
+
+impl VaultEngine {
+    pub fn new() -> Result<Self, VaultError> {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        config.wasm_threads(false);
+        config.wasm_simd(false);
+        config.wasm_relaxed_simd(false);
+        config.wasm_multi_memory(false);
+        config.wasm_reference_types(false);
+        config.wasm_memory64(false);
+
+        let engine = Engine::new(&config)
+            .map_err(|err| VaultError::InvalidModule(format!("engine init failed: {err}")))?;
+        Ok(Self { engine })
+    }
+
+    pub fn execute(
+        &self,
+        wasm: &[u8],
+        context: &VaultExecutionContext,
+        config: VaultConfig,
+    ) -> Result<VaultExecutionResult, VaultError> {
+        validate_config(&config)?;
+        if wasm.is_empty() {
+            return Err(VaultError::InvalidModule(
+                "wasm module is empty".to_string(),
+            ));
+        }
+
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+        let store_limits = StoreLimitsBuilder::new()
+            .memory_size(config.max_memory_bytes as usize)
+            .build();
+
+        let holdout = HoldoutLabels::new(context.holdout_labels.clone())
+            .map_err(|_| VaultError::InvalidConfig("invalid holdout labels".to_string()))?;
+        let resolution =
+            OracleResolution::new(context.oracle_num_buckets, context.oracle_delta_sigma)
+                .map_err(|_| VaultError::InvalidConfig("invalid oracle resolution".to_string()))?;
+        let null_spec = NullSpec {
+            domain: "sealed-vault".to_string(),
+            null_accuracy: context.oracle_null_accuracy,
+            e_value_fn: EValueFn::LikelihoodRatio {
+                n_observations: holdout.len(),
+            },
+        };
+        let oracle_state = AccuracyOracleState::new(holdout.clone(), resolution, null_spec)
+            .map_err(|_| VaultError::InvalidConfig("invalid oracle state".to_string()))?;
+
+        let mut store = Store::new(
+            &self.engine,
+            VaultHostState {
+                config,
+                store_limits,
+                oracle_state,
+                holdout_len: holdout.len(),
+                oracle_calls: 0,
+                output: None,
+                host_error: None,
+                leakage_bits: 0.0,
+                accumulated_e_value: 1.0,
+                call_trace: Vec::new(),
+            },
+        );
+        store.limiter(|state| &mut state.store_limits);
+        store
+            .set_fuel(config.max_fuel)
+            .map_err(|err| VaultError::InvalidConfig(err.to_string()))?;
+
+        let mut linker = Linker::new(&self.engine);
+        self.define_imports(&mut linker)?;
+
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|err| map_trap(&store, err))?;
+
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .map_err(|_| VaultError::MissingRunExport)?;
+        run.call(&mut store, ())
+            .map_err(|err| map_trap(&store, err))?;
+
+        let remaining_fuel = store
+            .get_fuel()
+            .map_err(|err| VaultError::Trap(err.to_string()))?;
+        let fuel_used = config.max_fuel.saturating_sub(remaining_fuel);
+        let host = store.data();
+        if let Some(err) = host.host_error.clone() {
+            return Err(err);
+        }
+        let output = host.output.clone().ok_or(VaultError::OutputMissing)?;
+        let output_bytes = u32::try_from(output.len())
+            .map_err(|_| VaultError::InvalidConfig("output length overflow".to_string()))?;
+
+        let judge_trace_hash = compute_judge_trace_hash(
+            wasm,
+            &host.call_trace,
+            &output,
+            fuel_used,
+            host.oracle_calls,
+        );
+
+        Ok(VaultExecutionResult {
+            canonical_output: output,
+            judge_trace_hash,
+            fuel_used,
+            oracle_calls: host.oracle_calls,
+            output_bytes,
+        })
+    }
+
+    fn define_imports(&self, linker: &mut Linker<VaultHostState>) -> Result<(), VaultError> {
+        linker
+            .func_wrap(
+                "env",
+                "oracle_bucket",
+                |mut caller: Caller<'_, VaultHostState>,
+                 pred_ptr: i32,
+                 pred_len: i32|
+                 -> Result<i32, Trap> {
+                    let preds = read_guest_memory(&mut caller, pred_ptr, pred_len)?;
+                    let host = caller.data_mut();
+                    host.oracle_calls = host.oracle_calls.saturating_add(1);
+                    if host.oracle_calls > host.config.max_oracle_calls {
+                        host.host_error = Some(VaultError::OracleCallLimitExceeded);
+                        return Err(Trap::new("oracle call limit exceeded"));
+                    }
+                    if preds.len() != host.holdout_len || preds.iter().any(|b| *b > 1) {
+                        host.host_error = Some(VaultError::InvalidOracleInput);
+                        return Err(Trap::new("invalid oracle input"));
+                    }
+
+                    let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
+                        host.host_error = Some(VaultError::InvalidOracleInput);
+                        Trap::new("oracle query failed")
+                    })?;
+                    host.leakage_bits += oracle_result.k_bits;
+                    host.accumulated_e_value *= oracle_result.e_value.max(1e-12);
+                    host.call_trace.push(HostCallRecord::OracleBucket {
+                        input_preview: preds.into_iter().take(TRACE_INPUT_CAP_BYTES).collect(),
+                        bucket: oracle_result.bucket,
+                    });
+                    Ok(oracle_result.bucket as i32)
+                },
+            )
+            .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+
+        linker
+            .func_wrap(
+                "env",
+                "emit_structured_claim",
+                |mut caller: Caller<'_, VaultHostState>, ptr: i32, len: i32| -> Result<i32, Trap> {
+                    let output = read_guest_memory(&mut caller, ptr, len)?;
+                    let host = caller.data_mut();
+                    if host.output.is_some() {
+                        host.host_error = Some(VaultError::OutputAlreadyEmitted);
+                        return Err(Trap::new("emit_structured_claim may only succeed once"));
+                    }
+                    if output.len() > host.config.max_output_bytes as usize {
+                        host.host_error = Some(VaultError::OutputTooLarge);
+                        return Err(Trap::new("structured output too large"));
+                    }
+                    host.call_trace.push(HostCallRecord::EmitStructuredClaim {
+                        output_preview: output
+                            .iter()
+                            .copied()
+                            .take(TRACE_INPUT_CAP_BYTES)
+                            .collect(),
+                        output_len: output.len() as u32,
+                    });
+                    host.output = Some(output);
+                    Ok(0)
+                },
+            )
+            .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+
+        Ok(())
+    }
+}
+
+fn validate_config(config: &VaultConfig) -> Result<(), VaultError> {
+    if config.max_fuel == 0 {
+        return Err(VaultError::InvalidConfig(
+            "max_fuel must be > 0".to_string(),
+        ));
+    }
+    if config.max_memory_bytes < WASM_PAGE_BYTES {
+        return Err(VaultError::InvalidConfig(
+            "max_memory_bytes must be at least one wasm page".to_string(),
+        ));
+    }
+    if config.max_output_bytes == 0 {
+        return Err(VaultError::InvalidConfig(
+            "max_output_bytes must be > 0".to_string(),
+        ));
+    }
+    if config.max_oracle_calls == 0 {
+        return Err(VaultError::InvalidConfig(
+            "max_oracle_calls must be > 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_guest_memory(
+    caller: &mut Caller<'_, VaultHostState>,
+    ptr: i32,
+    len: i32,
+) -> Result<Vec<u8>, Trap> {
+    if ptr < 0 || len < 0 {
+        caller.data_mut().host_error = Some(VaultError::MemoryOob);
+        return Err(Trap::new("negative pointer/length"));
+    }
+
+    let ptr = ptr as usize;
+    let len = len as usize;
+    let end = ptr.checked_add(len).ok_or_else(|| {
+        caller.data_mut().host_error = Some(VaultError::MemoryOob);
+        Trap::new("pointer overflow")
+    })?;
+
+    let memory = match caller.get_export("memory") {
+        Some(Extern::Memory(memory)) => memory,
+        _ => {
+            caller.data_mut().host_error = Some(VaultError::MemoryOob);
+            return Err(Trap::new("missing exported memory"));
+        }
+    };
+
+    if end > memory.data_size(&mut *caller) {
+        caller.data_mut().host_error = Some(VaultError::MemoryOob);
+        return Err(Trap::new("memory read out-of-bounds"));
+    }
+
+    let mut data = vec![0_u8; len];
+    memory.read(&mut *caller, ptr, &mut data).map_err(|_| {
+        caller.data_mut().host_error = Some(VaultError::MemoryOob);
+        Trap::new("memory read failed")
+    })?;
+    Ok(data)
+}
+
+fn map_trap(store: &Store<VaultHostState>, err: anyhow::Error) -> VaultError {
+    if let Some(host_error) = store.data().host_error.clone() {
+        return host_error;
+    }
+    if err.to_string().to_ascii_lowercase().contains("fuel") {
+        return VaultError::FuelExhausted;
+    }
+    VaultError::Trap(err.to_string())
+}
+
+fn compute_judge_trace_hash(
+    wasm: &[u8],
+    calls: &[HostCallRecord],
+    output: &[u8],
+    fuel_used: u64,
+    oracle_calls: u32,
+) -> [u8; 32] {
+    let wasm_hash = Sha256::digest(wasm);
+    let output_hash = Sha256::digest(output);
+    let mut trace = Vec::new();
+
+    trace.extend_from_slice(TRACE_DOMAIN);
+    trace.extend_from_slice(&wasm_hash);
+    trace.extend_from_slice(&fuel_used.to_be_bytes());
+    trace.extend_from_slice(&oracle_calls.to_be_bytes());
+    trace.extend_from_slice(&(calls.len() as u32).to_be_bytes());
+
+    for call in calls {
+        match call {
+            HostCallRecord::OracleBucket {
+                input_preview,
+                bucket,
+            } => {
+                trace.push(0x01);
+                trace.extend_from_slice(&(input_preview.len() as u32).to_be_bytes());
+                trace.extend_from_slice(input_preview);
+                trace.extend_from_slice(&bucket.to_be_bytes());
+            }
+            HostCallRecord::EmitStructuredClaim {
+                output_preview,
+                output_len,
+            } => {
+                trace.push(0x02);
+                trace.extend_from_slice(&output_len.to_be_bytes());
+                trace.extend_from_slice(&(output_preview.len() as u32).to_be_bytes());
+                trace.extend_from_slice(output_preview);
+            }
+        }
+    }
+
+    trace.extend_from_slice(&output_hash);
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&Sha256::digest(trace));
+    out
+}

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::executor::{ExecutionError, ExecutionLimits, WasmExecutor};
+use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -422,12 +422,8 @@ fn decode_canonical_symbol(canonical: &[u8], num_symbols: u32) -> Result<u32, St
     Ok(value)
 }
 
-fn execution_limits(
-    claim: &Claim,
-    _expected_output_len: Option<usize>,
-) -> Result<ExecutionLimits, Status> {
+fn vault_config(claim: &Claim) -> Result<VaultConfig, Status> {
     let canonical_len = canonical_len_for_symbols(claim.oracle_num_symbols)?;
-    let max_output_bytes = canonical_len;
     let max_memory_bytes = if claim.lane == Lane::Heavy {
         2 * 65_536
     } else {
@@ -438,46 +434,60 @@ fn execution_limits(
     } else {
         1_000_000
     };
-    let max_host_calls = if claim.lane == Lane::Heavy { 16 } else { 64 };
-    Ok(ExecutionLimits {
+    let max_oracle_calls = if claim.lane == Lane::Heavy { 8 } else { 32 };
+    Ok(VaultConfig {
         max_fuel,
-        max_memory_bytes,
-        max_output_bytes,
-        max_output_calls: 1,
-        max_host_calls,
+        max_memory_bytes: max_memory_bytes as u64,
+        max_output_bytes: canonical_len as u32,
+        max_oracle_calls,
     })
 }
 
-fn map_execution_error(err: ExecutionError) -> Status {
-    match err {
-        ExecutionError::InvalidModule(_) => Status::failed_precondition("invalid wasm module"),
-        ExecutionError::OutputMissing => Status::failed_precondition("structured output missing"),
-        ExecutionError::OutputTooLarge => {
-            Status::failed_precondition("structured output too large")
-        }
-        ExecutionError::TooManyOutputs => {
-            Status::failed_precondition("too many structured outputs")
-        }
-        ExecutionError::MemoryOob => Status::failed_precondition("guest memory out-of-bounds"),
-        ExecutionError::FuelExhausted => Status::resource_exhausted("fuel exhausted"),
-        ExecutionError::TooManyHostCalls => Status::resource_exhausted("host call limit exceeded"),
-        ExecutionError::Trap(_) => Status::failed_precondition("wasm trap"),
+fn derive_holdout_labels(
+    holdout_handle_id: [u8; 32],
+    holdout_len: usize,
+) -> Result<Vec<u8>, Status> {
+    if holdout_len == 0 || holdout_len > 4096 {
+        return Err(Status::invalid_argument("holdout length out of bounds"));
     }
+    let mut labels = Vec::with_capacity(holdout_len);
+    for idx in 0..holdout_len {
+        let byte = holdout_handle_id[idx % holdout_handle_id.len()];
+        labels.push((byte ^ ((idx as u8).wrapping_mul(31))) & 1);
+    }
+    Ok(labels)
 }
 
-fn execute_wasm(
-    wasm: &[u8],
-    logical_epoch: u64,
-    limits: ExecutionLimits,
-) -> Result<(Vec<u8>, u64, [u8; 32]), Status> {
-    if wasm.is_empty() {
-        return Err(Status::failed_precondition("wasm module not committed"));
+fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
+    let holdout_len = usize::try_from(claim.epoch_size)
+        .map_err(|_| Status::invalid_argument("epoch_size too large"))?;
+    let holdout_labels = derive_holdout_labels(claim.holdout_handle_id, holdout_len)?;
+    Ok(VaultExecutionContext {
+        holdout_labels,
+        oracle_num_buckets: claim.oracle_num_symbols,
+        oracle_delta_sigma: 0.01,
+        oracle_null_accuracy: 0.5,
+    })
+}
+
+fn map_vault_error(err: VaultError) -> Status {
+    match err {
+        VaultError::InvalidConfig(_) => Status::invalid_argument("invalid vault configuration"),
+        VaultError::InvalidModule(_) => Status::failed_precondition("invalid wasm module"),
+        VaultError::OutputMissing => Status::failed_precondition("structured output missing"),
+        VaultError::OutputTooLarge => Status::failed_precondition("structured output too large"),
+        VaultError::OutputAlreadyEmitted => {
+            Status::failed_precondition("too many structured outputs")
+        }
+        VaultError::MemoryOob => Status::failed_precondition("guest memory out-of-bounds"),
+        VaultError::FuelExhausted => Status::resource_exhausted("fuel exhausted"),
+        VaultError::OracleCallLimitExceeded => {
+            Status::resource_exhausted("oracle call limit exceeded")
+        }
+        VaultError::InvalidOracleInput => Status::invalid_argument("invalid oracle input"),
+        VaultError::MissingRunExport => Status::failed_precondition("missing run export"),
+        VaultError::Trap(_) => Status::failed_precondition("wasm trap"),
     }
-    let executor = WasmExecutor::new().map_err(map_execution_error)?;
-    let result = executor
-        .execute(wasm, logical_epoch, limits)
-        .map_err(map_execution_error)?;
-    Ok((result.output, result.fuel_used, result.trace_hash))
 }
 
 #[tonic::async_trait]
@@ -704,18 +714,22 @@ impl EvidenceOs for EvidenceOsService {
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
 
-            let (emitted_output, fuel_used, trace_hash) = match execute_wasm(
+            let vault = VaultEngine::new().map_err(map_vault_error)?;
+            let vault_result = match vault.execute(
                 &claim.wasm_module,
-                claim.epoch_size,
-                execution_limits(claim, Some(req.canonical_output.len()))?,
+                &vault_context(claim)?,
+                vault_config(claim)?,
             ) {
                 Ok(v) => v,
                 Err(err) => {
                     self.record_incident(claim, "execution_failure")?;
                     persist_all(&self.state)?;
-                    return Err(err);
+                    return Err(map_vault_error(err));
                 }
             };
+            let emitted_output = vault_result.canonical_output;
+            let fuel_used = vault_result.fuel_used;
+            let trace_hash = vault_result.judge_trace_hash;
             if !req.canonical_output.is_empty() && req.canonical_output != emitted_output {
                 self.record_incident(claim, "canonical_output_mismatch")?;
                 persist_all(&self.state)?;
@@ -985,11 +999,22 @@ impl EvidenceOs for EvidenceOsService {
                 return Err(Status::failed_precondition("execution already settled"));
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
-            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(
+            let vault = VaultEngine::new().map_err(map_vault_error)?;
+            let vault_result = match vault.execute(
                 &claim.wasm_module,
-                claim.epoch_size,
-                execution_limits(claim, None)?,
-            )?;
+                &vault_context(claim)?,
+                vault_config(claim)?,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.record_incident(claim, "execution_failure")?;
+                    persist_all(&self.state)?;
+                    return Err(map_vault_error(err));
+                }
+            };
+            let canonical_output = vault_result.canonical_output;
+            let _fuel_used = vault_result.fuel_used;
+            let trace_hash = vault_result.judge_trace_hash;
             let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
             claim
