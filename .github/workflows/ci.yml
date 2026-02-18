@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +22,43 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests
+      - name: Unit and integration tests
         run: cargo test --workspace --all-targets
+
+  system:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Daemon system tests
+        run: cargo test -p evidenceos-daemon --test e2e_claim_lifecycle
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate workspace coverage
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/lcov.info
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-cov-lcov
+          path: target/llvm-cov/lcov.info
 
   container-smoke:
     runs-on: ubuntu-latest

@@ -21,7 +21,7 @@ service EvidenceOS {
   // DiscOS-aligned endpoints.
   rpc FetchCapsule(FetchCapsuleRequest) returns (FetchCapsuleResponse);
   rpc RevokeClaim(RevokeClaimRequest) returns (RevokeClaimResponse);
-  rpc WatchRevocations(WatchRevocationsRequest) returns (WatchRevocationsResponse);
+  rpc WatchRevocations(WatchRevocationsRequest) returns (stream WatchRevocationsResponse);
 }
 
 message HealthRequest {}
@@ -73,6 +73,7 @@ message Artifact {
 message CommitArtifactsRequest {
   bytes claim_id = 1;
   repeated Artifact artifacts = 2;
+  bytes wasm_module = 3;
 }
 
 message CommitArtifactsResponse {

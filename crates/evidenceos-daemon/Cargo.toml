@@ -21,6 +21,7 @@ tonic = { version = "0.12", features = ["transport"] }
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -33,3 +34,4 @@ getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
+wat = "1"

@@ -8,6 +8,9 @@ fn protocol_crate_exports_client_and_server_stubs() {
 
     #[tonic::async_trait]
     impl pb::evidence_os_server::EvidenceOs for Dummy {
+        type WatchRevocationsStream = tokio_stream::wrappers::ReceiverStream<
+            Result<pb::WatchRevocationsResponse, tonic::Status>,
+        >;
         async fn health(
             &self,
             _request: tonic::Request<pb::HealthRequest>,
@@ -102,7 +105,7 @@ fn protocol_crate_exports_client_and_server_stubs() {
         async fn watch_revocations(
             &self,
             _request: tonic::Request<pb::WatchRevocationsRequest>,
-        ) -> Result<tonic::Response<pb::WatchRevocationsResponse>, tonic::Status> {
+        ) -> Result<tonic::Response<Self::WatchRevocationsStream>, tonic::Status> {
             Err(tonic::Status::unimplemented("compile-only"))
         }
     }
