@@ -346,6 +346,7 @@ impl HoldoutBoundary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn null_spec_likelihood_ratio_at_null() {
@@ -485,5 +486,35 @@ mod tests {
             state.query(&[1, 2]),
             Err(EvidenceOSError::InvalidArgument)
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn oracle_canonical_validation_roundtrip(
+            buckets in 2u32..=255,
+            bucket in 0u32..=254,
+        ) {
+            prop_assume!(bucket < buckets);
+            let resolution = OracleResolution::new(buckets, 0.0).expect("valid resolution");
+            let encoded = [bucket as u8];
+            let decoded = resolution.validate_canonical_bytes(&encoded)
+                .expect("single-byte bucket in range must decode");
+            prop_assert_eq!(decoded, bucket);
+
+            let overflow = [buckets as u8];
+            prop_assert!(matches!(
+                resolution.validate_canonical_bytes(&overflow),
+                Err(EvidenceOSError::InvalidArgument)
+            ));
+
+            prop_assert!(matches!(
+                resolution.validate_canonical_bytes(&[]),
+                Err(EvidenceOSError::InvalidArgument)
+            ));
+            prop_assert!(matches!(
+                resolution.validate_canonical_bytes(&[encoded[0], 0]),
+                Err(EvidenceOSError::InvalidArgument)
+            ));
+        }
     }
 }

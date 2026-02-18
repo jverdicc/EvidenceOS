@@ -10,20 +10,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           components: rustfmt, clippy
 
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+      - name: Install Rust nightly (for cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+
+      - name: Install cargo tools
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo install cargo-fuzz --locked
 
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
+
+      - name: Upload test output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: artifacts/test_output.txt
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-lcov
           path: target/coverage.lcov
+
+      - name: Upload clippy report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-report
+          path: target/clippy-report.txt

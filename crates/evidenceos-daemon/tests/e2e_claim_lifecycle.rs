@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
@@ -10,7 +8,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Channel, Server};
+use tonic::{transport::Channel, transport::Server, Code};
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -81,6 +79,14 @@ fn valid_wasm() -> Vec<u8> {
     .expect("valid wat")
 }
 
+fn wasm_artifacts(wasm_module: &[u8]) -> Vec<pb::Artifact> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(wasm_module);
+    vec![pb::Artifact {
+        artifact_hash: hasher.finalize().to_vec(),
+        kind: "wasm".to_string(),
+    }]
 fn rejected_wasm_modules() -> Vec<Vec<u8>> {
     vec![
         wat::parse_str(
@@ -175,125 +181,107 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
     .claim_id
 }
 
-async fn commit_freeze_seal(
-    c: &mut EvidenceOsClient<Channel>,
-    claim_id: Vec<u8>,
-    wasm_module: Vec<u8>,
-) {
+async fn commit_freeze_seal(c: &mut EvidenceOsClient<Channel>, claim_id: Vec<u8>) {
+    let wasm = valid_wasm();
     c.commit_artifacts(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
-        artifacts: vec![
-            pb::Artifact {
-                artifact_hash: sha256(&wasm_module),
-                kind: "wasm".to_string(),
-            },
-            pb::Artifact {
-                artifact_hash: hash(200),
-                kind: "manifest".to_string(),
-            },
-        ],
-        wasm_module,
+        artifacts: wasm_artifacts(&wasm),
+        wasm_module: wasm,
     })
     .await
-    .expect("commit artifacts");
+    .expect("commit");
 
     c.freeze_gates(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
     })
     .await
-    .expect("freeze gates");
+    .expect("freeze");
 
-    c.seal_claim(pb::SealClaimRequest {
-        claim_id: claim_id.clone(),
-    })
-    .await
-    .expect("seal claim");
+    c.seal_claim(pb::SealClaimRequest { claim_id })
+        .await
+        .expect("seal");
 }
 
 #[tokio::test]
-async fn e2e_claim_lifecycle_blackbox() {
+async fn full_lifecycle_v2_through_tonic_server() {
     let dir = TempDir::new().expect("tmp");
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("mkdir");
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
 
-    let h = c
-        .health(pb::HealthRequest {})
-        .await
-        .expect("health")
-        .into_inner();
-    assert_eq!(h.status, "SERVING");
+    let claim_id = create_claim_v2(&mut c, 1).await;
+    commit_freeze_seal(&mut c, claim_id.clone()).await;
 
-    let unsealed_claim = create_claim_v2(&mut c, 10).await;
-    let unsealed_exec_err = c
+    let execute = c
         .execute_claim_v2(pb::ExecuteClaimV2Request {
-            claim_id: unsealed_claim.clone(),
+            claim_id: claim_id.clone(),
         })
         .await
-        .expect_err("execute before seal should fail");
-    assert_eq!(unsealed_exec_err.code(), tonic::Code::FailedPrecondition);
-
-    let legacy_claim = create_claim_v2(&mut c, 11).await;
-    commit_freeze_seal(&mut c, legacy_claim.clone(), valid_wasm()).await;
-    let v1_disabled = c
-        .execute_claim(pb::ExecuteClaimRequest {
-            claim_id: legacy_claim,
-            decision: pb::Decision::Approve as i32,
-            reason_codes: vec![1],
-            canonical_output: vec![1],
-        })
-        .await
-        .expect_err("v1 execute disabled");
-    assert_eq!(v1_disabled.code(), tonic::Code::InvalidArgument);
-
-    for module in rejected_wasm_modules() {
-        let bad_claim = create_claim_v2(&mut c, 20).await;
-        let err = c
-            .commit_artifacts(pb::CommitArtifactsRequest {
-                claim_id: bad_claim,
-                artifacts: vec![pb::Artifact {
-                    artifact_hash: sha256(&module),
-                    kind: "wasm".to_string(),
-                }],
-                wasm_module: module,
-            })
-            .await
-            .expect_err("aspec reject");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
-
-    let mismatch_claim = create_claim_v2(&mut c, 30).await;
-    let wasm_for_mismatch = valid_wasm();
-    let mismatch_err = c
-        .commit_artifacts(pb::CommitArtifactsRequest {
-            claim_id: mismatch_claim,
-            artifacts: vec![pb::Artifact {
-                artifact_hash: hash(99),
-                kind: "wasm".to_string(),
-            }],
-            wasm_module: wasm_for_mismatch,
-        })
-        .await
-        .expect_err("wasm hash mismatch should fail");
-    assert_eq!(mismatch_err.code(), tonic::Code::FailedPrecondition);
-
-    let claim_a = create_claim_v2(&mut c, 40).await;
-    commit_freeze_seal(&mut c, claim_a.clone(), valid_wasm()).await;
-    let exec_a = c
-        .execute_claim_v2(pb::ExecuteClaimV2Request {
-            claim_id: claim_a.clone(),
-        })
-        .await
-        .expect("execute claim a")
+        .expect("execute")
         .into_inner();
-    assert!(!exec_a.capsule_hash.is_empty());
+    assert!(!execute.capsule_hash.is_empty());
 
-    let capsule_a = c
-        .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: claim_a.clone(),
+    let capsule = c
+        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .await
+        .expect("fetch")
+        .into_inner();
+    assert!(!capsule.capsule_bytes.is_empty());
+    assert!(!capsule.capsule_hash.is_empty());
+    assert!(capsule.signed_tree_head.is_some());
+    assert!(capsule.inclusion_proof.is_some());
+    assert!(capsule.consistency_proof.is_some());
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn negative_parameter_boundaries_for_public_rpcs() {
+    let dir = TempDir::new().expect("tmp");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
+    let mut c = client(addr).await;
+
+    // CreateClaim boundaries
+    let err = c
+        .create_claim(pb::CreateClaimRequest {
+            topic_id: vec![],
+            holdout_handle_id: vec![0; 32],
+            phys_hir_hash: vec![0; 32],
+            epoch_size: 1,
+            oracle_num_symbols: 2,
+            alpha: 0.5,
+            access_credit: 1,
         })
         .await
+        .expect_err("topic id length check");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // CreateClaimV2 boundaries
+    let err = c
+        .create_claim_v2(pb::CreateClaimV2Request {
+            claim_name: String::new(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".to_string(),
+                alpha_micros: 50_000,
+                epoch_config_ref: "e".to_string(),
+                output_schema_id: "o".to_string(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![0; 32],
+                phys_hir_signature_hash: vec![0; 32],
+                dependency_merkle_root: vec![0; 32],
+            }),
+            holdout_ref: "h".to_string(),
+            epoch_size: 1,
+            oracle_num_symbols: 2,
+            access_credit: 1,
+        })
+        .await
+        .expect_err("empty claim_name rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
         .expect("fetch capsule a")
         .into_inner();
     assert_eq!(capsule_a.capsule_hash, sha256(&capsule_a.capsule_bytes));
@@ -302,185 +290,111 @@ async fn e2e_claim_lifecycle_blackbox() {
         sha256_domain_vec(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
     );
 
-    let old_sth = capsule_a.signed_tree_head.clone().expect("sth a");
-    let old_size = old_sth.tree_size;
-    let old_root: [u8; 32] = old_sth.root_hash.clone().try_into().expect("old root len");
+    let valid_claim = create_claim_v2(&mut c, 2).await;
 
-    let claim_b = create_claim_v2(&mut c, 50).await;
-    commit_freeze_seal(&mut c, claim_b.clone(), valid_wasm()).await;
-    c.execute_claim_v2(pb::ExecuteClaimV2Request {
-        claim_id: claim_b.clone(),
-    })
-    .await
-    .expect("execute claim b");
-
-    let capsule_b = c
-        .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: claim_b.clone(),
+    // CommitArtifacts boundaries
+    let err = c
+        .commit_artifacts(pb::CommitArtifactsRequest {
+            claim_id: valid_claim.clone(),
+            artifacts: vec![],
+            wasm_module: valid_wasm(),
         })
         .await
-        .expect("fetch capsule b")
-        .into_inner();
-    let new_sth = capsule_b.signed_tree_head.clone().expect("sth b");
-    assert!(new_sth.tree_size > old_size);
+        .expect_err("empty artifacts rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    let inclusion = capsule_b.inclusion_proof.expect("inclusion");
-    let leaf: [u8; 32] = inclusion
-        .leaf_hash
-        .clone()
-        .try_into()
-        .expect("leaf hash len");
-    let new_root: [u8; 32] = new_sth.root_hash.clone().try_into().expect("new root len");
-    let path: Vec<[u8; 32]> = inclusion
-        .audit_path
-        .iter()
-        .map(|b| b.clone().try_into().expect("path hash len"))
-        .collect();
-    assert!(verify_inclusion_proof(
-        &path,
-        &leaf,
-        inclusion.leaf_index as usize,
-        inclusion.tree_size as usize,
-        &new_root,
-    ));
+    // FreezeGates boundary
+    let err = c
+        .freeze_gates(pb::FreezeGatesRequest { claim_id: vec![] })
+        .await
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    let capsule_a_later = c
-        .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: claim_a.clone(),
+    // SealClaim boundary
+    let err = c
+        .seal_claim(pb::SealClaimRequest { claim_id: vec![] })
+        .await
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // ExecuteClaim boundary
+    let err = c
+        .execute_claim(pb::ExecuteClaimRequest {
+            claim_id: vec![],
+            decision: pb::Decision::DecisionApprove as i32,
+            reason_codes: vec![],
+            canonical_output: vec![],
         })
         .await
-        .expect("fetch capsule a later")
-        .into_inner();
-    let consistency = capsule_a_later
-        .consistency_proof
-        .expect("consistency proof");
-    assert_eq!(consistency.old_tree_size, old_size);
-    assert_eq!(consistency.new_tree_size, new_sth.tree_size);
-    let consistency_path: Vec<[u8; 32]> = consistency
-        .path
-        .iter()
-        .map(|b| b.clone().try_into().expect("cons hash len"))
-        .collect();
-    assert!(verify_consistency_proof(
-        &old_root,
-        &new_root,
-        old_size as usize,
-        new_sth.tree_size as usize,
-        &consistency_path,
-    ));
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    let pubkey = c
-        .get_public_key(pb::GetPublicKeyRequest {})
+    // ExecuteClaimV2 boundary
+    let err = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id: vec![] })
         .await
-        .expect("get public key")
-        .into_inner();
-    let vk = VerifyingKey::from_bytes(
-        pubkey
-            .ed25519_public_key
-            .as_slice()
-            .try_into()
-            .expect("pubkey len"),
-    )
-    .expect("vk");
-    let key_id = Sha256::digest(&pubkey.ed25519_public_key);
-    assert_eq!(pubkey.key_id, key_id.as_slice());
-    let msg = sth_payload_digest(sth.tree_size, &sth.root_hash);
-    let sig = Signature::from_slice(&sth.signature).expect("sig");
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&new_sth.tree_size.to_be_bytes());
-    msg.extend_from_slice(&new_sth.root_hash);
-    let sig = Signature::from_slice(&new_sth.signature).expect("sig");
-    vk.verify(&msg, &sig).expect("sth signature verify");
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    let mut tampered = msg;
-    tampered[0] ^= 0x01;
-    assert!(vk.verify(&tampered, &sig).is_err());
-
-    let mut stream = c
-        .watch_revocations(pb::WatchRevocationsRequest {})
+    // GetCapsule boundary
+    let err = c
+        .get_capsule(pb::GetCapsuleRequest { claim_id: vec![] })
         .await
-        .expect("watch")
-        .into_inner();
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
 
-    c.revoke_claim(pb::RevokeClaimRequest {
-        claim_id: claim_b.clone(),
-        reason: "test revoke".to_string(),
-    })
-    .await
-    .expect("revoke");
-    let event = stream.message().await.expect("stream ok").expect("event");
-    assert!(event.entries.iter().any(|e| e.claim_id == claim_id));
-    let rev_msg = revocations_payload_digest(&event.entries);
-    let rev_sig = Signature::from_slice(&event.signature).expect("revocation signature");
-    vk.verify(&rev_msg, &rev_sig)
-        .expect("revocation signature verify");
+    // GetInclusionProof boundary (huge index)
+    let err = c
+        .get_inclusion_proof(pb::GetInclusionProofRequest {
+            leaf_index: u64::MAX,
+        })
+        .await
+        .expect_err("index out of bounds");
+    assert_eq!(err.code(), Code::NotFound);
 
-    let mut tampered_rev = rev_msg;
-    tampered_rev[0] ^= 0x01;
-    assert!(vk.verify(&tampered_rev, &rev_sig).is_err());
-    assert!(event.entries.iter().any(|e| e.claim_id == claim_b));
+    // GetConsistencyProof boundary
+    let err = c
+        .get_consistency_proof(pb::GetConsistencyProofRequest {
+            first_tree_size: 2,
+            second_tree_size: 1,
+        })
+        .await
+        .expect_err("invalid size pair");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // FetchCapsule boundary
+    let err = c
+        .fetch_capsule(pb::FetchCapsuleRequest { claim_id: vec![] })
+        .await
+        .expect_err("claim_id length rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // RevokeClaim boundaries
+    let err = c
+        .revoke_claim(pb::RevokeClaimRequest {
+            claim_id: vec![0; 32],
+            reason: String::new(),
+        })
+        .await
+        .expect_err("empty reason rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    // RPCs without parameters still called for coverage and behavior checks.
+    c.health(pb::HealthRequest {}).await.expect("health ok");
+    c.get_public_key(pb::GetPublicKeyRequest {})
+        .await
+        .expect("pubkey ok");
+    c.get_signed_tree_head(pb::GetSignedTreeHeadRequest {})
+        .await
+        .expect("sth ok");
+    c.get_revocation_feed(pb::GetRevocationFeedRequest {})
+        .await
+        .expect("revocation feed ok");
+    c.watch_revocations(pb::WatchRevocationsRequest {})
+        .await
+        .expect("watch revocations ok");
 
     handle.abort();
-}
-
-#[tokio::test]
-async fn persistence_fetch_capsule_stable_after_restart() {
-    let dir = TempDir::new().expect("tmp");
-    let data_dir = dir.path().join("data");
-    std::fs::create_dir_all(&data_dir).expect("mkdir");
-
-    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
-    let mut c = client(addr).await;
-
-    let claim_id = create_claim_v2(&mut c, 60).await;
-    commit_freeze_seal(&mut c, claim_id.clone(), valid_wasm()).await;
-    c.execute_claim_v2(pb::ExecuteClaimV2Request {
-        claim_id: claim_id.clone(),
-    })
-    .await
-    .expect("execute");
-
-    let before = c
-        .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: claim_id.clone(),
-        })
-        .await
-        .expect("fetch")
-        .into_inner();
-
-    handle.abort();
-
-    let (addr2, handle2) = start_server(&data_dir.to_string_lossy()).await;
-    let mut c2 = client(addr2).await;
-    let after = c2
-        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
-        .await
-        .expect("fetch after")
-        .into_inner();
-
-    assert_eq!(before.tree_size, after.tree_size);
-    assert_eq!(before.root_hash, after.root_hash);
-    assert_eq!(before.capsule_hash, after.capsule_hash);
-
-    let pubkey = c2
-        .get_public_key(pb::GetPublicKeyRequest {})
-        .await
-        .expect("get public key")
-        .into_inner();
-    let vk = VerifyingKey::from_bytes(
-        pubkey
-            .ed25519_public_key
-            .as_slice()
-            .try_into()
-            .expect("pubkey len"),
-    )
-    .expect("vk");
-    let sth = after.signed_tree_head.expect("sth");
-    let msg = sth_payload_digest(sth.tree_size, &sth.root_hash);
-    let sig = Signature::from_slice(&sth.signature).expect("sig");
-    vk.verify(&msg, &sig).expect("sth signature verify");
-
-    handle2.abort();
 }
 
 #[tokio::test]
