@@ -15,6 +15,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+
+use crate::executor::{ExecutionError, ExecutionLimits, WasmExecutor};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -363,20 +365,62 @@ fn decode_canonical_symbol(canonical: &[u8], num_symbols: u32) -> Result<u32, St
     Ok(value)
 }
 
-fn execute_wasm(wasm: &[u8], expected: &[u8]) -> Result<(Vec<u8>, u64, [u8; 32]), Status> {
+fn execution_limits(
+    claim: &Claim,
+    _expected_output_len: Option<usize>,
+) -> Result<ExecutionLimits, Status> {
+    let canonical_len = canonical_len_for_symbols(claim.oracle_num_symbols)?;
+    let max_output_bytes = canonical_len;
+    let max_memory_bytes = if claim.lane == Lane::Heavy {
+        2 * 65_536
+    } else {
+        4 * 65_536
+    };
+    let max_fuel = if claim.lane == Lane::Heavy {
+        250_000
+    } else {
+        1_000_000
+    };
+    let max_host_calls = if claim.lane == Lane::Heavy { 16 } else { 64 };
+    Ok(ExecutionLimits {
+        max_fuel,
+        max_memory_bytes,
+        max_output_bytes,
+        max_output_calls: 1,
+        max_host_calls,
+    })
+}
+
+fn map_execution_error(err: ExecutionError) -> Status {
+    match err {
+        ExecutionError::InvalidModule(_) => Status::failed_precondition("invalid wasm module"),
+        ExecutionError::OutputMissing => Status::failed_precondition("structured output missing"),
+        ExecutionError::OutputTooLarge => {
+            Status::failed_precondition("structured output too large")
+        }
+        ExecutionError::TooManyOutputs => {
+            Status::failed_precondition("too many structured outputs")
+        }
+        ExecutionError::MemoryOob => Status::failed_precondition("guest memory out-of-bounds"),
+        ExecutionError::FuelExhausted => Status::resource_exhausted("fuel exhausted"),
+        ExecutionError::TooManyHostCalls => Status::resource_exhausted("host call limit exceeded"),
+        ExecutionError::Trap(_) => Status::failed_precondition("wasm trap"),
+    }
+}
+
+fn execute_wasm(
+    wasm: &[u8],
+    logical_epoch: u64,
+    limits: ExecutionLimits,
+) -> Result<(Vec<u8>, u64, [u8; 32]), Status> {
     if wasm.is_empty() {
         return Err(Status::failed_precondition("wasm module not committed"));
     }
-    let emitted = if expected.is_empty() {
-        vec![1]
-    } else {
-        expected.to_vec()
-    };
-    let mut trace_payload = Vec::new();
-    trace_payload.extend_from_slice(wasm);
-    trace_payload.extend_from_slice(&emitted);
-    let trace_hash = sha256_domain(b"evidenceos:trace:v2", &trace_payload);
-    Ok((emitted, wasm.len() as u64, trace_hash))
+    let executor = WasmExecutor::new().map_err(map_execution_error)?;
+    let result = executor
+        .execute(wasm, logical_epoch, limits)
+        .map_err(map_execution_error)?;
+    Ok((result.output, result.fuel_used, result.trace_hash))
 }
 
 #[tonic::async_trait]
@@ -587,15 +631,18 @@ impl EvidenceOs for EvidenceOsService {
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
 
-            let (emitted_output, fuel_used, trace_hash) =
-                match execute_wasm(&claim.wasm_module, &req.canonical_output) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        self.record_incident(claim, "execution_failure")?;
-                        persist_all(&self.state)?;
-                        return Err(err);
-                    }
-                };
+            let (emitted_output, fuel_used, trace_hash) = match execute_wasm(
+                &claim.wasm_module,
+                claim.epoch_size,
+                execution_limits(claim, Some(req.canonical_output.len()))?,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.record_incident(claim, "execution_failure")?;
+                    persist_all(&self.state)?;
+                    return Err(err);
+                }
+            };
             if !req.canonical_output.is_empty() && req.canonical_output != emitted_output {
                 self.record_incident(claim, "canonical_output_mismatch")?;
                 persist_all(&self.state)?;
@@ -865,7 +912,11 @@ impl EvidenceOs for EvidenceOsService {
                 return Err(Status::failed_precondition("execution already settled"));
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
-            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(&claim.wasm_module, &[])?;
+            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(
+                &claim.wasm_module,
+                claim.epoch_size,
+                execution_limits(claim, None)?,
+            )?;
             let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
             claim
