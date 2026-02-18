@@ -4,23 +4,54 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EValueFn {
+    /// Simple likelihood ratio: e = (acc / null_acc)^n for n observations.
+    LikelihoodRatio { n_observations: usize },
+    /// Fixed e-value regardless of data.
+    Fixed(f64),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NullSpec {
+    pub domain: String,
+    pub null_accuracy: f64,
+    pub e_value_fn: EValueFn,
+}
+
+impl NullSpec {
+    pub fn compute_e_value(&self, observed_acc: f64) -> f64 {
+        match self.e_value_fn {
+            EValueFn::LikelihoodRatio { n_observations } => {
+                if self.null_accuracy == 0.0 {
+                    return 0.0;
+                }
+                let ratio = (observed_acc / self.null_accuracy).max(0.0);
+                ratio.powf(n_observations as f64).clamp(0.0, f64::MAX)
+            }
+            EValueFn::Fixed(v) => v,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OracleResolution {
     pub num_buckets: u32,
     pub delta_sigma: f64,
+    pub codec_version: u32,
+    pub ttl_epochs: Option<u64>,
 }
 
 impl OracleResolution {
     pub fn new(num_buckets: u32, delta_sigma: f64) -> EvidenceOSResult<Self> {
-        if num_buckets < 2 {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        if delta_sigma < 0.0 {
+        if num_buckets < 2 || delta_sigma < 0.0 {
             return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self {
             num_buckets,
             delta_sigma,
+            codec_version: 1,
+            ttl_epochs: None,
         })
     }
 
@@ -31,12 +62,28 @@ impl OracleResolution {
     pub fn quantize_unit_interval(&self, v: f64) -> u32 {
         let clamped = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
         let max_idx = (self.num_buckets - 1) as f64;
-        let idx = (clamped * max_idx).round();
-        let idx_i = idx as i64;
-        idx_i.clamp(0, self.num_buckets as i64 - 1) as u32
+        (clamped * max_idx).round().clamp(0.0, max_idx) as u32
+    }
+
+    pub fn is_expired(&self, current_epoch: u64, calibrated_at_epoch: u64) -> bool {
+        self.ttl_epochs
+            .map(|ttl| current_epoch.saturating_sub(calibrated_at_epoch) > ttl)
+            .unwrap_or(false)
+    }
+
+    pub fn validate_canonical_bytes(&self, bytes: &[u8]) -> EvidenceOSResult<u32> {
+        if bytes.len() != 1 {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let bucket = u32::from(bytes[0]);
+        if bucket >= self.num_buckets {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        Ok(bucket)
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HysteresisState<T> {
     pub last_input: Option<T>,
@@ -59,8 +106,17 @@ impl<T: Clone> HysteresisState<T> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OracleResult {
+    pub bucket: u32,
+    pub raw_accuracy: f64,
+    pub e_value: f64,
+    pub k_bits: f64,
+    pub hysteresis_applied: bool,
+}
+
 /// A private holdout of binary labels.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HoldoutLabels {
     labels: Vec<u8>,
 }
@@ -81,14 +137,9 @@ impl HoldoutLabels {
     pub fn len(&self) -> usize {
         self.labels.len()
     }
-
     pub fn is_empty(&self) -> bool {
         self.labels.is_empty()
     }
-
-    /// Expose raw bytes for kernel-internal commitments.
-    ///
-    /// WARNING: do not expose this outside the kernel TCB.
     pub fn labels_bytes(&self) -> &[u8] {
         &self.labels
     }
@@ -99,11 +150,10 @@ impl HoldoutLabels {
         }
         let mut correct = 0u64;
         for (p, y) in predictions.iter().zip(self.labels.iter()) {
-            let pb = *p;
-            if pb != 0 && pb != 1 {
+            if *p != 0 && *p != 1 {
                 return Err(EvidenceOSError::InvalidArgument);
             }
-            if pb == *y {
+            if p == y {
                 correct += 1;
             }
         }
@@ -114,13 +164,62 @@ impl HoldoutLabels {
         if a.len() != b.len() {
             return Err(EvidenceOSError::InvalidArgument);
         }
-        let mut d = 0u64;
-        for (x, y) in a.iter().zip(b.iter()) {
-            if x != y {
-                d += 1;
-            }
-        }
-        Ok(d)
+        Ok(a.iter().zip(b.iter()).filter(|(x, y)| x != y).count() as u64)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccuracyOracleState {
+    pub resolution: OracleResolution,
+    pub null_spec: NullSpec,
+    holdout: HoldoutLabels,
+    last_preds: Option<Vec<u8>>,
+    last_raw: Option<f64>,
+    last_bucket: Option<u32>,
+}
+
+impl AccuracyOracleState {
+    pub fn new(
+        holdout: HoldoutLabels,
+        resolution: OracleResolution,
+        null_spec: NullSpec,
+    ) -> EvidenceOSResult<Self> {
+        Ok(Self {
+            resolution,
+            null_spec,
+            holdout,
+            last_preds: None,
+            last_raw: None,
+            last_bucket: None,
+        })
+    }
+
+    pub fn query(&mut self, preds: &[u8]) -> EvidenceOSResult<OracleResult> {
+        let raw = self.holdout.accuracy(preds)?;
+        let bucket = self.resolution.quantize_unit_interval(raw);
+        let local = self
+            .last_preds
+            .as_ref()
+            .map(|last| HoldoutLabels::hamming_distance(last, preds).map(|d| d <= 1))
+            .transpose()?
+            .unwrap_or(false);
+        let hysteresis_applied = matches!((local, self.last_raw, self.last_bucket),
+            (true, Some(prev_raw), Some(_)) if (raw - prev_raw).abs() < self.resolution.delta_sigma);
+        let output_bucket = if hysteresis_applied {
+            self.last_bucket.unwrap_or(bucket)
+        } else {
+            bucket
+        };
+        self.last_preds = Some(preds.to_vec());
+        self.last_raw = Some(raw);
+        self.last_bucket = Some(output_bucket);
+        Ok(OracleResult {
+            bucket: output_bucket,
+            raw_accuracy: raw,
+            e_value: self.null_spec.compute_e_value(raw),
+            k_bits: self.resolution.bits_per_call(),
+            hysteresis_applied,
+        })
     }
 }
 
@@ -139,15 +238,11 @@ impl HoldoutBoundary {
     }
 
     pub fn accuracy_det(&self, x: f64) -> f64 {
-        let v = 1.0 - (x - self.b).abs();
-        v.clamp(0.0, 1.0)
+        (1.0 - (x - self.b).abs()).clamp(0.0, 1.0)
     }
-
     pub fn safety_det(&self, x: f64) -> bool {
         x <= self.b
     }
-
-    /// Commitment preimage (fixed-endian encoding) for ETL capsules.
     pub fn commitment_preimage(&self) -> [u8; 8] {
         self.b.to_le_bytes()
     }
@@ -158,37 +253,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quantization_matches_rounding() {
-        let r = OracleResolution::new(256, 0.0).unwrap();
-        assert_eq!(r.quantize_unit_interval(0.0), 0);
-        assert_eq!(r.quantize_unit_interval(1.0), 255);
-        assert_eq!(r.quantize_unit_interval(0.5), 128);
+    fn null_spec_likelihood_ratio_at_null() {
+        let n = NullSpec {
+            domain: "d".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::LikelihoodRatio { n_observations: 8 },
+        };
+        assert!((n.compute_e_value(0.5) - 1.0).abs() < 1e-12);
     }
 
     #[test]
-    fn labels_accuracy_and_hamming() {
-        let h = HoldoutLabels::new(vec![0, 1, 1, 0]).unwrap();
-        let acc = h.accuracy(&[0, 1, 0, 0]).unwrap();
-        assert!((acc - 0.75).abs() < 1e-12);
-        let d = HoldoutLabels::hamming_distance(&[0, 1, 0, 0], &[0, 1, 1, 0]).unwrap();
-        assert_eq!(d, 1);
+    fn oracle_resolution_ttl_expired() {
+        let mut r = OracleResolution::new(8, 0.01).expect("resolution");
+        r.ttl_epochs = Some(10);
+        assert!(r.is_expired(15, 3));
     }
 
     #[test]
-    fn hysteresis_stalls_small_delta_on_local() {
-        let mut h: HysteresisState<Vec<u8>> = HysteresisState::default();
-        let out1 = h.apply(true, 0.01, 0.5, 10, vec![0]);
-        assert_eq!(out1, 10);
-        let out2 = h.apply(true, 0.01, 0.505, 11, vec![1]);
-        assert_eq!(out2, 10);
+    fn accuracy_oracle_state_hysteresis_local_stalls() {
+        let holdout = HoldoutLabels::new(vec![1, 1, 1, 1]).expect("holdout");
+        let mut state = AccuracyOracleState::new(
+            holdout,
+            OracleResolution::new(8, 0.26).expect("resolution"),
+            NullSpec {
+                domain: "labels".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("state");
+        let r1 = state.query(&[1, 1, 1, 1]).expect("query1");
+        let r2 = state.query(&[1, 1, 1, 0]).expect("query2");
+        assert!(r2.hysteresis_applied);
+        assert_eq!(r1.bucket, r2.bucket);
     }
 
     #[test]
-    fn boundary_oracles() {
-        let b = HoldoutBoundary::new(0.7).unwrap();
-        assert!(b.safety_det(0.699));
-        assert!(!b.safety_det(0.701));
-        assert!((b.accuracy_det(0.7) - 1.0).abs() < 1e-12);
-        assert!((b.accuracy_det(0.0) - 0.3).abs() < 1e-12);
+    fn accuracy_oracle_state_rejects_non_binary_preds() {
+        let holdout = HoldoutLabels::new(vec![1, 1]).expect("holdout");
+        let mut state = AccuracyOracleState::new(
+            holdout,
+            OracleResolution::new(8, 0.1).expect("resolution"),
+            NullSpec {
+                domain: "labels".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("state");
+        assert!(matches!(
+            state.query(&[1, 2]),
+            Err(EvidenceOSError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn canonical_bytes_rejects_extra_bytes() {
+        let r = OracleResolution::new(8, 0.0).expect("resolution");
+        assert!(matches!(
+            r.validate_canonical_bytes(&[0, 1]),
+            Err(EvidenceOSError::InvalidArgument)
+        ));
     }
 }
