@@ -50,11 +50,6 @@ fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
         append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
     }
     sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(payload);
-    hasher.finalize().to_vec()
 }
 
 fn sha256(payload: &[u8]) -> Vec<u8> {
@@ -477,4 +472,61 @@ async fn persistence_fetch_capsule_stable_after_restart() {
     vk.verify(&msg, &sig).expect("sth signature verify");
 
     handle2.abort();
+}
+
+#[tokio::test]
+async fn topic_budget_is_shared_across_claims() {
+    let dir = TempDir::new().expect("tmp");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
+    let mut c = client(addr).await;
+
+    let req = |name: &str, holdout: &str| pb::CreateClaimV2Request {
+        claim_name: name.to_string(),
+        metadata: Some(pb::ClaimMetadataV2 {
+            lane: "fast".to_string(),
+            alpha_micros: 50_000,
+            epoch_config_ref: "shared-epoch".to_string(),
+            output_schema_id: "shared-schema".to_string(),
+        }),
+        signals: Some(pb::TopicSignalsV2 {
+            semantic_hash: hash(41),
+            phys_hir_signature_hash: hash(42),
+            dependency_merkle_root: hash(43),
+        }),
+        holdout_ref: holdout.to_string(),
+        epoch_size: 10,
+        oracle_num_symbols: 4,
+        access_credit: 16,
+    };
+
+    let claim_a = c
+        .create_claim_v2(req("claim-a", "holdout-a"))
+        .await
+        .expect("create a")
+        .into_inner()
+        .claim_id;
+    let claim_b = c
+        .create_claim_v2(req("claim-b", "holdout-b"))
+        .await
+        .expect("create b")
+        .into_inner()
+        .claim_id;
+
+    commit_freeze_seal(&mut c, claim_a.clone(), valid_wasm()).await;
+    commit_freeze_seal(&mut c, claim_b.clone(), valid_wasm()).await;
+
+    let ok = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id: claim_a })
+        .await;
+    assert!(ok.is_ok());
+
+    let second = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id: claim_b })
+        .await
+        .expect_err("second claim should freeze on shared topic budget");
+    assert_eq!(second.code(), tonic::Code::FailedPrecondition);
+
+    handle.abort();
 }

@@ -24,7 +24,7 @@ use tonic::{Request, Response, Status};
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
-use evidenceos_core::ledger::ConservationLedger;
+use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
@@ -94,6 +94,8 @@ impl ClaimState {
 struct Claim {
     claim_id: [u8; 32],
     topic_id: [u8; 32],
+    #[serde(default)]
+    dependency_merkle_root: Option<[u8; 32]>,
     holdout_handle_id: [u8; 32],
     holdout_ref: String,
     claim_name: String,
@@ -113,10 +115,71 @@ struct Claim {
     etl_index: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HoldoutBudgetPool {
+    holdout_handle_id: [u8; 32],
+    k_bits_budget: f64,
+    access_credit_budget: f64,
+    k_bits_spent: f64,
+    access_credit_spent: f64,
+    frozen: bool,
+}
+
+impl HoldoutBudgetPool {
+    fn new(
+        holdout_handle_id: [u8; 32],
+        k_bits_budget: f64,
+        access_credit_budget: f64,
+    ) -> Result<Self, Status> {
+        if !k_bits_budget.is_finite()
+            || !access_credit_budget.is_finite()
+            || k_bits_budget < 0.0
+            || access_credit_budget < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool budget"));
+        }
+        Ok(Self {
+            holdout_handle_id,
+            k_bits_budget,
+            access_credit_budget,
+            k_bits_spent: 0.0,
+            access_credit_spent: 0.0,
+            frozen: false,
+        })
+    }
+
+    fn charge(&mut self, k_bits: f64, access_credit: f64) -> Result<(), Status> {
+        if self.frozen {
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        let next_k = self.k_bits_spent + k_bits;
+        let next_access = self.access_credit_spent + access_credit;
+        if !next_k.is_finite() || !next_access.is_finite() {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        if next_k > self.k_bits_budget + f64::EPSILON
+            || next_access > self.access_credit_budget + f64::EPSILON
+        {
+            self.frozen = true;
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        self.k_bits_spent = next_k;
+        self.access_credit_spent = next_access;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct PersistedState {
     claims: Vec<Claim>,
     revocations: Vec<([u8; 32], u64, String)>,
+    topic_pools: Vec<([u8; 32], TopicBudgetPool)>,
+    holdout_pools: Vec<([u8; 32], HoldoutBudgetPool)>,
 }
 
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
@@ -124,6 +187,8 @@ type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 #[derive(Debug)]
 struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
+    topic_pools: Mutex<HashMap<[u8; 32], TopicBudgetPool>>,
+    holdout_pools: Mutex<HashMap<[u8; 32], HoldoutBudgetPool>>,
     etl: Mutex<Etl>,
     data_path: PathBuf,
     revocations: Mutex<Vec<([u8; 32], u64, String)>>,
@@ -144,6 +209,7 @@ impl Drop for KernelState {
 pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
+    dependence_tax_multiplier: f64,
 }
 
 impl EvidenceOsService {
@@ -182,6 +248,8 @@ impl EvidenceOsService {
                     .map(|c| (c.claim_id, c))
                     .collect(),
             ),
+            topic_pools: Mutex::new(persisted.topic_pools.into_iter().collect()),
+            holdout_pools: Mutex::new(persisted.holdout_pools.into_iter().collect()),
             etl: Mutex::new(etl),
             data_path: root,
             revocations: Mutex::new(persisted.revocations),
@@ -194,9 +262,19 @@ impl EvidenceOsService {
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let dependence_tax_multiplier = std::env::var("EVIDENCEOS_DEPENDENCE_TAX_MULTIPLIER")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(2.0);
+        if !dependence_tax_multiplier.is_finite() || dependence_tax_multiplier < 2.0 {
+            return Err(Status::invalid_argument(
+                "dependence_tax_multiplier must be finite and >= 2.0",
+            ));
+        }
         Ok(Self {
             state,
             insecure_v1_enabled,
+            dependence_tax_multiplier,
         })
     }
 
@@ -242,12 +320,55 @@ impl EvidenceOsService {
             .map_err(|_| Status::internal("etl incident append failed"))?;
         Ok(())
     }
+
+    fn validate_budget_value(value: f64, field: &str) -> Result<(), Status> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Status::invalid_argument(format!(
+                "{field} must be finite and >= 0"
+            )));
+        }
+        Ok(())
+    }
+
+    fn dependence_multiplier(&self, claim: &Claim, claims: &HashMap<[u8; 32], Claim>) -> f64 {
+        let mut shared_holdout = false;
+        let mut shared_dependency = false;
+        for other in claims.values() {
+            if other.claim_id == claim.claim_id {
+                continue;
+            }
+            if other.holdout_handle_id == claim.holdout_handle_id {
+                shared_holdout = true;
+            }
+            if claim.dependency_merkle_root.is_some()
+                && claim.dependency_merkle_root == other.dependency_merkle_root
+            {
+                shared_dependency = true;
+            }
+            if shared_holdout || shared_dependency {
+                return self.dependence_tax_multiplier;
+            }
+        }
+        1.0
+    }
 }
 
 fn persist_all(state: &KernelState) -> Result<(), Status> {
     let persisted = PersistedState {
         claims: state.claims.lock().values().cloned().collect(),
         revocations: state.revocations.lock().clone(),
+        topic_pools: state
+            .topic_pools
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
+        holdout_pools: state
+            .holdout_pools
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|_| Status::internal("serialize state failed"))?;
@@ -511,9 +632,11 @@ impl EvidenceOs for EvidenceOsService {
         let holdout_handle_id = parse_hash32(&req.holdout_handle_id, "holdout_handle_id")?;
         let phys_hir_hash = parse_hash32(&req.phys_hir_hash, "phys_hir_hash")?;
         let _ = canonical_len_for_symbols(req.oracle_num_symbols)?;
+        let access_credit = req.access_credit as f64;
+        Self::validate_budget_value(access_credit, "access_credit")?;
         let ledger = ConservationLedger::new(req.alpha)
             .map_err(|_| Status::invalid_argument("alpha must be in (0,1)"))
-            .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
+            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic_id);
@@ -526,6 +649,7 @@ impl EvidenceOs for EvidenceOsService {
         let claim = Claim {
             claim_id,
             topic_id,
+            dependency_merkle_root: None,
             holdout_handle_id,
             holdout_ref: hex::encode(holdout_handle_id),
             claim_name: "legacy-v1".to_string(),
@@ -546,6 +670,24 @@ impl EvidenceOs for EvidenceOsService {
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
+        {
+            let mut topic_pools = self.state.topic_pools.lock();
+            if !topic_pools.contains_key(&topic_id) {
+                let pool =
+                    TopicBudgetPool::new(hex::encode(topic_id), access_credit, access_credit)
+                        .map_err(|_| Status::invalid_argument("invalid topic budget"))?;
+                topic_pools.insert(topic_id, pool);
+            }
+        }
+        self.state
+            .holdout_pools
+            .lock()
+            .entry(holdout_handle_id)
+            .or_insert(HoldoutBudgetPool::new(
+                holdout_handle_id,
+                access_credit,
+                access_credit,
+            )?);
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimResponse {
             claim_id: claim_id.to_vec(),
@@ -732,17 +874,52 @@ impl EvidenceOs for EvidenceOsService {
             )?;
 
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let dependence_multiplier = self.dependence_multiplier(claim, &claims);
+            let taxed_bits = charge_bits * dependence_multiplier;
+            let covariance_charge = taxed_bits - charge_bits;
             claim
                 .ledger
-                .charge(
-                    charge_bits,
+                .charge_all(
+                    taxed_bits,
+                    0.0,
+                    0.0,
+                    taxed_bits,
                     "structured_output",
-                    json!({"post_canonical_bits": charge_bits}),
+                    json!({
+                        "post_canonical_bits": charge_bits,
+                        "dependence_multiplier": dependence_multiplier,
+                        "taxed_k_bits": taxed_bits,
+                    }),
                 )
                 .map_err(|_| {
                     let _ = self.record_incident(claim, "ledger_overrun");
                     Status::failed_precondition("ledger budget exhausted")
                 })?;
+            {
+                let mut topic_pools = self.state.topic_pools.lock();
+                let pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                if pool
+                    .charge(taxed_bits, taxed_bits, covariance_charge)
+                    .is_err()
+                {
+                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("topic budget exhausted"));
+                }
+            }
+            {
+                let mut holdout_pools = self.state.holdout_pools.lock();
+                let pool = holdout_pools
+                    .get_mut(&claim.holdout_handle_id)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                if pool.charge(taxed_bits, taxed_bits).is_err() {
+                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                }
+            }
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
                 persist_all(&self.state)?;
@@ -911,9 +1088,11 @@ impl EvidenceOs for EvidenceOsService {
         );
 
         let alpha = (metadata.alpha_micros as f64) / 1_000_000.0;
+        let access_credit = req.access_credit as f64;
+        Self::validate_budget_value(access_credit, "access_credit")?;
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
-            .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
+            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
         let mut holdout_hasher = Sha256::new();
         holdout_hasher.update(req.holdout_ref.as_bytes());
         let mut holdout_handle_id = [0u8; 32];
@@ -930,6 +1109,7 @@ impl EvidenceOs for EvidenceOsService {
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
+            dependency_merkle_root,
             holdout_handle_id,
             holdout_ref: req.holdout_ref,
             claim_name: req.claim_name,
@@ -953,6 +1133,23 @@ impl EvidenceOs for EvidenceOsService {
             etl_index: None,
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
+        self.state
+            .topic_pools
+            .lock()
+            .entry(topic.topic_id)
+            .or_insert(
+                TopicBudgetPool::new(hex::encode(topic.topic_id), access_credit, access_credit)
+                    .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
+            );
+        self.state
+            .holdout_pools
+            .lock()
+            .entry(holdout_handle_id)
+            .or_insert(HoldoutBudgetPool::new(
+                holdout_handle_id,
+                access_credit,
+                access_credit,
+            )?);
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimV2Response {
             claim_id: claim_id.to_vec(),
@@ -992,14 +1189,49 @@ impl EvidenceOs for EvidenceOsService {
             )?;
             let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let dependence_multiplier = self.dependence_multiplier(claim, &claims);
+            let taxed_bits = charge_bits * dependence_multiplier;
+            let covariance_charge = taxed_bits - charge_bits;
             claim
                 .ledger
-                .charge(
-                    charge_bits,
+                .charge_all(
+                    taxed_bits,
+                    0.0,
+                    0.0,
+                    taxed_bits,
                     "structured_output",
-                    json!({"post_canonical_bits": charge_bits}),
+                    json!({
+                        "post_canonical_bits": charge_bits,
+                        "dependence_multiplier": dependence_multiplier,
+                        "taxed_k_bits": taxed_bits,
+                    }),
                 )
                 .map_err(|_| Status::failed_precondition("ledger budget exhausted"))?;
+            {
+                let mut topic_pools = self.state.topic_pools.lock();
+                let pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                if pool
+                    .charge(taxed_bits, taxed_bits, covariance_charge)
+                    .is_err()
+                {
+                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("topic budget exhausted"));
+                }
+            }
+            {
+                let mut holdout_pools = self.state.holdout_pools.lock();
+                let pool = holdout_pools
+                    .get_mut(&claim.holdout_handle_id)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                if pool.charge(taxed_bits, taxed_bits).is_err() {
+                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                }
+            }
             let decision = if canonical_output.first().copied().unwrap_or(0) == 0 {
                 pb::Decision::Reject as i32
             } else {
