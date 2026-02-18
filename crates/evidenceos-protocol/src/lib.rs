@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 use core::fmt;

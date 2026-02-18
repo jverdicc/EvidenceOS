@@ -2,3 +2,5 @@
 **/*.rs.bk
 /data
 *.log
+artifacts/*
+!artifacts/.gitkeep

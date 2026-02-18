@@ -3,7 +3,6 @@
 
 //! ASPEC-like verifier for restricted WebAssembly modules.
 
-use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasmparser::{Operator, Parser, Payload, TypeRef};
@@ -98,7 +97,7 @@ fn has_compression_magic(data: &[u8]) -> bool {
 }
 
 /// Verify a Wasm module against ASPEC predicates (§A.1).
-pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<AspecReport> {
+pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut reasons: Vec<String> = Vec::new();
     let mut imported_funcs: u32 = 0;
     let mut defined_funcs: u32 = 0;
@@ -119,11 +118,23 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
 
     let parser = Parser::new(0);
     for payload in parser.parse_all(wasm) {
-        let payload = payload.map_err(|_| EvidenceOSError::AspecRejected)?;
+        let payload = match payload {
+            Ok(payload) => payload,
+            Err(_) => {
+                reasons.push("invalid wasm payload".to_string());
+                continue;
+            }
+        };
         match payload {
             Payload::ImportSection(s) => {
                 for import in s {
-                    let import = import.map_err(|_| EvidenceOSError::AspecRejected)?;
+                    let import = match import {
+                        Ok(import) => import,
+                        Err(_) => {
+                            reasons.push("invalid import section".to_string());
+                            continue;
+                        }
+                    };
                     match import.ty {
                         TypeRef::Func(_) => {
                             imported_funcs += 1;
@@ -148,7 +159,13 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
             }
             Payload::ExportSection(s) => {
                 for export in s {
-                    let export = export.map_err(|_| EvidenceOSError::AspecRejected)?;
+                    let export = match export {
+                        Ok(export) => export,
+                        Err(_) => {
+                            reasons.push("invalid export section".to_string());
+                            continue;
+                        }
+                    };
                     if export.name.to_ascii_lowercase().contains("output")
                         || export.name.to_ascii_lowercase().contains("result")
                     {
@@ -158,11 +175,21 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
             }
             Payload::DataSection(s) => {
                 for segment in s {
-                    let segment = segment.map_err(|_| EvidenceOSError::AspecRejected)?;
+                    let segment = match segment {
+                        Ok(segment) => segment,
+                        Err(_) => {
+                            reasons.push("invalid data segment".to_string());
+                            continue;
+                        }
+                    };
                     let bytes = segment.data;
-                    data_segment_bytes = data_segment_bytes
-                        .checked_add(bytes.len() as u64)
-                        .ok_or(EvidenceOSError::AspecRejected)?;
+                    match data_segment_bytes.checked_add(bytes.len() as u64) {
+                        Some(next) => data_segment_bytes = next,
+                        None => {
+                            data_segment_bytes = u64::MAX;
+                            reasons.push("data segment length overflow".to_string());
+                        }
+                    }
                     data_bytes.extend_from_slice(bytes);
                 }
             }
@@ -178,11 +205,19 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
                 let caller = func_index;
                 next_defined_func_index += 1;
                 let mut conditional_branches = 0u64;
-                let mut reader = body
-                    .get_operators_reader()
-                    .map_err(|_| EvidenceOSError::AspecRejected)?;
+                let reader = body.get_operators_reader();
+                let Ok(mut reader) = reader else {
+                    reasons.push("invalid code section".to_string());
+                    continue;
+                };
                 while !reader.eof() {
-                    let op = reader.read().map_err(|_| EvidenceOSError::AspecRejected)?;
+                    let op = match reader.read() {
+                        Ok(op) => op,
+                        Err(_) => {
+                            reasons.push("invalid instruction stream".to_string());
+                            break;
+                        }
+                    };
                     instruction_count += 1;
                     match op {
                         // §A.1 P_loops.
@@ -411,7 +446,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
         ));
     }
 
-    let report = AspecReport {
+    AspecReport {
         lane: policy.lane,
         ok: reasons.is_empty(),
         reasons,
@@ -425,12 +460,6 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
         max_cyclomatic_complexity,
         kolmogorov_proxy_bits,
         heavy_lane_flag,
-    };
-
-    if report.ok {
-        Ok(report)
-    } else {
-        Err(EvidenceOSError::AspecRejected)
     }
 }
 
@@ -438,14 +467,15 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
 mod tests {
     use super::*;
 
-    fn err_is_reject(result: EvidenceOSResult<AspecReport>) {
-        assert!(matches!(result, Err(EvidenceOSError::AspecRejected)));
+    fn assert_rejected(report: AspecReport) {
+        assert!(!report.ok);
+        assert!(!report.reasons.is_empty());
     }
 
     #[test]
     fn rejects_loop_highassurance() {
         let wasm = wat::parse_str("(module (func (loop nop)))").expect("valid wat");
-        err_is_reject(verify_aspec(&wasm, &AspecPolicy::default()));
+        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
     }
 
     #[test]
@@ -457,7 +487,7 @@ mod tests {
             ..AspecPolicy::default()
         };
         policy.kolmogorov_proxy_cap = 1;
-        let report = verify_aspec(&wasm, &policy).expect("should pass");
+        let report = verify_aspec(&wasm, &policy);
         assert!(report.ok);
     }
 
@@ -466,13 +496,13 @@ mod tests {
         let bytes = "a".repeat(70000);
         let wat = format!("(module (memory 2) (data (i32.const 0) \"{}\"))", bytes);
         let wasm = wat::parse_str(&wat).expect("valid wat");
-        err_is_reject(verify_aspec(&wasm, &AspecPolicy::default()));
+        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
     }
 
     #[test]
     fn rejects_recursion() {
         let wasm = wat::parse_str("(module (func $a call 1) (func $b call 0))").expect("valid wat");
-        err_is_reject(verify_aspec(&wasm, &AspecPolicy::default()));
+        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
     }
 
     #[test]
@@ -485,8 +515,7 @@ mod tests {
                 lane: AspecLane::LowAssurance,
                 ..AspecPolicy::default()
             },
-        )
-        .expect("should pass");
+        );
         assert!(report.kolmogorov_proxy_bits > 0.0);
     }
 }

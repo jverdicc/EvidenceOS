@@ -12,6 +12,10 @@
 //! - Evidence Transparency Log (ETL): append-only log + Merkle root
 //! - A decidable ASPEC-like verifier for restricted WebAssembly modules
 
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod aspec;
 pub mod capsule;
 pub mod dlc;
