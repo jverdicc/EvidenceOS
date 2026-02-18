@@ -34,6 +34,7 @@ use pb::evidence_os_server::EvidenceOs;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
+const MAX_DEPENDENCY_ITEMS: usize = 256;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
@@ -85,9 +86,28 @@ impl ClaimState {
             ClaimState::Revoked => Some(CoreClaimState::Revoked),
             ClaimState::Tainted => Some(CoreClaimState::Tainted),
             ClaimState::Stale => Some(CoreClaimState::Stale),
-            ClaimState::Committed | ClaimState::Frozen => None,
+            ClaimState::Frozen => Some(CoreClaimState::Frozen),
+            ClaimState::Committed => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OraclePins {
+    codec_hash: [u8; 32],
+    bit_width: u32,
+    ttl_epochs: u64,
+    pinned_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FreezePreimage {
+    artifacts_hash: [u8; 32],
+    wasm_hash: [u8; 32],
+    dependency_merkle_root: [u8; 32],
+    holdout_ref_hash: [u8; 32],
+    oracle_hash: [u8; 32],
+    sealed_preimage_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,21 +116,35 @@ struct Claim {
     topic_id: [u8; 32],
     holdout_handle_id: [u8; 32],
     holdout_ref: String,
+    #[serde(default)]
+    metadata_locked: bool,
     claim_name: String,
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
     epoch_size: u64,
+    #[serde(default)]
+    epoch_counter: u64,
     oracle_num_symbols: u32,
     state: ClaimState,
     artifacts: Vec<([u8; 32], String)>,
+    #[serde(default)]
+    dependency_items: Vec<[u8; 32]>,
+    #[serde(default)]
+    dependency_merkle_root: Option<[u8; 32]>,
     wasm_module: Vec<u8>,
     aspec_rejection: Option<String>,
     lane: Lane,
+    #[serde(default)]
+    heavy_lane_diversion_recorded: bool,
     ledger: ConservationLedger,
     last_decision: Option<i32>,
     last_capsule_hash: Option<[u8; 32]>,
     capsule_bytes: Option<Vec<u8>>,
     etl_index: Option<u64>,
+    #[serde(default)]
+    oracle_pins: Option<OraclePins>,
+    #[serde(default)]
+    freeze_preimage: Option<FreezePreimage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -208,30 +242,124 @@ impl EvidenceOsService {
         if claim.state == to {
             return Ok(());
         }
-        match (claim.state, to) {
-            (ClaimState::Uncommitted, ClaimState::Committed) => {
-                claim.state = ClaimState::Committed;
-                Ok(())
-            }
-            (from, ClaimState::Frozen) => {
-                let _ = from;
-                claim.state = ClaimState::Frozen;
-                Ok(())
-            }
-            (from, target) => {
-                let from_core = from
-                    .as_core()
-                    .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
-                let target_core = target
-                    .as_core()
-                    .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
-                from_core
-                    .transition(target_core)
-                    .map_err(|_| Status::failed_precondition("invalid claim state transition"))?;
-                claim.state = target;
-                Ok(())
-            }
+        if claim.state == ClaimState::Uncommitted && to == ClaimState::Committed {
+            claim.state = ClaimState::Committed;
+            return Ok(());
         }
+        if to == ClaimState::Committed {
+            return Err(Status::failed_precondition(
+                "invalid claim state transition",
+            ));
+        }
+        let from_core = if claim.state == ClaimState::Committed {
+            CoreClaimState::Uncommitted
+        } else {
+            claim
+                .state
+                .as_core()
+                .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?
+        };
+        let target_core = to
+            .as_core()
+            .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
+        from_core
+            .transition(target_core)
+            .map_err(|_| Status::failed_precondition("invalid claim state transition"))?;
+        claim.state = to;
+        Ok(())
+    }
+
+    fn freeze_claim_gates(claim: &mut Claim) -> Result<(), Status> {
+        if claim.freeze_preimage.is_some() && claim.state == ClaimState::Sealed {
+            return Ok(());
+        }
+        if claim.state != ClaimState::Committed && claim.state != ClaimState::Stale {
+            return Err(Status::failed_precondition(
+                "claim must be COMMITTED or STALE to freeze gates",
+            ));
+        }
+        if claim.artifacts.is_empty() {
+            return Err(Status::failed_precondition(
+                "artifacts must be committed before freeze",
+            ));
+        }
+        if claim.wasm_module.is_empty() {
+            return Err(Status::failed_precondition(
+                "wasm bytes must be committed before freeze",
+            ));
+        }
+        if claim.aspec_rejection.is_some() {
+            return Err(Status::failed_precondition("ASPEC report must be accepted"));
+        }
+        if claim.lane == Lane::Heavy && !claim.heavy_lane_diversion_recorded {
+            return Err(Status::failed_precondition(
+                "heavy lane diversion must be recorded before freeze",
+            ));
+        }
+
+        claim
+            .artifacts
+            .sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if claim.dependency_items.len() > MAX_DEPENDENCY_ITEMS {
+            return Err(Status::failed_precondition(
+                "dependency list exceeds allowed size",
+            ));
+        }
+        claim.dependency_items.sort();
+
+        let dependency_merkle_root = dependency_merkle_root(&claim.dependency_items);
+        claim.dependency_merkle_root = Some(dependency_merkle_root);
+
+        let wasm_hash = sha256_bytes(&claim.wasm_module);
+        let artifacts_hash = artifacts_commitment(&claim.artifacts);
+        let holdout_ref_hash = sha256_bytes(claim.holdout_ref.as_bytes());
+
+        let bit_width = canonical_len_for_symbols(claim.oracle_num_symbols)? as u32 * 8;
+        let oracle_pins = OraclePins {
+            codec_hash: sha256_bytes(b"evidenceos.oracle.codec.v1"),
+            bit_width,
+            ttl_epochs: 1,
+            pinned_epoch: current_logical_epoch(claim.epoch_size)?,
+        };
+        let oracle_hash = oracle_pins_hash(&oracle_pins);
+
+        let mut preimage_payload = Vec::new();
+        preimage_payload.extend_from_slice(&artifacts_hash);
+        preimage_payload.extend_from_slice(&wasm_hash);
+        preimage_payload.extend_from_slice(&dependency_merkle_root);
+        preimage_payload.extend_from_slice(&holdout_ref_hash);
+        preimage_payload.extend_from_slice(&oracle_hash);
+        let sealed_preimage_hash = sha256_bytes(&preimage_payload);
+
+        claim.oracle_pins = Some(oracle_pins);
+        claim.freeze_preimage = Some(FreezePreimage {
+            artifacts_hash,
+            wasm_hash,
+            dependency_merkle_root,
+            holdout_ref_hash,
+            oracle_hash,
+            sealed_preimage_hash,
+        });
+        claim.metadata_locked = true;
+        Self::transition_claim(claim, ClaimState::Sealed)
+    }
+
+    fn maybe_mark_stale(claim: &mut Claim, current_epoch: u64) -> Result<(), Status> {
+        let pins = match claim.oracle_pins.as_ref() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if claim.state != ClaimState::Sealed {
+            return Ok(());
+        }
+        if current_epoch != pins.pinned_epoch {
+            Self::transition_claim(claim, ClaimState::Stale)?;
+            return Ok(());
+        }
+        if current_epoch.saturating_sub(pins.pinned_epoch) > pins.ttl_epochs {
+            Self::transition_claim(claim, ClaimState::Stale)?;
+        }
+        Ok(())
     }
 
     fn record_incident(&self, claim: &mut Claim, reason: &str) -> Result<(), Status> {
@@ -313,6 +441,60 @@ fn load_or_create_signing_key(data_dir: &Path) -> Result<SigningKey, Status> {
     }
 
     Ok(key)
+}
+
+fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(payload);
+    let out = h.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
+fn artifacts_commitment(artifacts: &[([u8; 32], String)]) -> [u8; 32] {
+    let mut payload = Vec::new();
+    for (hash, kind) in artifacts {
+        payload.extend_from_slice(hash);
+        payload.extend_from_slice(&(kind.len() as u64).to_be_bytes());
+        payload.extend_from_slice(kind.as_bytes());
+    }
+    sha256_bytes(&payload)
+}
+
+fn dependency_merkle_root(items: &[[u8; 32]]) -> [u8; 32] {
+    if items.is_empty() {
+        return sha256_bytes(&[]);
+    }
+    let mut layer: Vec<[u8; 32]> = items.iter().copied().map(|v| sha256_bytes(&v)).collect();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() {
+                layer[i + 1]
+            } else {
+                left
+            };
+            let mut concat = [0u8; 64];
+            concat[..32].copy_from_slice(&left);
+            concat[32..].copy_from_slice(&right);
+            next.push(sha256_bytes(&concat));
+            i += 2;
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
+fn oracle_pins_hash(pins: &OraclePins) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&pins.codec_hash);
+    payload.extend_from_slice(&pins.bit_width.to_be_bytes());
+    payload.extend_from_slice(&pins.ttl_epochs.to_be_bytes());
+    payload.extend_from_slice(&pins.pinned_epoch.to_be_bytes());
+    sha256_bytes(&payload)
 }
 
 fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -465,6 +647,17 @@ fn map_execution_error(err: ExecutionError) -> Status {
     }
 }
 
+fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
+    if epoch_size == 0 {
+        return Err(Status::invalid_argument("epoch_size must be > 0"));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Status::internal("system clock before unix epoch"))?
+        .as_secs();
+    Ok(now / epoch_size)
+}
+
 fn execute_wasm(
     wasm: &[u8],
     logical_epoch: u64,
@@ -528,21 +721,28 @@ impl EvidenceOs for EvidenceOsService {
             topic_id,
             holdout_handle_id,
             holdout_ref: hex::encode(holdout_handle_id),
+            metadata_locked: false,
             claim_name: "legacy-v1".to_string(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             epoch_size: req.epoch_size,
+            epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: Lane::Fast,
+            heavy_lane_diversion_recorded: false,
             ledger,
             last_decision: None,
             last_capsule_hash: None,
             capsule_bytes: None,
             etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -572,8 +772,27 @@ impl EvidenceOs for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            if claim.metadata_locked
+                || matches!(
+                    claim.state,
+                    ClaimState::Sealed
+                        | ClaimState::Executing
+                        | ClaimState::Settled
+                        | ClaimState::Certified
+                        | ClaimState::Frozen
+                )
+            {
+                return Err(Status::failed_precondition(
+                    "cannot commit artifacts after freeze",
+                ));
+            }
             Self::transition_claim(claim, ClaimState::Committed)?;
             claim.artifacts.clear();
+            claim.dependency_items.clear();
+            claim.dependency_merkle_root = None;
+            claim.freeze_preimage = None;
+            claim.oracle_pins = None;
+            claim.epoch_counter = claim.epoch_counter.saturating_add(1);
             let mut declared_wasm_hash = None;
             for artifact in req.artifacts {
                 if artifact.kind.is_empty() || artifact.kind.len() > 64 {
@@ -582,6 +801,9 @@ impl EvidenceOs for EvidenceOsService {
                 let artifact_hash = parse_hash32(&artifact.artifact_hash, "artifact_hash")?;
                 if artifact.kind == "wasm" {
                     declared_wasm_hash = Some(artifact_hash);
+                }
+                if artifact.kind == "dependency" {
+                    claim.dependency_items.push(artifact_hash);
                 }
                 claim.artifacts.push((artifact_hash, artifact.kind));
             }
@@ -615,6 +837,7 @@ impl EvidenceOs for EvidenceOsService {
             } else {
                 Lane::Fast
             };
+            claim.heavy_lane_diversion_recorded = claim.lane == Lane::Heavy;
             claim.wasm_module = req.wasm_module;
         }
         persist_all(&self.state)?;
@@ -633,16 +856,18 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::FreezeGatesRequest>,
     ) -> Result<Response<pb::FreezeGatesResponse>, Status> {
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
-        let state = self
-            .state
-            .claims
-            .lock()
-            .get(&claim_id)
-            .ok_or_else(|| Status::not_found("claim not found"))?
-            .state;
-        if state != ClaimState::Committed {
-            return Err(Status::failed_precondition("claim must be COMMITTED"));
-        }
+        let state = {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::freeze_claim_gates(claim).or_else(|err| {
+                let _ = self.record_incident(claim, "freeze_gates_failed");
+                Err(err)
+            })?;
+            claim.state
+        };
+        persist_all(&self.state)?;
         Ok(Response::new(pb::FreezeGatesResponse {
             state: state.to_proto(),
         }))
@@ -653,27 +878,25 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::SealClaimRequest>,
     ) -> Result<Response<pb::SealClaimResponse>, Status> {
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
-        {
+        let state = {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
-            if claim.artifacts.is_empty() {
-                return Err(Status::failed_precondition(
-                    "cannot seal without committed artifacts",
-                ));
+            if claim.state == ClaimState::Sealed && claim.freeze_preimage.is_some() {
+                claim.state
+            } else {
+                Self::freeze_claim_gates(claim).or_else(|err| {
+                    let _ = self.record_incident(claim, "seal_claim_failed");
+                    Err(err)
+                })?;
+                claim.state
             }
-            Self::transition_claim(claim, ClaimState::Sealed)?;
-        }
+        };
         persist_all(&self.state)?;
-        let state = self
-            .state
-            .claims
-            .lock()
-            .get(&claim_id)
-            .map(|c| c.state.to_proto())
-            .ok_or_else(|| Status::internal("claim disappeared"))?;
-        Ok(Response::new(pb::SealClaimResponse { state }))
+        Ok(Response::new(pb::SealClaimResponse {
+            state: state.to_proto(),
+        }))
     }
 
     async fn execute_claim(
@@ -706,7 +929,7 @@ impl EvidenceOs for EvidenceOsService {
 
             let (emitted_output, fuel_used, trace_hash) = match execute_wasm(
                 &claim.wasm_module,
-                claim.epoch_size,
+                current_logical_epoch(claim.epoch_size)?,
                 execution_limits(claim, Some(req.canonical_output.len()))?,
             ) {
                 Ok(v) => v,
@@ -761,8 +984,12 @@ impl EvidenceOs for EvidenceOsService {
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
 
             Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
+            if claim.lane == Lane::Heavy {
+                Self::transition_claim(claim, ClaimState::Frozen)?;
+            } else if claim.ledger.can_certify() {
                 Self::transition_claim(claim, ClaimState::Certified)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Revoked)?;
             }
 
             let mut capsule = ClaimCapsule::new(
@@ -932,13 +1159,17 @@ impl EvidenceOs for EvidenceOsService {
             topic_id: topic.topic_id,
             holdout_handle_id,
             holdout_ref: req.holdout_ref,
+            metadata_locked: false,
             claim_name: req.claim_name,
             output_schema_id: metadata.output_schema_id,
             phys_hir_hash: phys,
             epoch_size: req.epoch_size,
+            epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: if topic.escalate_to_heavy {
@@ -946,11 +1177,14 @@ impl EvidenceOs for EvidenceOsService {
             } else {
                 Lane::Fast
             },
+            heavy_lane_diversion_recorded: topic.escalate_to_heavy,
             ledger,
             last_decision: None,
             last_capsule_hash: None,
             capsule_bytes: None,
             etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         persist_all(&self.state)?;
@@ -981,13 +1215,25 @@ impl EvidenceOs for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
-            if claim.state == ClaimState::Settled || claim.state == ClaimState::Certified {
-                return Err(Status::failed_precondition("execution already settled"));
+            let current_epoch = current_logical_epoch(claim.epoch_size)?;
+            Self::maybe_mark_stale(claim, current_epoch)?;
+            if claim.state == ClaimState::Stale {
+                return Err(Status::failed_precondition(
+                    "claim is stale; re-freeze before execution",
+                ));
+            }
+            if claim.state != ClaimState::Sealed {
+                return Err(Status::failed_precondition(
+                    "claim must be SEALED before execution",
+                ));
+            }
+            if claim.freeze_preimage.is_none() {
+                return Err(Status::failed_precondition("freeze gates not completed"));
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
             let (canonical_output, _fuel_used, trace_hash) = execute_wasm(
                 &claim.wasm_module,
-                claim.epoch_size,
+                current_epoch,
                 execution_limits(claim, None)?,
             )?;
             let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
@@ -1020,8 +1266,12 @@ impl EvidenceOs for EvidenceOsService {
                 .settle_e_value(e_value, "decision", json!({"decision": decision}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
             Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
+            if claim.lane == Lane::Heavy {
+                Self::transition_claim(claim, ClaimState::Frozen)?;
+            } else if claim.ledger.can_certify() {
                 Self::transition_claim(claim, ClaimState::Certified)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Revoked)?;
             }
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),

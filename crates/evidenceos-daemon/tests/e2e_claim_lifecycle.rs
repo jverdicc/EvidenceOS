@@ -50,11 +50,6 @@ fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
         append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
     }
     sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(payload);
-    hasher.finalize().to_vec()
 }
 
 fn sha256(payload: &[u8]) -> Vec<u8> {

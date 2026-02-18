@@ -18,10 +18,14 @@ pub enum ClaimState {
     Revoked,
     Tainted,
     Stale,
+    Frozen,
 }
 
 impl ClaimState {
     pub fn transition(&self, to: ClaimState) -> Result<ClaimState, String> {
+        if to == ClaimState::Frozen {
+            return Ok(ClaimState::Frozen);
+        }
         let valid = matches!(
             (self, to),
             (ClaimState::Uncommitted, ClaimState::Sealed)
