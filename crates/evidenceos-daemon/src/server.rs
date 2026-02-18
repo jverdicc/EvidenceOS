@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ed25519_dalek::{Signature, Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -148,7 +149,6 @@ struct Capsule {
 struct PersistedState {
     claims: Vec<Claim>,
     revocations: Vec<([u8; 32], u64, String)>,
-    signing_key: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -158,7 +158,8 @@ struct KernelState {
     data_path: PathBuf,
     revocations: Mutex<Vec<([u8; 32], u64, String)>>,
     lock_file: File,
-    signing_key: [u8; 32],
+    signing_key: SigningKey,
+    verifying_key: VerifyingKey,
 }
 
 impl Drop for KernelState {
@@ -196,11 +197,8 @@ impl EvidenceOsService {
             PersistedState::default()
         };
 
-        let signing_key = if persisted.signing_key == [0u8; 32] {
-            sha256_domain(b"evidenceos:signing-key", data_dir.as_bytes())
-        } else {
-            persisted.signing_key
-        };
+        let signing_key = load_or_create_signing_key(&root)?;
+        let verifying_key = signing_key.verifying_key();
 
         let etl_path = root.join("etl.log");
         let etl =
@@ -219,9 +217,14 @@ impl EvidenceOsService {
             revocations: Mutex::new(persisted.revocations),
             lock_file,
             signing_key,
+            verifying_key,
         });
         persist_all(&state)?;
         Ok(Self { state })
+    }
+
+    fn etl_verifying_key_bytes(&self) -> [u8; 32] {
+        self.state.verifying_key.to_bytes()
     }
 }
 
@@ -229,7 +232,6 @@ fn persist_all(state: &KernelState) -> Result<(), Status> {
     let persisted = PersistedState {
         claims: state.claims.lock().values().cloned().collect(),
         revocations: state.revocations.lock().clone(),
-        signing_key: state.signing_key,
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|_| Status::internal("serialize state failed"))?;
@@ -251,6 +253,52 @@ fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
     Ok(out)
 }
 
+const ETL_SIGNING_KEY_REL_PATH: &str = "keys/etl_signing_ed25519";
+
+fn load_or_create_signing_key(data_dir: &Path) -> Result<SigningKey, Status> {
+    let key_path = data_dir.join(ETL_SIGNING_KEY_REL_PATH);
+    if key_path.exists() {
+        let bytes =
+            std::fs::read(&key_path).map_err(|_| Status::internal("read signing key failed"))?;
+        if bytes.len() != 32 {
+            return Err(Status::internal("invalid signing key length"));
+        }
+        let mut sk = [0u8; 32];
+        sk.copy_from_slice(&bytes);
+        return Ok(SigningKey::from_bytes(&sk));
+    }
+
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| Status::internal("mkdir keys failed"))?;
+    }
+
+    let mut secret = [0u8; 32];
+    getrandom::getrandom(&mut secret).map_err(|_| Status::internal("random keygen failed"))?;
+    let key = SigningKey::from_bytes(&secret);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&key_path)
+            .map_err(|_| Status::internal("create signing key failed"))?;
+        f.write_all(&secret)
+            .and_then(|_| f.flush())
+            .map_err(|_| Status::internal("write signing key failed"))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&key_path, &secret)
+            .map_err(|_| Status::internal("write signing key failed"))?;
+    }
+
+    Ok(key)
+}
+
 fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(domain);
@@ -261,13 +309,12 @@ fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     hash
 }
 
-fn sign_payload(signing_key: &[u8; 32], payload: &[u8]) -> [u8; 64] {
-    let key = SigningKey::from_bytes(signing_key);
-    let sig: Signature = key.sign(payload);
+fn sign_payload(signing_key: &SigningKey, payload: &[u8]) -> [u8; 64] {
+    let sig: Signature = signing_key.sign(payload);
     sig.to_bytes()
 }
 
-fn build_signed_tree_head(etl: &Etl, signing_key: &[u8; 32]) -> pb::SignedTreeHead {
+fn build_signed_tree_head(etl: &Etl, signing_key: &SigningKey) -> pb::SignedTreeHead {
     let tree_size = etl.tree_size();
     let root_hash = etl.root_hash();
     let mut payload = Vec::new();
@@ -574,6 +621,7 @@ impl EvidenceOs for EvidenceOsService {
         _request: Request<pb::GetSignedTreeHeadRequest>,
     ) -> Result<Response<pb::GetSignedTreeHeadResponse>, Status> {
         let etl = self.state.etl.lock();
+        let _verifying_key = self.etl_verifying_key_bytes();
         let sth = build_signed_tree_head(&etl, &self.state.signing_key);
         Ok(Response::new(pb::GetSignedTreeHeadResponse {
             tree_size: sth.tree_size,
@@ -618,8 +666,9 @@ impl EvidenceOs for EvidenceOsService {
         let second_root = etl
             .root_at_size(req.second_tree_size)
             .map_err(|_| Status::invalid_argument("second_tree_size out of bounds"))?;
-        let consistent = req.first_tree_size == req.second_tree_size && first_root == second_root
-            || req.first_tree_size < req.second_tree_size;
+        etl.consistency_proof(req.first_tree_size, req.second_tree_size)
+            .map_err(|_| Status::invalid_argument("invalid tree size pair"))?;
+        let consistent = true;
         Ok(Response::new(pb::GetConsistencyProofResponse {
             consistent,
             first_root_hash: first_root.to_vec(),
@@ -673,7 +722,12 @@ impl EvidenceOs for EvidenceOsService {
             .inclusion_proof(etl_index)
             .map_err(|_| Status::not_found("leaf index not found"))?;
 
-        let consistency_path: Vec<Vec<u8>> = Vec::new();
+        let consistency_path = etl
+            .consistency_proof(etl_index + 1, tree_size)
+            .map_err(|_| Status::internal("consistency proof failed"))?
+            .into_iter()
+            .map(|h| h.to_vec())
+            .collect();
 
         Ok(Response::new(pb::FetchCapsuleResponse {
             capsule_bytes,
@@ -766,6 +820,63 @@ mod tests {
         assert_eq!(ledger.leakage_bits, 0);
         ledger.charge_leakage(1).expect("charge should pass");
         assert_eq!(ledger.leakage_bits, 1);
+    }
+
+    #[test]
+    fn sth_signature_verifies_after_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create dir");
+        let data_dir_str = data_dir.to_string_lossy().to_string();
+
+        let (pubkey_before, sth_before, root_before);
+        {
+            let svc = EvidenceOsService::build(&data_dir_str).expect("build service");
+            {
+                let mut etl = svc.state.etl.lock();
+                etl.append(b"entry-1").expect("append");
+                etl.append(b"entry-2").expect("append");
+            }
+
+            pubkey_before = svc.etl_verifying_key_bytes();
+            let resp = tokio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(async {
+                    svc.get_signed_tree_head(Request::new(pb::GetSignedTreeHeadRequest {}))
+                        .await
+                })
+                .expect("get sth")
+                .into_inner();
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&resp.tree_size.to_be_bytes());
+            msg.extend_from_slice(&resp.root_hash);
+            let vk = VerifyingKey::from_bytes(&pubkey_before).expect("verifying key");
+            let sig = Signature::try_from(resp.signature.as_slice()).expect("signature bytes");
+            vk.verify_strict(&msg, &sig).expect("signature verifies");
+            root_before = resp.root_hash.clone();
+            sth_before = resp;
+        }
+
+        let svc2 = EvidenceOsService::build(&data_dir_str).expect("rebuild service");
+        let pubkey_after = svc2.etl_verifying_key_bytes();
+        assert_eq!(pubkey_before, pubkey_after);
+        let resp2 = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(async {
+                svc2.get_signed_tree_head(Request::new(pb::GetSignedTreeHeadRequest {}))
+                    .await
+            })
+            .expect("get sth")
+            .into_inner();
+        let mut msg2 = Vec::new();
+        msg2.extend_from_slice(&resp2.tree_size.to_be_bytes());
+        msg2.extend_from_slice(&resp2.root_hash);
+        let vk2 = VerifyingKey::from_bytes(&pubkey_after).expect("verifying key");
+        let sig2 = Signature::try_from(resp2.signature.as_slice()).expect("signature bytes");
+        vk2.verify_strict(&msg2, &sig2)
+            .expect("signature verifies after restart");
+        assert_eq!(root_before, resp2.root_hash);
+        assert_eq!(sth_before.tree_size, resp2.tree_size);
     }
 
     #[test]
