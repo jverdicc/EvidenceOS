@@ -26,14 +26,12 @@ use evidenceos_core::ledger::ConservationLedger;
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::pb;
+use evidenceos_protocol::{pb, DOMAIN_CAPSULE_HASH, DOMAIN_CLAIM_ID};
 
 use pb::evidence_os_server::EvidenceOs;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
-const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
-const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Lane {
@@ -473,14 +471,30 @@ impl EvidenceOs for EvidenceOsService {
                 .ok_or_else(|| Status::not_found("claim not found"))?;
             Self::transition_claim(claim, ClaimState::Committed)?;
             claim.artifacts.clear();
+            let mut declared_wasm_hash = None;
             for artifact in req.artifacts {
                 if artifact.kind.is_empty() || artifact.kind.len() > 64 {
                     return Err(Status::invalid_argument("artifact kind must be in [1,64]"));
                 }
-                claim.artifacts.push((
-                    parse_hash32(&artifact.artifact_hash, "artifact_hash")?,
-                    artifact.kind,
-                ));
+                let artifact_hash = parse_hash32(&artifact.artifact_hash, "artifact_hash")?;
+                if artifact.kind == "wasm" {
+                    declared_wasm_hash = Some(artifact_hash);
+                }
+                claim.artifacts.push((artifact_hash, artifact.kind));
+            }
+
+            let mut wasm_hasher = Sha256::new();
+            wasm_hasher.update(&req.wasm_module);
+            let wasm_hash = wasm_hasher.finalize();
+            let mut wasm_hash_arr = [0u8; 32];
+            wasm_hash_arr.copy_from_slice(&wasm_hash);
+            match declared_wasm_hash {
+                Some(declared) if declared == wasm_hash_arr => {}
+                _ => {
+                    return Err(Status::failed_precondition(
+                        "wasm artifact hash does not match wasm_module",
+                    ));
+                }
             }
 
             let policy = AspecPolicy::default();
@@ -564,7 +578,7 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::ExecuteClaimRequest>,
     ) -> Result<Response<pb::ExecuteClaimResponse>, Status> {
         if !self.insecure_v1_enabled {
-            return Err(Status::unimplemented(
+            return Err(Status::invalid_argument(
                 "v1 ExecuteClaim disabled; use ExecuteClaimV2",
             ));
         }

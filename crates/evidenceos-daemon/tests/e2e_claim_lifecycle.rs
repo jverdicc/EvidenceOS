@@ -6,6 +6,8 @@ use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::DOMAIN_CAPSULE_HASH;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -13,6 +15,19 @@ use tonic::transport::{Channel, Server};
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
+}
+
+fn sha256_domain(domain: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(payload);
+    hasher.finalize().to_vec()
+}
+
+fn sha256(payload: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    hasher.finalize().to_vec()
 }
 
 fn valid_wasm() -> Vec<u8> {
@@ -99,6 +114,66 @@ async fn client(addr: SocketAddr) -> EvidenceOsClient<Channel> {
         .expect("connect")
 }
 
+async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8> {
+    c.create_claim_v2(pb::CreateClaimV2Request {
+        claim_name: format!("claim-{seed}"),
+        metadata: Some(pb::ClaimMetadataV2 {
+            lane: "fast".to_string(),
+            alpha_micros: 50_000,
+            epoch_config_ref: format!("epoch-{seed}"),
+            output_schema_id: format!("schema-{seed}"),
+        }),
+        signals: Some(pb::TopicSignalsV2 {
+            semantic_hash: hash(seed),
+            phys_hir_signature_hash: hash(seed.wrapping_add(1)),
+            dependency_merkle_root: hash(seed.wrapping_add(2)),
+        }),
+        holdout_ref: format!("holdout-{seed}"),
+        epoch_size: 10,
+        oracle_num_symbols: 4,
+        access_credit: 64,
+    })
+    .await
+    .expect("create claim v2")
+    .into_inner()
+    .claim_id
+}
+
+async fn commit_freeze_seal(
+    c: &mut EvidenceOsClient<Channel>,
+    claim_id: Vec<u8>,
+    wasm_module: Vec<u8>,
+) {
+    c.commit_artifacts(pb::CommitArtifactsRequest {
+        claim_id: claim_id.clone(),
+        artifacts: vec![
+            pb::Artifact {
+                artifact_hash: sha256(&wasm_module),
+                kind: "wasm".to_string(),
+            },
+            pb::Artifact {
+                artifact_hash: hash(200),
+                kind: "manifest".to_string(),
+            },
+        ],
+        wasm_module,
+    })
+    .await
+    .expect("commit artifacts");
+
+    c.freeze_gates(pb::FreezeGatesRequest {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("freeze gates");
+
+    c.seal_claim(pb::SealClaimRequest {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("seal claim");
+}
+
 #[tokio::test]
 async fn e2e_claim_lifecycle_blackbox() {
     let dir = TempDir::new().expect("tmp");
@@ -114,71 +189,35 @@ async fn e2e_claim_lifecycle_blackbox() {
         .into_inner();
     assert_eq!(h.status, "SERVING");
 
-    for alpha in [0.01, 0.5, 0.99] {
-        let resp = c
-            .create_claim(pb::CreateClaimRequest {
-                topic_id: hash(1),
-                holdout_handle_id: hash(2),
-                phys_hir_hash: hash(3),
-                epoch_size: 1,
-                oracle_num_symbols: 2,
-                alpha,
-                access_credit: 32,
-            })
-            .await
-            .expect("create claim")
-            .into_inner();
-        assert_eq!(resp.claim_id.len(), 32);
-    }
-
-    let invalid = c
-        .create_claim(pb::CreateClaimRequest {
-            topic_id: hash(1),
-            holdout_handle_id: hash(2),
-            phys_hir_hash: hash(3),
-            epoch_size: 0,
-            oracle_num_symbols: 2,
-            alpha: 0.1,
-            access_credit: 16,
+    let unsealed_claim = create_claim_v2(&mut c, 10).await;
+    let unsealed_exec_err = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request {
+            claim_id: unsealed_claim.clone(),
         })
         .await
-        .expect_err("invalid epoch");
-    assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        .expect_err("execute before seal should fail");
+    assert_eq!(unsealed_exec_err.code(), tonic::Code::FailedPrecondition);
 
-    let created = c
-        .create_claim(pb::CreateClaimRequest {
-            topic_id: hash(4),
-            holdout_handle_id: hash(5),
-            phys_hir_hash: hash(6),
-            epoch_size: 10,
-            oracle_num_symbols: 4,
-            alpha: 0.05,
-            access_credit: 64,
+    let legacy_claim = create_claim_v2(&mut c, 11).await;
+    commit_freeze_seal(&mut c, legacy_claim.clone(), valid_wasm()).await;
+    let v1_disabled = c
+        .execute_claim(pb::ExecuteClaimRequest {
+            claim_id: legacy_claim,
+            decision: pb::Decision::Approve as i32,
+            reason_codes: vec![1],
+            canonical_output: vec![1],
         })
         .await
-        .expect("create claim")
-        .into_inner();
-    let claim_id = created.claim_id;
+        .expect_err("v1 execute disabled");
+    assert_eq!(v1_disabled.code(), tonic::Code::InvalidArgument);
 
     for module in rejected_wasm_modules() {
-        let bad_claim = c
-            .create_claim(pb::CreateClaimRequest {
-                topic_id: hash(7),
-                holdout_handle_id: hash(8),
-                phys_hir_hash: hash(9),
-                epoch_size: 10,
-                oracle_num_symbols: 4,
-                alpha: 0.05,
-                access_credit: 64,
-            })
-            .await
-            .expect("create")
-            .into_inner();
+        let bad_claim = create_claim_v2(&mut c, 20).await;
         let err = c
             .commit_artifacts(pb::CommitArtifactsRequest {
-                claim_id: bad_claim.claim_id,
+                claim_id: bad_claim,
                 artifacts: vec![pb::Artifact {
-                    artifact_hash: hash(10),
+                    artifact_hash: sha256(&module),
                     kind: "wasm".to_string(),
                 }],
                 wasm_module: module,
@@ -188,74 +227,73 @@ async fn e2e_claim_lifecycle_blackbox() {
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
-    c.commit_artifacts(pb::CommitArtifactsRequest {
-        claim_id: claim_id.clone(),
-        artifacts: vec![
-            pb::Artifact {
-                artifact_hash: hash(11),
+    let mismatch_claim = create_claim_v2(&mut c, 30).await;
+    let wasm_for_mismatch = valid_wasm();
+    let mismatch_err = c
+        .commit_artifacts(pb::CommitArtifactsRequest {
+            claim_id: mismatch_claim,
+            artifacts: vec![pb::Artifact {
+                artifact_hash: hash(99),
                 kind: "wasm".to_string(),
-            },
-            pb::Artifact {
-                artifact_hash: hash(12),
-                kind: "manifest".to_string(),
-            },
-        ],
-        wasm_module: valid_wasm(),
-    })
-    .await
-    .expect("commit artifacts");
-
-    c.freeze_gates(pb::FreezeGatesRequest {
-        claim_id: claim_id.clone(),
-    })
-    .await
-    .expect("freeze gates");
-    c.seal_claim(pb::SealClaimRequest {
-        claim_id: claim_id.clone(),
-    })
-    .await
-    .expect("seal claim");
-
-    let exec = c
-        .execute_claim(pb::ExecuteClaimRequest {
-            claim_id: claim_id.clone(),
-            decision: pb::Decision::Approve as i32,
-            reason_codes: vec![1, 7],
-            canonical_output: vec![1],
+            }],
+            wasm_module: wasm_for_mismatch,
         })
         .await
-        .expect("execute")
+        .expect_err("wasm hash mismatch should fail");
+    assert_eq!(mismatch_err.code(), tonic::Code::FailedPrecondition);
+
+    let claim_a = create_claim_v2(&mut c, 40).await;
+    commit_freeze_seal(&mut c, claim_a.clone(), valid_wasm()).await;
+    let exec_a = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request {
+            claim_id: claim_a.clone(),
+        })
+        .await
+        .expect("execute claim a")
         .into_inner();
-    assert!(!exec.capsule_hash.is_empty());
+    assert!(!exec_a.capsule_hash.is_empty());
 
-    let exec_again = c
-        .execute_claim(pb::ExecuteClaimRequest {
-            claim_id: claim_id.clone(),
-            decision: pb::Decision::Approve as i32,
-            reason_codes: vec![],
-            canonical_output: vec![1],
-        })
-        .await
-        .expect_err("repeat execute rejected");
-    assert_eq!(exec_again.code(), tonic::Code::FailedPrecondition);
-
-    let capsule = c
+    let capsule_a = c
         .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: claim_id.clone(),
+            claim_id: claim_a.clone(),
         })
         .await
-        .expect("fetch capsule")
+        .expect("fetch capsule a")
         .into_inner();
-    let sth = capsule.signed_tree_head.expect("sth");
-    let inclusion = capsule.inclusion_proof.expect("inclusion");
-    let consistency = capsule.consistency_proof.expect("consistency");
+    assert_eq!(
+        capsule_a.capsule_hash,
+        sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
+    );
 
+    let old_sth = capsule_a.signed_tree_head.clone().expect("sth a");
+    let old_size = old_sth.tree_size;
+    let old_root: [u8; 32] = old_sth.root_hash.clone().try_into().expect("old root len");
+
+    let claim_b = create_claim_v2(&mut c, 50).await;
+    commit_freeze_seal(&mut c, claim_b.clone(), valid_wasm()).await;
+    c.execute_claim_v2(pb::ExecuteClaimV2Request {
+        claim_id: claim_b.clone(),
+    })
+    .await
+    .expect("execute claim b");
+
+    let capsule_b = c
+        .fetch_capsule(pb::FetchCapsuleRequest {
+            claim_id: claim_b.clone(),
+        })
+        .await
+        .expect("fetch capsule b")
+        .into_inner();
+    let new_sth = capsule_b.signed_tree_head.clone().expect("sth b");
+    assert!(new_sth.tree_size > old_size);
+
+    let inclusion = capsule_b.inclusion_proof.expect("inclusion");
     let leaf: [u8; 32] = inclusion
         .leaf_hash
         .clone()
         .try_into()
         .expect("leaf hash len");
-    let root: [u8; 32] = sth.root_hash.clone().try_into().expect("root hash len");
+    let new_root: [u8; 32] = new_sth.root_hash.clone().try_into().expect("new root len");
     let path: Vec<[u8; 32]> = inclusion
         .audit_path
         .iter()
@@ -266,19 +304,31 @@ async fn e2e_claim_lifecycle_blackbox() {
         &leaf,
         inclusion.leaf_index as usize,
         inclusion.tree_size as usize,
-        &root,
+        &new_root,
     ));
 
+    let capsule_a_later = c
+        .fetch_capsule(pb::FetchCapsuleRequest {
+            claim_id: claim_a.clone(),
+        })
+        .await
+        .expect("fetch capsule a later")
+        .into_inner();
+    let consistency = capsule_a_later
+        .consistency_proof
+        .expect("consistency proof");
+    assert_eq!(consistency.old_tree_size, old_size);
+    assert_eq!(consistency.new_tree_size, new_sth.tree_size);
     let consistency_path: Vec<[u8; 32]> = consistency
         .path
         .iter()
         .map(|b| b.clone().try_into().expect("cons hash len"))
         .collect();
     assert!(verify_consistency_proof(
-        &root,
-        &root,
-        consistency.old_tree_size as usize,
-        consistency.new_tree_size as usize,
+        &old_root,
+        &new_root,
+        old_size as usize,
+        new_sth.tree_size as usize,
         &consistency_path,
     ));
 
@@ -292,9 +342,9 @@ async fn e2e_claim_lifecycle_blackbox() {
     )
     .expect("vk");
     let mut msg = Vec::new();
-    msg.extend_from_slice(&sth.tree_size.to_be_bytes());
-    msg.extend_from_slice(&sth.root_hash);
-    let sig = Signature::from_slice(&sth.signature).expect("sig");
+    msg.extend_from_slice(&new_sth.tree_size.to_be_bytes());
+    msg.extend_from_slice(&new_sth.root_hash);
+    let sig = Signature::from_slice(&new_sth.signature).expect("sig");
     vk.verify(&msg, &sig).expect("sth signature verify");
 
     let mut stream = c
@@ -304,13 +354,13 @@ async fn e2e_claim_lifecycle_blackbox() {
         .into_inner();
 
     c.revoke_claim(pb::RevokeClaimRequest {
-        claim_id: claim_id.clone(),
+        claim_id: claim_b.clone(),
         reason: "test revoke".to_string(),
     })
     .await
     .expect("revoke");
     let event = stream.message().await.expect("stream ok").expect("event");
-    assert!(event.entries.iter().any(|e| e.claim_id == claim_id));
+    assert!(event.entries.iter().any(|e| e.claim_id == claim_b));
 
     handle.abort();
 }
@@ -324,52 +374,17 @@ async fn persistence_fetch_capsule_stable_after_restart() {
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
 
-    let created = c
-        .create_claim(pb::CreateClaimRequest {
-            topic_id: hash(21),
-            holdout_handle_id: hash(22),
-            phys_hir_hash: hash(23),
-            epoch_size: 10,
-            oracle_num_symbols: 4,
-            alpha: 0.05,
-            access_credit: 64,
-        })
-        .await
-        .expect("create")
-        .into_inner();
-
-    c.commit_artifacts(pb::CommitArtifactsRequest {
-        claim_id: created.claim_id.clone(),
-        artifacts: vec![pb::Artifact {
-            artifact_hash: hash(24),
-            kind: "wasm".into(),
-        }],
-        wasm_module: valid_wasm(),
-    })
-    .await
-    .expect("commit");
-    c.freeze_gates(pb::FreezeGatesRequest {
-        claim_id: created.claim_id.clone(),
-    })
-    .await
-    .expect("freeze");
-    c.seal_claim(pb::SealClaimRequest {
-        claim_id: created.claim_id.clone(),
-    })
-    .await
-    .expect("seal");
-    c.execute_claim(pb::ExecuteClaimRequest {
-        claim_id: created.claim_id.clone(),
-        decision: pb::Decision::Approve as i32,
-        reason_codes: vec![],
-        canonical_output: vec![1],
+    let claim_id = create_claim_v2(&mut c, 60).await;
+    commit_freeze_seal(&mut c, claim_id.clone(), valid_wasm()).await;
+    c.execute_claim_v2(pb::ExecuteClaimV2Request {
+        claim_id: claim_id.clone(),
     })
     .await
     .expect("execute");
 
     let before = c
         .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: created.claim_id.clone(),
+            claim_id: claim_id.clone(),
         })
         .await
         .expect("fetch")
@@ -380,9 +395,7 @@ async fn persistence_fetch_capsule_stable_after_restart() {
     let (addr2, handle2) = start_server(&data_dir.to_string_lossy()).await;
     let mut c2 = client(addr2).await;
     let after = c2
-        .fetch_capsule(pb::FetchCapsuleRequest {
-            claim_id: created.claim_id,
-        })
+        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
         .await
         .expect("fetch after")
         .into_inner();
