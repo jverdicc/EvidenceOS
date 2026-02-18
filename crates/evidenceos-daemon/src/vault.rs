@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{
-    Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+    Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
 };
 
 use evidenceos_core::oracle::{
@@ -31,13 +31,15 @@ pub struct VaultExecutionContext {
     pub oracle_null_accuracy: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VaultExecutionResult {
     pub canonical_output: Vec<u8>,
     pub judge_trace_hash: [u8; 32],
     pub fuel_used: u64,
     pub oracle_calls: u32,
     pub output_bytes: u32,
+    pub e_value_total: f64,
+    pub leakage_bits_total: f64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -92,7 +94,7 @@ struct VaultHostState {
     call_trace: Vec<HostCallRecord>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VaultEngine {
     engine: Engine,
 }
@@ -101,11 +103,9 @@ impl VaultEngine {
     pub fn new() -> Result<Self, VaultError> {
         let mut config = Config::new();
         config.consume_fuel(true);
-        config.wasm_threads(false);
         config.wasm_simd(false);
         config.wasm_relaxed_simd(false);
         config.wasm_multi_memory(false);
-        config.wasm_reference_types(false);
         config.wasm_memory64(false);
 
         let engine = Engine::new(&config)
@@ -206,73 +206,82 @@ impl VaultEngine {
             fuel_used,
             oracle_calls: host.oracle_calls,
             output_bytes,
+            e_value_total: host.accumulated_e_value,
+            leakage_bits_total: host.leakage_bits,
         })
     }
 
     fn define_imports(&self, linker: &mut Linker<VaultHostState>) -> Result<(), VaultError> {
-        linker
-            .func_wrap(
-                "env",
-                "oracle_bucket",
-                |mut caller: Caller<'_, VaultHostState>,
-                 pred_ptr: i32,
-                 pred_len: i32|
-                 -> Result<i32, Trap> {
-                    let preds = read_guest_memory(&mut caller, pred_ptr, pred_len)?;
-                    let host = caller.data_mut();
-                    host.oracle_calls = host.oracle_calls.saturating_add(1);
-                    if host.oracle_calls > host.config.max_oracle_calls {
-                        host.host_error = Some(VaultError::OracleCallLimitExceeded);
-                        return Err(Trap::new("oracle call limit exceeded"));
-                    }
-                    if preds.len() != host.holdout_len || preds.iter().any(|b| *b > 1) {
-                        host.host_error = Some(VaultError::InvalidOracleInput);
-                        return Err(Trap::new("invalid oracle input"));
-                    }
+        for module in ["env", "kernel"] {
+            linker
+                .func_wrap(
+                    module,
+                    "oracle_bucket",
+                    |mut caller: Caller<'_, VaultHostState>,
+                     pred_ptr: i32,
+                     pred_len: i32|
+                     -> anyhow::Result<i32> {
+                        let preds = read_guest_memory(&mut caller, pred_ptr, pred_len)?;
+                        let host = caller.data_mut();
+                        host.oracle_calls = host.oracle_calls.saturating_add(1);
+                        if host.oracle_calls > host.config.max_oracle_calls {
+                            host.host_error = Some(VaultError::OracleCallLimitExceeded);
+                            return Err(anyhow::anyhow!("oracle call limit exceeded"));
+                        }
+                        if preds.len() != host.holdout_len || preds.iter().any(|b| *b > 1) {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            return Err(anyhow::anyhow!("invalid oracle input"));
+                        }
 
-                    let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
-                        host.host_error = Some(VaultError::InvalidOracleInput);
-                        Trap::new("oracle query failed")
-                    })?;
-                    host.leakage_bits += oracle_result.k_bits;
-                    host.accumulated_e_value *= oracle_result.e_value.max(1e-12);
-                    host.call_trace.push(HostCallRecord::OracleBucket {
-                        input_preview: preds.into_iter().take(TRACE_INPUT_CAP_BYTES).collect(),
-                        bucket: oracle_result.bucket,
-                    });
-                    Ok(oracle_result.bucket as i32)
-                },
-            )
-            .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+                        let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            anyhow::anyhow!("oracle query failed")
+                        })?;
+                        host.leakage_bits += oracle_result.k_bits;
+                        host.accumulated_e_value *= oracle_result.e_value.max(1e-12);
+                        host.call_trace.push(HostCallRecord::OracleBucket {
+                            input_preview: preds.into_iter().take(TRACE_INPUT_CAP_BYTES).collect(),
+                            bucket: oracle_result.bucket,
+                        });
+                        Ok(oracle_result.bucket as i32)
+                    },
+                )
+                .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
 
-        linker
-            .func_wrap(
-                "env",
-                "emit_structured_claim",
-                |mut caller: Caller<'_, VaultHostState>, ptr: i32, len: i32| -> Result<i32, Trap> {
-                    let output = read_guest_memory(&mut caller, ptr, len)?;
-                    let host = caller.data_mut();
-                    if host.output.is_some() {
-                        host.host_error = Some(VaultError::OutputAlreadyEmitted);
-                        return Err(Trap::new("emit_structured_claim may only succeed once"));
-                    }
-                    if output.len() > host.config.max_output_bytes as usize {
-                        host.host_error = Some(VaultError::OutputTooLarge);
-                        return Err(Trap::new("structured output too large"));
-                    }
-                    host.call_trace.push(HostCallRecord::EmitStructuredClaim {
-                        output_preview: output
-                            .iter()
-                            .copied()
-                            .take(TRACE_INPUT_CAP_BYTES)
-                            .collect(),
-                        output_len: output.len() as u32,
-                    });
-                    host.output = Some(output);
-                    Ok(0)
-                },
-            )
-            .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+            linker
+                .func_wrap(
+                    module,
+                    "emit_structured_claim",
+                    |mut caller: Caller<'_, VaultHostState>,
+                     ptr: i32,
+                     len: i32|
+                     -> anyhow::Result<i32> {
+                        let output = read_guest_memory(&mut caller, ptr, len)?;
+                        let host = caller.data_mut();
+                        if host.output.is_some() {
+                            host.host_error = Some(VaultError::OutputAlreadyEmitted);
+                            return Err(anyhow::anyhow!(
+                                "emit_structured_claim may only succeed once"
+                            ));
+                        }
+                        if output.len() > host.config.max_output_bytes as usize {
+                            host.host_error = Some(VaultError::OutputTooLarge);
+                            return Err(anyhow::anyhow!("structured output too large"));
+                        }
+                        host.call_trace.push(HostCallRecord::EmitStructuredClaim {
+                            output_preview: output
+                                .iter()
+                                .copied()
+                                .take(TRACE_INPUT_CAP_BYTES)
+                                .collect(),
+                            output_len: output.len() as u32,
+                        });
+                        host.output = Some(output);
+                        Ok(0)
+                    },
+                )
+                .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+        }
 
         Ok(())
     }
@@ -306,36 +315,36 @@ fn read_guest_memory(
     caller: &mut Caller<'_, VaultHostState>,
     ptr: i32,
     len: i32,
-) -> Result<Vec<u8>, Trap> {
+) -> anyhow::Result<Vec<u8>> {
     if ptr < 0 || len < 0 {
         caller.data_mut().host_error = Some(VaultError::MemoryOob);
-        return Err(Trap::new("negative pointer/length"));
+        return Err(anyhow::anyhow!("negative pointer/length"));
     }
 
     let ptr = ptr as usize;
     let len = len as usize;
     let end = ptr.checked_add(len).ok_or_else(|| {
         caller.data_mut().host_error = Some(VaultError::MemoryOob);
-        Trap::new("pointer overflow")
+        anyhow::anyhow!("pointer overflow")
     })?;
 
     let memory = match caller.get_export("memory") {
         Some(Extern::Memory(memory)) => memory,
         _ => {
             caller.data_mut().host_error = Some(VaultError::MemoryOob);
-            return Err(Trap::new("missing exported memory"));
+            return Err(anyhow::anyhow!("missing exported memory"));
         }
     };
 
     if end > memory.data_size(&mut *caller) {
         caller.data_mut().host_error = Some(VaultError::MemoryOob);
-        return Err(Trap::new("memory read out-of-bounds"));
+        return Err(anyhow::anyhow!("memory read out-of-bounds"));
     }
 
     let mut data = vec![0_u8; len];
     memory.read(&mut *caller, ptr, &mut data).map_err(|_| {
         caller.data_mut().host_error = Some(VaultError::MemoryOob);
-        Trap::new("memory read failed")
+        anyhow::anyhow!("memory read failed")
     })?;
     Ok(data)
 }

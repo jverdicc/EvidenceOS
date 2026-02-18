@@ -70,13 +70,10 @@ impl LedgerSnapshot {
             barrier: l.barrier(),
             wealth: l.wealth,
             w_max: l.w_max,
-            epsilon_total: 0.0,
-            delta_total: 0.0,
-            access_credit_spent: 0.0,
-            compute_fuel_spent: 0.0,
             epsilon_total: l.epsilon_total,
             delta_total: l.delta_total,
             access_credit_spent: l.access_credit_spent,
+            compute_fuel_spent: 0.0,
         }
     }
 }
@@ -158,6 +155,52 @@ impl ClaimCapsule {
         claim_id_hex: String,
         topic_id_hex: String,
         output_schema_id: String,
+        code_ir_manifests: Vec<ManifestEntry>,
+        dependency_capsule_hashes: Vec<String>,
+        structured_output: &[u8],
+        wasm_bytes: &[u8],
+        holdout_commitment_preimage: &[u8],
+        ledger: &ConservationLedger,
+        e_value: f64,
+        certified: bool,
+        decision: i32,
+        reason_codes: Vec<u32>,
+        judge_trace: &[u8],
+        holdout_ref: String,
+        runtime_version: String,
+        aspec_version: String,
+        protocol_version: String,
+        compute_fuel_spent: f64,
+    ) -> Self {
+        Self::new_with_state(
+            claim_id_hex,
+            topic_id_hex,
+            output_schema_id,
+            code_ir_manifests,
+            dependency_capsule_hashes,
+            structured_output,
+            wasm_bytes,
+            holdout_commitment_preimage,
+            ledger,
+            e_value,
+            certified,
+            decision,
+            reason_codes,
+            judge_trace,
+            holdout_ref,
+            runtime_version,
+            aspec_version,
+            protocol_version,
+            compute_fuel_spent,
+            ClaimState::Uncommitted,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_state(
+        claim_id_hex: String,
+        topic_id_hex: String,
+        output_schema_id: String,
         mut code_ir_manifests: Vec<ManifestEntry>,
         mut dependency_capsule_hashes: Vec<String>,
         structured_output: &[u8],
@@ -174,6 +217,7 @@ impl ClaimCapsule {
         aspec_version: String,
         protocol_version: String,
         compute_fuel_spent: f64,
+        state: ClaimState,
     ) -> Self {
         code_ir_manifests.sort_by(|a, b| {
             a.kind
@@ -232,7 +276,7 @@ impl ClaimCapsule {
                 aspec_version,
                 protocol_version,
             },
-            state: ClaimState::Uncommitted,
+            state,
         }
     }
 
