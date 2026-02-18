@@ -1,0 +1,27 @@
+[package]
+name = "evidenceos-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+evidenceos-core = { path = "../crates/evidenceos-core" }
+tempfile = "3"
+
+[[bin]]
+name = "fuzz_aspec_verify"
+path = "fuzz_targets/fuzz_aspec_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_etl_read_entry"
+path = "fuzz_targets/fuzz_etl_read_entry.rs"
+test = false
+doc = false
+bench = false

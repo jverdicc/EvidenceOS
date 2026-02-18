@@ -475,6 +475,7 @@ impl Etl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn test_leaves(n: usize) -> Vec<Hash32> {
         (0..n)
@@ -667,6 +668,43 @@ mod tests {
         }
         for id in revoked {
             assert!(etl.is_revoked(id));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn etl_inclusion_and_consistency_hold_for_random_appends(
+            entries in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 1..48),
+            target_idx in 0usize..64,
+            old_size_hint in 0usize..64,
+        ) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("etl-prop.log");
+            let mut etl = Etl::open_or_create(&path).expect("etl");
+
+            for entry in &entries {
+                etl.append(entry).expect("append");
+            }
+
+            let size = etl.tree_size() as usize;
+            prop_assume!(size > 0);
+
+            let idx = target_idx % size;
+            let proof = etl.inclusion_proof(idx as u64).expect("inclusion proof");
+            let leaf = etl.leaf_hash_at(idx as u64).expect("leaf");
+            let root = etl.root_hash();
+            prop_assert!(verify_inclusion_proof(&proof, &leaf, idx, size, &root));
+
+            let old_size = old_size_hint % (size + 1);
+            let old_root = etl.root_at_size(old_size as u64).expect("old root");
+            let consistency = etl.consistency_proof(old_size as u64, size as u64).expect("consistency proof");
+            prop_assert!(verify_consistency_proof(&old_root, &root, old_size, size, &consistency));
+
+            if !proof.is_empty() {
+                let mut tampered = proof.clone();
+                tampered[0][0] ^= 1;
+                prop_assert!(!verify_inclusion_proof(&tampered, &leaf, idx, size, &root));
+            }
         }
     }
 }

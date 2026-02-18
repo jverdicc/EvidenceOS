@@ -285,6 +285,7 @@ impl ConservationLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn alpha_prime_correctness() {
@@ -332,5 +333,68 @@ mod tests {
     fn canary_pulse_freezes_at_threshold() {
         let mut c = CanaryPulse::new(0.05).expect("canary");
         assert!(matches!(c.update(25.0), Err(EvidenceOSError::Frozen)));
+    }
+
+    proptest! {
+        #[test]
+        fn conservation_ledger_invariants_hold_under_random_sequences(
+            alpha in 0.000_1_f64..0.999_9,
+            budget in 0.0_f64..256.0,
+            ops in prop::collection::vec(
+                (
+                    proptest::bool::ANY,
+                    0.0_f64..8.0,
+                    0.01_f64..4.0,
+                ),
+                1..128,
+            ),
+        ) {
+            let mut ledger = ConservationLedger::new(alpha)
+                .expect("alpha strategy must produce a valid ledger")
+                .with_budget(Some(budget));
+
+            let mut expected_spent = 0.0_f64;
+            let mut expected_wealth = 1.0_f64;
+            let mut expected_w_max = 1.0_f64;
+            let mut expected_frozen = false;
+
+            for (is_charge, charge_bits, e_value) in ops {
+                if is_charge {
+                    let result = ledger.charge(charge_bits, "prop_charge", Value::Null);
+                    if expected_frozen {
+                        prop_assert!(matches!(result, Err(EvidenceOSError::Frozen)));
+                        continue;
+                    }
+
+                    if expected_spent + charge_bits > budget + f64::EPSILON {
+                        expected_frozen = true;
+                        prop_assert!(matches!(result, Err(EvidenceOSError::Frozen)));
+                    } else {
+                        expected_spent += charge_bits;
+                        prop_assert!(result.is_ok());
+                    }
+                } else {
+                    let result = ledger.settle_e_value(e_value, "prop_settle", Value::Null);
+                    if expected_frozen {
+                        prop_assert!(matches!(result, Err(EvidenceOSError::Frozen)));
+                        continue;
+                    }
+
+                    prop_assert!(result.is_ok());
+                    expected_wealth *= e_value;
+                    expected_w_max = expected_w_max.max(expected_wealth);
+                }
+
+                prop_assert!(ledger.k_bits_total >= 0.0);
+                prop_assert!(ledger.alpha_prime() >= 0.0);
+                prop_assert!(ledger.barrier().is_finite());
+                prop_assert!(ledger.wealth > 0.0);
+                prop_assert!(ledger.w_max() + 1e-12 >= ledger.wealth);
+                prop_assert!((ledger.k_bits_total - expected_spent).abs() < 1e-9);
+                prop_assert!((ledger.wealth - expected_wealth).abs() < 1e-9);
+                prop_assert!((ledger.w_max() - expected_w_max).abs() < 1e-9);
+                prop_assert_eq!(ledger.frozen, expected_frozen);
+            }
+        }
     }
 }
