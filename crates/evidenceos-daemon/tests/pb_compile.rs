@@ -1,7 +1,7 @@
 use evidenceos_protocol::pb;
 
-#[test]
-fn protocol_crate_exports_client_and_server_stubs() {
+#[tokio::test]
+async fn protocol_crate_exports_client_and_server_stubs() {
     fn assert_service_trait<T: pb::evidence_os_server::EvidenceOs>() {}
 
     struct Dummy;

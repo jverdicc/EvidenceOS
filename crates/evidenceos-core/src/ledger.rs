@@ -545,6 +545,10 @@ mod tests {
                 prop_assert!((ledger.wealth - expected_wealth).abs() < 1e-9);
                 prop_assert!((ledger.w_max() - expected_w_max).abs() < 1e-9);
                 prop_assert_eq!(ledger.frozen, expected_frozen);
+            }
+        }
+    }
+
     #[test]
     fn barrier_increases_with_k() {
         let low = certification_barrier(0.05, 2.0);

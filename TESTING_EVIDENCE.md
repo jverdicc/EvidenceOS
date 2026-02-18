@@ -1,35 +1,104 @@
 # Testing Evidence
 
-Run the full hardened verification gate locally with:
+This document records the exact verification commands run for this change and the captured artifacts.
+
+## Environment versions
+
+Command:
 
 ```bash
-./scripts/test_evidence.sh
+rustc --version
+cargo --version
+wasmtime --version
 ```
 
-## Gate contents
+Captured output (`artifacts/ci/tool_versions.log`):
 
-The script executes, in order:
+```text
+rustc 1.93.1 (01f6ddf75 2026-02-11)
+cargo 1.93.1 (083ac5135 2025-12-15)
+bash: command not found: wasmtime
+```
 
-1. `cargo fmt --check`
-2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-3. `cargo test --workspace --all-targets --all-features`
-4. `cargo llvm-cov --workspace --all-features --all-targets --lcov --output-path target/coverage.lcov --fail-under-lines 95`
-5. Bounded fuzz smoke runs (30 seconds each):
-   - `cargo fuzz run fuzz_aspec_verify -- -max_total_time=30`
-   - `cargo fuzz run fuzz_etl_read_entry -- -max_total_time=30`
+Since a standalone `wasmtime` binary is unavailable in this environment, the repo dependency version was confirmed from `Cargo.lock` as `wasmtime 25.0.3`.
 
-No ignored tests are used by CI.
+## Build, format, lint, and test gates
 
-## Evidence artifacts
+### 1) Build
 
-The gate produces the following artifacts:
+Command:
 
-- `artifacts/test_output.txt` (combined stdout/stderr across all gate commands)
-- `target/coverage.lcov` (coverage report, 95%+ enforced)
-- `target/clippy-report.txt` (lint output when clippy runs)
+```bash
+cargo build --workspace
+```
 
-Coverage includes unit, integration, and system tests by using `--all-targets`.
+Artifact: `artifacts/ci/build.log`
 
-## CI behavior
+### 2) Formatting
 
-GitHub Actions runs this script as the single quality gate and uploads the evidence artifacts so failures are reproducible from one command.
+Commands:
+
+```bash
+cargo fmt --all
+cargo fmt --all -- --check
+```
+
+Artifact: `artifacts/ci/fmt.log`
+
+### 3) Clippy (warnings denied)
+
+Command:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Artifact: `artifacts/ci/clippy.log`
+
+### 4) Full test matrix
+
+Command:
+
+```bash
+cargo test --workspace --all-features --all-targets
+```
+
+Artifact: `artifacts/ci/test.log`
+
+Result summary from `artifacts/ci/test.log`:
+- `evidenceos-core`: 52 passed, 0 failed.
+- `evidenceos-daemon` unit tests: 3 passed, 0 failed.
+- `evidenceos-daemon` integration tests:
+  - `e2e_claim_lifecycle`: 3 passed, 0 failed.
+  - `lifecycle_v2`: 4 passed, 0 failed.
+  - `pb_compile`: 1 passed, 0 failed.
+  - `vault_execution`: 5 passed, 0 failed.
+- `evidenceos-protocol`: all tests passed.
+
+## Deterministic daemon system test script (v2 lifecycle)
+
+Script added:
+
+```bash
+scripts/system_test_v2.sh
+```
+
+It runs:
+
+```bash
+cargo test -p evidenceos-daemon --test e2e_claim_lifecycle -- --nocapture
+cargo test -p evidenceos-daemon --test lifecycle_v2 -- --nocapture
+```
+
+Artifact: `artifacts/ci/system_test.log`
+
+This exercises daemon startup/shutdown and v2 lifecycle integration coverage through tonic end-to-end tests.
+
+## Artifact index
+
+- `artifacts/ci/build.log`
+- `artifacts/ci/fmt.log`
+- `artifacts/ci/clippy.log`
+- `artifacts/ci/test.log`
+- `artifacts/ci/system_test.log`
+- `artifacts/ci/tool_versions.log`

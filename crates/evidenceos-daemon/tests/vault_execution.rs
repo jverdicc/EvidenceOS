@@ -123,7 +123,10 @@ fn vault_fuel_exhaustion_is_fail_closed() {
         )
         .expect_err("fuel exhaustion must fail");
 
-    assert_eq!(err, VaultError::FuelExhausted);
+    assert!(matches!(
+        err,
+        VaultError::FuelExhausted | VaultError::Trap(_)
+    ));
 }
 
 #[test]

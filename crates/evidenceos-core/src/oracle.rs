@@ -154,7 +154,7 @@ impl OracleResolution {
                 let floor = scaled.floor();
                 let frac = scaled - floor;
                 if (frac - 0.5).abs() < f64::EPSILON {
-                    if (floor as u64) % 2 == 0 {
+                    if (floor as u64).is_multiple_of(2) {
                         floor
                     } else {
                         floor + 1.0
@@ -504,16 +504,16 @@ mod tests {
             let overflow = [buckets as u8];
             prop_assert!(matches!(
                 resolution.validate_canonical_bytes(&overflow),
-                Err(EvidenceOSError::InvalidArgument)
+                Err(EvidenceOSError::InvalidCanonicalEncoding)
             ));
 
             prop_assert!(matches!(
                 resolution.validate_canonical_bytes(&[]),
-                Err(EvidenceOSError::InvalidArgument)
+                Err(EvidenceOSError::InvalidCanonicalEncoding)
             ));
             prop_assert!(matches!(
                 resolution.validate_canonical_bytes(&[encoded[0], 0]),
-                Err(EvidenceOSError::InvalidArgument)
+                Err(EvidenceOSError::InvalidCanonicalEncoding)
             ));
         }
     }

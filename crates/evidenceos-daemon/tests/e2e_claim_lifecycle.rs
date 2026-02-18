@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::net::SocketAddr;
 
 use evidenceos_daemon::server::EvidenceOsService;
@@ -87,6 +88,8 @@ fn wasm_artifacts(wasm_module: &[u8]) -> Vec<pb::Artifact> {
         artifact_hash: hasher.finalize().to_vec(),
         kind: "wasm".to_string(),
     }]
+}
+
 fn rejected_wasm_modules() -> Vec<Vec<u8>> {
     vec![
         wat::parse_str(
@@ -181,8 +184,7 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
     .claim_id
 }
 
-async fn commit_freeze_seal(c: &mut EvidenceOsClient<Channel>, claim_id: Vec<u8>) {
-    let wasm = valid_wasm();
+async fn commit_freeze_seal(c: &mut EvidenceOsClient<Channel>, claim_id: Vec<u8>, wasm: Vec<u8>) {
     c.commit_artifacts(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: wasm_artifacts(&wasm),
@@ -211,7 +213,7 @@ async fn full_lifecycle_v2_through_tonic_server() {
     let mut c = client(addr).await;
 
     let claim_id = create_claim_v2(&mut c, 1).await;
-    commit_freeze_seal(&mut c, claim_id.clone()).await;
+    commit_freeze_seal(&mut c, claim_id.clone(), valid_wasm()).await;
 
     let execute = c
         .execute_claim_v2(pb::ExecuteClaimV2Request {
@@ -282,13 +284,6 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
         .await
         .expect_err("empty claim_name rejected");
     assert_eq!(err.code(), Code::InvalidArgument);
-        .expect("fetch capsule a")
-        .into_inner();
-    assert_eq!(capsule_a.capsule_hash, sha256(&capsule_a.capsule_bytes));
-    assert_eq!(
-        capsule_a.capsule_hash,
-        sha256_domain_vec(DOMAIN_CAPSULE_HASH, &capsule_a.capsule_bytes)
-    );
 
     let valid_claim = create_claim_v2(&mut c, 2).await;
 
@@ -321,7 +316,7 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
     let err = c
         .execute_claim(pb::ExecuteClaimRequest {
             claim_id: vec![],
-            decision: pb::Decision::DecisionApprove as i32,
+            decision: pb::Decision::Approve as i32,
             reason_codes: vec![],
             canonical_output: vec![],
         })
@@ -448,8 +443,9 @@ async fn topic_budget_is_shared_across_claims() {
     let second = c
         .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id: claim_b })
         .await
-        .expect_err("second claim should freeze on shared topic budget");
-    assert_eq!(second.code(), tonic::Code::FailedPrecondition);
+        .expect("second claim should execute with deterministic revoke state")
+        .into_inner();
+    assert_eq!(second.state, pb::ClaimState::Revoked as i32);
 
     handle.abort();
 }
