@@ -5,14 +5,12 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-mod server;
-
 use clap::Parser;
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
+use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
-use server::EvidenceOsService;
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-daemon")]
