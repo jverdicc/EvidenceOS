@@ -25,6 +25,7 @@ use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::ConservationLedger;
+use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
@@ -100,7 +101,7 @@ struct Claim {
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
     epoch_size: u64,
-    oracle_num_symbols: u32,
+    oracle_resolution: OracleResolution,
     state: ClaimState,
     artifacts: Vec<([u8; 32], String)>,
     wasm_module: Vec<u8>,
@@ -399,34 +400,11 @@ fn build_revocations_snapshot(
     }
 }
 
-fn canonical_len_for_symbols(num_symbols: u32) -> Result<usize, Status> {
-    if num_symbols < 2 {
-        return Err(Status::invalid_argument("oracle_num_symbols must be >= 2"));
-    }
-    let bits = 32 - (num_symbols - 1).leading_zeros();
-    Ok((bits as usize).div_ceil(8))
-}
-
-fn decode_canonical_symbol(canonical: &[u8], num_symbols: u32) -> Result<u32, Status> {
-    let expected_len = canonical_len_for_symbols(num_symbols)?;
-    if canonical.len() != expected_len {
-        return Err(Status::invalid_argument("canonical output length mismatch"));
-    }
-    let mut value: u32 = 0;
-    for b in canonical {
-        value = (value << 8) | u32::from(*b);
-    }
-    if value >= num_symbols {
-        return Err(Status::invalid_argument("canonical symbol out of range"));
-    }
-    Ok(value)
-}
-
 fn execution_limits(
     claim: &Claim,
     _expected_output_len: Option<usize>,
 ) -> Result<ExecutionLimits, Status> {
-    let canonical_len = canonical_len_for_symbols(claim.oracle_num_symbols)?;
+    let canonical_len = claim.oracle_resolution.encoded_len_bytes();
     let max_output_bytes = canonical_len;
     let max_memory_bytes = if claim.lane == Lane::Heavy {
         2 * 65_536
@@ -510,7 +488,8 @@ impl EvidenceOs for EvidenceOsService {
         let topic_id = parse_hash32(&req.topic_id, "topic_id")?;
         let holdout_handle_id = parse_hash32(&req.holdout_handle_id, "holdout_handle_id")?;
         let phys_hir_hash = parse_hash32(&req.phys_hir_hash, "phys_hir_hash")?;
-        let _ = canonical_len_for_symbols(req.oracle_num_symbols)?;
+        let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
+            .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
         let ledger = ConservationLedger::new(req.alpha)
             .map_err(|_| Status::invalid_argument("alpha must be in (0,1)"))
             .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
@@ -520,7 +499,7 @@ impl EvidenceOs for EvidenceOsService {
         id_payload.extend_from_slice(&holdout_handle_id);
         id_payload.extend_from_slice(&phys_hir_hash);
         id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
-        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
         let claim = Claim {
@@ -532,7 +511,7 @@ impl EvidenceOs for EvidenceOsService {
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             epoch_size: req.epoch_size,
-            oracle_num_symbols: req.oracle_num_symbols,
+            oracle_resolution,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
             wasm_module: Vec::new(),
@@ -724,14 +703,15 @@ impl EvidenceOs for EvidenceOsService {
                 ));
             }
             let canonical_output = emitted_output;
-            let _ = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols).map_err(
-                |_| {
+            let _ = claim
+                .oracle_resolution
+                .validate_canonical_bytes(&canonical_output)
+                .map_err(|_| {
                     let _ = self.record_incident(claim, "non_canonical_output");
                     Status::invalid_argument("non-canonical output")
-                },
-            )?;
+                })?;
 
-            let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let charge_bits = claim.oracle_resolution.bits_per_call();
             claim
                 .ledger
                 .charge(
@@ -760,9 +740,18 @@ impl EvidenceOs for EvidenceOsService {
                 .settle_e_value(e_value, "decision", json!({"decision": req.decision}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
 
-            Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
-                Self::transition_claim(claim, ClaimState::Certified)?;
+            let current_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Status::internal("system clock before unix epoch"))?
+                .as_secs()
+                / claim.epoch_size;
+            if claim.oracle_resolution.ttl_expired(current_epoch) {
+                Self::transition_claim(claim, ClaimState::Stale)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Settled)?;
+                if claim.ledger.can_certify() {
+                    Self::transition_claim(claim, ClaimState::Certified)?;
+                }
             }
 
             let mut capsule = ClaimCapsule::new(
@@ -919,12 +908,15 @@ impl EvidenceOs for EvidenceOsService {
         let mut holdout_handle_id = [0u8; 32];
         holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
 
+        let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
+            .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
+
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic.topic_id);
         id_payload.extend_from_slice(&holdout_handle_id);
         id_payload.extend_from_slice(&phys);
         id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
-        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
         let claim = Claim {
@@ -936,7 +928,7 @@ impl EvidenceOs for EvidenceOsService {
             output_schema_id: metadata.output_schema_id,
             phys_hir_hash: phys,
             epoch_size: req.epoch_size,
-            oracle_num_symbols: req.oracle_num_symbols,
+            oracle_resolution,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
             wasm_module: Vec::new(),
@@ -990,8 +982,11 @@ impl EvidenceOs for EvidenceOsService {
                 claim.epoch_size,
                 execution_limits(claim, None)?,
             )?;
-            let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
-            let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let _sym = claim
+                .oracle_resolution
+                .decode_bucket(&canonical_output)
+                .map_err(|_| Status::invalid_argument("non-canonical output"))?;
+            let charge_bits = claim.oracle_resolution.bits_per_call();
             claim
                 .ledger
                 .charge(
@@ -1019,9 +1014,18 @@ impl EvidenceOs for EvidenceOsService {
                 .ledger
                 .settle_e_value(e_value, "decision", json!({"decision": decision}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
-            Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
-                Self::transition_claim(claim, ClaimState::Certified)?;
+            let current_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Status::internal("system clock before unix epoch"))?
+                .as_secs()
+                / claim.epoch_size;
+            if claim.oracle_resolution.ttl_expired(current_epoch) {
+                Self::transition_claim(claim, ClaimState::Stale)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Settled)?;
+                if claim.ledger.can_certify() {
+                    Self::transition_claim(claim, ClaimState::Certified)?;
+                }
             }
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),
@@ -1336,7 +1340,8 @@ mod tests {
     #[test]
     fn canonical_encoding_rejects_invalid_without_charge() {
         let mut ledger = ConservationLedger::new(0.1).expect("valid ledger");
-        assert!(decode_canonical_symbol(&[0xFF], 2).is_err());
+        let oracle = OracleResolution::new(2, 0.0).expect("resolution");
+        assert!(oracle.decode_bucket(&[0xFF]).is_err());
         assert_eq!(ledger.k_bits_total, 0.0);
         ledger
             .charge(1.0, "structured_output", json!({}))
