@@ -68,9 +68,7 @@ pub struct ConservationLedger {
 impl ConservationLedger {
     pub fn new(alpha: f64) -> EvidenceOSResult<Self> {
         if !(alpha > 0.0 && alpha < 1.0) {
-            return Err(EvidenceOSError::InvalidArgument(
-                "alpha must be in (0,1)".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self {
             alpha,
@@ -105,9 +103,7 @@ impl ConservationLedger {
             return Err(EvidenceOSError::Frozen);
         }
         if k_bits < 0.0 {
-            return Err(EvidenceOSError::InvalidArgument(
-                "k_bits must be nonnegative".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         let new_total = self.k_bits_total + k_bits;
         if let Some(b) = self.k_bits_budget {
@@ -138,9 +134,7 @@ impl ConservationLedger {
             return Err(EvidenceOSError::Frozen);
         }
         if e_value <= 0.0 {
-            return Err(EvidenceOSError::InvalidArgument(
-                "e_value must be positive".to_string(),
-            ));
+            return Err(EvidenceOSError::InvalidArgument);
         }
         self.wealth *= e_value;
         self.events

@@ -315,6 +315,7 @@ name = "evidenceos-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "evidenceos-protocol",
  "hex",
  "parking_lot",
  "proptest",
@@ -336,6 +337,7 @@ dependencies = [
  "anyhow",
  "clap",
  "evidenceos-core",
+ "evidenceos-protocol",
  "parking_lot",
  "prost",
  "protoc-bin-vendored",
@@ -353,6 +355,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "evidenceos-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "fastrand"

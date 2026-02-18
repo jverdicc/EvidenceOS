@@ -84,15 +84,12 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
 
     let parser = Parser::new(0);
     for payload in parser.parse_all(wasm) {
-        let payload =
-            payload.map_err(|e| EvidenceOSError::AspecRejected(format!("parse error: {e}")))?;
+        let payload = payload.map_err(|_| EvidenceOSError::AspecRejected)?;
 
         match payload {
             Payload::ImportSection(s) => {
                 for import in s {
-                    let import = import.map_err(|e| {
-                        EvidenceOSError::AspecRejected(format!("import parse error: {e}"))
-                    })?;
+                    let import = import.map_err(|_| EvidenceOSError::AspecRejected)?;
 
                     match import.ty {
                         TypeRef::Func(_) => {
@@ -133,14 +130,12 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
                 let caller = func_index;
                 next_defined_func_index += 1;
 
-                let mut reader = body.get_operators_reader().map_err(|e| {
-                    EvidenceOSError::AspecRejected(format!("operators reader error: {e}"))
-                })?;
+                let mut reader = body
+                    .get_operators_reader()
+                    .map_err(|_| EvidenceOSError::AspecRejected)?;
 
                 while !reader.eof() {
-                    let op = reader.read().map_err(|e| {
-                        EvidenceOSError::AspecRejected(format!("operator parse error: {e}"))
-                    })?;
+                    let op = reader.read().map_err(|_| EvidenceOSError::AspecRejected)?;
                     instruction_count += 1;
 
                     match op {
@@ -320,11 +315,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> EvidenceOSResult<Aspec
     if ok {
         Ok(report)
     } else {
-        Err(EvidenceOSError::AspecRejected(format!(
-            "{} violation(s): {}",
-            reasons.len(),
-            reasons.join("; ")
-        )))
+        Err(EvidenceOSError::AspecRejected)
     }
 }
 
@@ -344,7 +335,7 @@ mod tests {
         let wasm = wat::parse_str(wat).unwrap();
         let err = verify_aspec(&wasm, &AspecPolicy::default()).unwrap_err();
         match err {
-            EvidenceOSError::AspecRejected(msg) => assert!(msg.contains("loops are banned")),
+            EvidenceOSError::AspecRejected => {}
             _ => panic!("unexpected error"),
         }
     }

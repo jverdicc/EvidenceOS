@@ -8,6 +8,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+evidenceos-protocol = { path = "../evidenceos-protocol" }
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
