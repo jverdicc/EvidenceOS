@@ -11,7 +11,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
-use server::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 use server::EvidenceOsService;
 
 #[derive(Debug, Parser)]

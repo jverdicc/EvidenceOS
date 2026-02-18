@@ -8,16 +8,14 @@ use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 
 use evidenceos_core::etl::Etl;
-
-pub mod pb {
-    tonic::include_proto!("evidenceos.v1");
-}
+use evidenceos_protocol::pb;
 
 use pb::evidence_os_server::EvidenceOs;
 
@@ -149,7 +147,7 @@ struct Capsule {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PersistedState {
     claims: Vec<Claim>,
-    revocations: Vec<([u8; 32], u64)>,
+    revocations: Vec<([u8; 32], u64, String)>,
     signing_key: [u8; 32],
 }
 
@@ -158,7 +156,7 @@ struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
     etl: Mutex<Etl>,
     data_path: PathBuf,
-    revocations: Mutex<Vec<([u8; 32], u64)>>,
+    revocations: Mutex<Vec<([u8; 32], u64, String)>>,
     lock_file: File,
     signing_key: [u8; 32],
 }
@@ -261,6 +259,26 @@ fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&out);
     hash
+}
+
+fn sign_payload(signing_key: &[u8; 32], payload: &[u8]) -> [u8; 64] {
+    let key = SigningKey::from_bytes(signing_key);
+    let sig: Signature = key.sign(payload);
+    sig.to_bytes()
+}
+
+fn build_signed_tree_head(etl: &Etl, signing_key: &[u8; 32]) -> pb::SignedTreeHead {
+    let tree_size = etl.tree_size();
+    let root_hash = etl.root_hash();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&tree_size.to_be_bytes());
+    payload.extend_from_slice(&root_hash);
+    let signature = sign_payload(signing_key, &payload);
+    pb::SignedTreeHead {
+        tree_size,
+        root_hash: root_hash.to_vec(),
+        signature: signature.to_vec(),
+    }
 }
 
 fn assert_transition(from: ClaimState, to: ClaimState) -> Result<(), Status> {
@@ -539,25 +557,15 @@ impl EvidenceOs for EvidenceOsService {
         &self,
         request: Request<pb::GetCapsuleRequest>,
     ) -> Result<Response<pb::GetCapsuleResponse>, Status> {
-        let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
-        let claims = self.state.claims.lock();
-        let claim = claims
-            .get(&claim_id)
-            .ok_or_else(|| Status::not_found("claim not found"))?;
-        let capsule_bytes = claim
-            .capsule_bytes
-            .clone()
-            .ok_or_else(|| Status::failed_precondition("capsule not available"))?;
-        let capsule_hash = claim
-            .capsule_hash
-            .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?;
-        let etl_index = claim
-            .etl_index
-            .ok_or_else(|| Status::failed_precondition("etl index unavailable"))?;
+        let claim_id = request.into_inner().claim_id;
+        let resp = self
+            .fetch_capsule(Request::new(pb::FetchCapsuleRequest { claim_id }))
+            .await?
+            .into_inner();
         Ok(Response::new(pb::GetCapsuleResponse {
-            capsule_bytes,
-            capsule_hash: capsule_hash.to_vec(),
-            etl_index,
+            capsule_bytes: resp.capsule_bytes,
+            capsule_hash: resp.capsule_hash,
+            etl_index: resp.etl_index,
         }))
     }
 
@@ -566,16 +574,11 @@ impl EvidenceOs for EvidenceOsService {
         _request: Request<pb::GetSignedTreeHeadRequest>,
     ) -> Result<Response<pb::GetSignedTreeHeadResponse>, Status> {
         let etl = self.state.etl.lock();
-        let tree_size = etl.tree_size();
-        let root_hash = etl.root_hash();
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&tree_size.to_be_bytes());
-        payload.extend_from_slice(&root_hash);
-        let signature = sha256_domain(&self.state.signing_key, &payload);
+        let sth = build_signed_tree_head(&etl, &self.state.signing_key);
         Ok(Response::new(pb::GetSignedTreeHeadResponse {
-            tree_size,
-            root_hash: root_hash.to_vec(),
-            signature: signature.to_vec(),
+            tree_size: sth.tree_size,
+            root_hash: sth.root_hash,
+            signature: sth.signature,
         }))
     }
 
@@ -626,23 +629,128 @@ impl EvidenceOs for EvidenceOsService {
 
     async fn get_revocation_feed(
         &self,
-        _request: Request<pb::GetRevocationFeedRequest>,
+        request: Request<pb::GetRevocationFeedRequest>,
     ) -> Result<Response<pb::GetRevocationFeedResponse>, Status> {
+        let _ = request;
+        let resp = self
+            .watch_revocations(Request::new(pb::WatchRevocationsRequest {}))
+            .await?
+            .into_inner();
+        Ok(Response::new(pb::GetRevocationFeedResponse {
+            entries: resp.entries,
+            signature: resp.signature,
+        }))
+    }
+
+    async fn fetch_capsule(
+        &self,
+        request: Request<pb::FetchCapsuleRequest>,
+    ) -> Result<Response<pb::FetchCapsuleResponse>, Status> {
+        let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
+        let claims = self.state.claims.lock();
+        let claim = claims
+            .get(&claim_id)
+            .ok_or_else(|| Status::not_found("claim not found"))?;
+        let capsule_bytes = claim
+            .capsule_bytes
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("capsule not available"))?;
+        let capsule_hash = claim
+            .capsule_hash
+            .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?;
+        let etl_index = claim
+            .etl_index
+            .ok_or_else(|| Status::failed_precondition("etl index unavailable"))?;
+        drop(claims);
+
+        let etl = self.state.etl.lock();
+        let tree_size = etl.tree_size();
+        let root_hash = etl.root_hash();
+        let leaf_hash = etl
+            .leaf_hash_at(etl_index)
+            .map_err(|_| Status::not_found("leaf index not found"))?;
+        let audit_path = etl
+            .inclusion_proof(etl_index)
+            .map_err(|_| Status::not_found("leaf index not found"))?;
+
+        let consistency_path: Vec<Vec<u8>> = Vec::new();
+
+        Ok(Response::new(pb::FetchCapsuleResponse {
+            capsule_bytes,
+            capsule_hash: capsule_hash.to_vec(),
+            etl_index,
+            signed_tree_head: Some(build_signed_tree_head(&etl, &self.state.signing_key)),
+            inclusion_proof: Some(pb::MerkleInclusionProof {
+                leaf_hash: leaf_hash.to_vec(),
+                leaf_index: etl_index,
+                tree_size,
+                audit_path: audit_path.into_iter().map(|h| h.to_vec()).collect(),
+            }),
+            consistency_proof: Some(pb::MerkleConsistencyProof {
+                old_tree_size: etl_index + 1,
+                new_tree_size: tree_size,
+                path: consistency_path,
+            }),
+            root_hash: root_hash.to_vec(),
+            tree_size,
+        }))
+    }
+
+    async fn revoke_claim(
+        &self,
+        request: Request<pb::RevokeClaimRequest>,
+    ) -> Result<Response<pb::RevokeClaimResponse>, Status> {
+        let req = request.into_inner();
+        if req.reason.is_empty() || req.reason.len() > 256 {
+            return Err(Status::invalid_argument("reason must be in [1,256]"));
+        }
+        let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            claim.state = ClaimState::Revoked;
+        }
+        let timestamp_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Status::internal("system clock before unix epoch"))?
+            .as_secs();
+        self.state
+            .revocations
+            .lock()
+            .push((claim_id, timestamp_unix, req.reason));
+        persist_all(&self.state)?;
+
+        Ok(Response::new(pb::RevokeClaimResponse {
+            state: pb::ClaimState::Revoked as i32,
+            timestamp_unix,
+        }))
+    }
+
+    async fn watch_revocations(
+        &self,
+        _request: Request<pb::WatchRevocationsRequest>,
+    ) -> Result<Response<pb::WatchRevocationsResponse>, Status> {
         let entries_raw = self.state.revocations.lock().clone();
         let mut payload = Vec::new();
         let mut entries = Vec::new();
-        for (claim_id, timestamp_unix) in entries_raw {
+        for (claim_id, timestamp_unix, reason) in entries_raw {
             payload.extend_from_slice(&claim_id);
             payload.extend_from_slice(&timestamp_unix.to_be_bytes());
+            payload.extend_from_slice(reason.as_bytes());
             entries.push(pb::RevocationEntry {
                 claim_id: claim_id.to_vec(),
                 timestamp_unix,
+                reason,
             });
         }
-        let signature = sha256_domain(&self.state.signing_key, &payload);
-        Ok(Response::new(pb::GetRevocationFeedResponse {
+        let signature = sign_payload(&self.state.signing_key, &payload);
+        let etl = self.state.etl.lock();
+        Ok(Response::new(pb::WatchRevocationsResponse {
             entries,
             signature: signature.to_vec(),
+            signed_tree_head: Some(build_signed_tree_head(&etl, &self.state.signing_key)),
         }))
     }
 }
