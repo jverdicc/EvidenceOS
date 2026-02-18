@@ -18,10 +18,14 @@ pub enum ClaimState {
     Revoked,
     Tainted,
     Stale,
+    Frozen,
 }
 
 impl ClaimState {
     pub fn transition(&self, to: ClaimState) -> Result<ClaimState, String> {
+        if to == ClaimState::Frozen {
+            return Ok(ClaimState::Frozen);
+        }
         let valid = matches!(
             (self, to),
             (ClaimState::Uncommitted, ClaimState::Sealed)
@@ -70,6 +74,9 @@ impl LedgerSnapshot {
             delta_total: 0.0,
             access_credit_spent: 0.0,
             compute_fuel_spent: 0.0,
+            epsilon_total: l.epsilon_total,
+            delta_total: l.delta_total,
+            access_credit_spent: l.access_credit_spent,
         }
     }
 }
