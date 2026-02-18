@@ -80,16 +80,16 @@ impl ClaimCapsule {
     }
 
     /// Deterministic JSON encoding.
-    pub fn to_json_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("capsule JSON serialization should not fail")
+    pub fn to_json_bytes(&self) -> crate::error::EvidenceOSResult<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|_| crate::error::EvidenceOSError::Internal)
     }
 
-    pub fn capsule_hash_hex(&self) -> String {
-        sha256_hex(&self.to_json_bytes())
+    pub fn capsule_hash_hex(&self) -> crate::error::EvidenceOSResult<String> {
+        Ok(sha256_hex(&self.to_json_bytes()?))
     }
 
-    pub fn etl_leaf_hash(&self) -> [u8; 32] {
-        leaf_hash(&self.to_json_bytes())
+    pub fn etl_leaf_hash(&self) -> crate::error::EvidenceOSResult<[u8; 32]> {
+        Ok(leaf_hash(&self.to_json_bytes()?))
     }
 }
 
@@ -112,7 +112,10 @@ mod tests {
             false,
         );
         let c2 = c1.clone();
-        assert_eq!(c1.to_json_bytes(), c2.to_json_bytes());
-        assert_eq!(c1.capsule_hash_hex(), c2.capsule_hash_hex());
+        assert_eq!(c1.to_json_bytes().unwrap(), c2.to_json_bytes().unwrap());
+        assert_eq!(
+            c1.capsule_hash_hex().unwrap(),
+            c2.capsule_hash_hex().unwrap()
+        );
     }
 }

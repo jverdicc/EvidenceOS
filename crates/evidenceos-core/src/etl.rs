@@ -47,7 +47,6 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
             if i + 1 < layer.len() {
                 next.push(node_hash(&layer[i], &layer[i + 1]));
             } else {
-                // odd: carry
                 next.push(layer[i]);
             }
             i += 2;
@@ -57,7 +56,42 @@ pub fn merkle_root(leaves: &[Hash32]) -> Hash32 {
     layer[0]
 }
 
-/// Evidence Transparency Log (append-only file + in-memory Merkle root).
+pub fn merkle_root_prefix(leaves: &[Hash32], tree_size: usize) -> Hash32 {
+    let bounded = tree_size.min(leaves.len());
+    merkle_root(&leaves[..bounded])
+}
+
+pub fn inclusion_proof(leaves: &[Hash32], leaf_index: usize) -> EvidenceOSResult<Vec<Hash32>> {
+    if leaf_index >= leaves.len() {
+        return Err(EvidenceOSError::NotFound);
+    }
+    let mut layer: Vec<Hash32> = leaves.to_vec();
+    let mut idx = leaf_index;
+    let mut proof = Vec::new();
+    while layer.len() > 1 {
+        if idx.is_multiple_of(2) {
+            if idx + 1 < layer.len() {
+                proof.push(layer[idx + 1]);
+            }
+        } else {
+            proof.push(layer[idx - 1]);
+        }
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            if i + 1 < layer.len() {
+                next.push(node_hash(&layer[i], &layer[i + 1]));
+            } else {
+                next.push(layer[i]);
+            }
+            i += 2;
+        }
+        layer = next;
+        idx /= 2;
+    }
+    Ok(proof)
+}
+
 #[derive(Debug)]
 pub struct Etl {
     path: PathBuf,
@@ -75,7 +109,6 @@ impl Etl {
             .open(&path)
             .map_err(|_| EvidenceOSError::Internal)?;
 
-        // Rebuild leaves.
         let mut leaves = Vec::new();
         {
             let mut reader = BufReader::new(
@@ -130,6 +163,13 @@ impl Etl {
         merkle_root(&self.leaves)
     }
 
+    pub fn root_at_size(&self, tree_size: u64) -> EvidenceOSResult<Hash32> {
+        if tree_size > self.tree_size() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        Ok(merkle_root_prefix(&self.leaves, tree_size as usize))
+    }
+
     pub fn root_hex(&self) -> String {
         hex::encode(self.root_hash())
     }
@@ -138,8 +178,18 @@ impl Etl {
         &self.path
     }
 
+    pub fn inclusion_proof(&self, leaf_index: u64) -> EvidenceOSResult<Vec<Hash32>> {
+        inclusion_proof(&self.leaves, leaf_index as usize)
+    }
+
+    pub fn leaf_hash_at(&self, leaf_index: u64) -> EvidenceOSResult<Hash32> {
+        self.leaves
+            .get(leaf_index as usize)
+            .copied()
+            .ok_or(EvidenceOSError::NotFound)
+    }
+
     pub fn read_entry(&self, index: u64) -> EvidenceOSResult<Vec<u8>> {
-        // O(n) scan.
         let mut f = OpenOptions::new()
             .read(true)
             .open(&self.path)
@@ -197,6 +247,8 @@ mod tests {
             assert_eq!(etl.tree_size(), 2);
             let e0 = etl.read_entry(0).unwrap();
             assert_eq!(e0, b"one");
+            let proof = etl.inclusion_proof(1).unwrap();
+            assert!(!proof.is_empty());
         }
     }
 }
