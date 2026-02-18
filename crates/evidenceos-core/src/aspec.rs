@@ -7,6 +7,39 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasmparser::{Operator, Parser, Payload, TypeRef};
 
+const REQUIRED_OUTPUT_IMPORTS: [(&str, &str); 2] = [
+    ("kernel", "emit_structured_claim"),
+    ("env", "emit_structured_claim"),
+];
+const ALLOWED_EXPORTS: [&str; 2] = ["run", "memory"];
+
+#[derive(Debug, Clone)]
+struct Cfg {
+    edges: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionSummary {
+    conditional_branches: u64,
+    total_loops: u64,
+    cfg: Cfg,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ControlKind {
+    Block,
+    Loop,
+    If,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ControlFrame {
+    kind: ControlKind,
+    start: usize,
+    else_index: Option<usize>,
+    end_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum AspecLane {
     /// Strict verifier (default)
@@ -30,6 +63,8 @@ pub struct AspecReport {
     pub max_cyclomatic_complexity: u64,
     pub kolmogorov_proxy_bits: f64,
     pub heavy_lane_flag: bool,
+    pub total_loops: u64,
+    pub bounds_used: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +80,8 @@ pub struct AspecPolicy {
     pub max_cyclomatic_complexity: u64,
     /// §A.1 P_io max output bytes proxy.
     pub max_output_bytes: u32,
+    /// §A.1 P_loops loop bound cap.
+    pub max_loop_bound: u64,
     /// §A.1 six-sigma Kolmogorov proxy cap.
     pub kolmogorov_proxy_cap: u64,
 }
@@ -52,8 +89,11 @@ pub struct AspecPolicy {
 impl Default for AspecPolicy {
     fn default() -> Self {
         let mut allowed = HashSet::new();
-        allowed.insert(("env".to_string(), "oracle_query".to_string()));
-        allowed.insert(("env".to_string(), "ledger_commit".to_string()));
+        for module in ["kernel", "env"] {
+            allowed.insert((module.to_string(), "oracle_query".to_string()));
+            allowed.insert((module.to_string(), "ledger_commit".to_string()));
+            allowed.insert((module.to_string(), "emit_structured_claim".to_string()));
+        }
         Self {
             lane: AspecLane::HighAssurance,
             allowed_imports: allowed,
@@ -61,6 +101,7 @@ impl Default for AspecPolicy {
             max_entropy_ratio: 0.75,
             max_cyclomatic_complexity: 50,
             max_output_bytes: 4096,
+            max_loop_bound: 1_000,
             kolmogorov_proxy_cap: 50_000,
         }
     }
@@ -96,6 +137,277 @@ fn has_compression_magic(data: &[u8]) -> bool {
     MAGIC.iter().any(|m| data.windows(m.len()).any(|w| w == *m))
 }
 
+fn parse_loop_bounds(payload: &[u8], out: &mut VecDeque<u64>) {
+    let text = String::from_utf8_lossy(payload);
+    for tok in text.split_whitespace() {
+        if let Some(raw) = tok.strip_prefix("loop_bound:") {
+            let digits: String = raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(v) = digits.parse::<u64>() {
+                out.push_back(v);
+            }
+        }
+    }
+}
+
+fn is_forbidden_output_import(module: &str, name: &str) -> bool {
+    let lowered = format!("{module}::{name}").to_ascii_lowercase();
+    lowered.contains("fd_write")
+        || lowered.contains("console")
+        || lowered.contains("stdout")
+        || lowered.contains("output")
+            && !REQUIRED_OUTPUT_IMPORTS
+                .iter()
+                .any(|(m, n)| module == *m && name == *n)
+}
+
+fn compute_control_metadata(
+    ops: &[Operator<'_>],
+) -> Result<(Vec<Option<usize>>, Vec<Option<usize>>, Vec<Option<usize>>), String> {
+    let mut matching_end = vec![None; ops.len()];
+    let mut if_to_else = vec![None; ops.len()];
+    let mut if_to_end = vec![None; ops.len()];
+    let mut stack: Vec<ControlFrame> = Vec::new();
+
+    for (idx, op) in ops.iter().enumerate() {
+        match op {
+            Operator::Block { .. } => stack.push(ControlFrame {
+                kind: ControlKind::Block,
+                start: idx,
+                else_index: None,
+                end_index: None,
+            }),
+            Operator::Loop { .. } => stack.push(ControlFrame {
+                kind: ControlKind::Loop,
+                start: idx,
+                else_index: None,
+                end_index: None,
+            }),
+            Operator::If { .. } => stack.push(ControlFrame {
+                kind: ControlKind::If,
+                start: idx,
+                else_index: None,
+                end_index: None,
+            }),
+            Operator::Else => {
+                let frame = stack
+                    .last_mut()
+                    .ok_or_else(|| "else without control frame".to_string())?;
+                if !matches!(frame.kind, ControlKind::If) {
+                    return Err("else attached to non-if frame".to_string());
+                }
+                frame.else_index = Some(idx);
+                if_to_else[frame.start] = Some(idx);
+            }
+            Operator::End => {
+                if let Some(mut frame) = stack.pop() {
+                    frame.end_index = Some(idx);
+                    matching_end[frame.start] = Some(idx);
+                    if matches!(frame.kind, ControlKind::If) {
+                        if_to_end[frame.start] = Some(idx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err("unterminated control frame".to_string());
+    }
+
+    Ok((matching_end, if_to_else, if_to_end))
+}
+
+fn branch_target(control_stack: &[ControlFrame], depth: u32) -> Option<usize> {
+    let len = control_stack.len();
+    let idx = len.checked_sub(1 + depth as usize)?;
+    let frame = control_stack.get(idx)?;
+    match frame.kind {
+        ControlKind::Loop => Some(frame.start),
+        ControlKind::Block | ControlKind::If => frame.end_index,
+    }
+}
+
+fn build_cfg(ops: &[Operator<'_>]) -> Result<Cfg, String> {
+    let node_count = ops.len() + 1;
+    let exit = ops.len();
+    let mut edges = vec![Vec::<usize>::new(); node_count];
+    let (matching_end, if_to_else, if_to_end) = compute_control_metadata(ops)?;
+    let mut control_stack: Vec<ControlFrame> = Vec::new();
+
+    for (idx, op) in ops.iter().enumerate() {
+        let next = idx + 1;
+        match op {
+            Operator::Block { .. } => {
+                control_stack.push(ControlFrame {
+                    kind: ControlKind::Block,
+                    start: idx,
+                    else_index: None,
+                    end_index: matching_end[idx],
+                });
+                edges[idx].push(next);
+            }
+            Operator::Loop { .. } => {
+                control_stack.push(ControlFrame {
+                    kind: ControlKind::Loop,
+                    start: idx,
+                    else_index: None,
+                    end_index: matching_end[idx],
+                });
+                edges[idx].push(next);
+            }
+            Operator::If { .. } => {
+                let else_idx = if_to_else[idx];
+                let end_idx = if_to_end[idx];
+                control_stack.push(ControlFrame {
+                    kind: ControlKind::If,
+                    start: idx,
+                    else_index: else_idx,
+                    end_index: end_idx,
+                });
+                edges[idx].push(next);
+                edges[idx].push(else_idx.unwrap_or(end_idx.unwrap_or(next)) + 1);
+            }
+            Operator::Else => {
+                let frame = control_stack
+                    .last()
+                    .ok_or_else(|| "else without frame in cfg builder".to_string())?;
+                if !matches!(frame.kind, ControlKind::If) {
+                    return Err("else on non-if frame in cfg builder".to_string());
+                }
+                edges[idx].push(frame.end_index.unwrap_or(exit) + 1);
+            }
+            Operator::End => {
+                let _ = control_stack.pop();
+                edges[idx].push(next);
+            }
+            Operator::Br { relative_depth } => {
+                if let Some(target) = branch_target(&control_stack, *relative_depth) {
+                    edges[idx].push(target);
+                } else {
+                    return Err("invalid br depth".to_string());
+                }
+            }
+            Operator::BrIf { relative_depth } => {
+                if let Some(target) = branch_target(&control_stack, *relative_depth) {
+                    edges[idx].push(target);
+                    edges[idx].push(next);
+                } else {
+                    return Err("invalid br_if depth".to_string());
+                }
+            }
+            Operator::Return => edges[idx].push(exit),
+            _ => edges[idx].push(next),
+        }
+    }
+
+    Ok(Cfg { edges })
+}
+
+fn tarjans_scc(cfg: &Cfg) -> Vec<Vec<usize>> {
+    struct Tarjan<'a> {
+        cfg: &'a Cfg,
+        index: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        indices: Vec<Option<usize>>,
+        lowlink: Vec<usize>,
+        sccs: Vec<Vec<usize>>,
+    }
+    impl<'a> Tarjan<'a> {
+        fn strongconnect(&mut self, v: usize) {
+            self.indices[v] = Some(self.index);
+            self.lowlink[v] = self.index;
+            self.index += 1;
+            self.stack.push(v);
+            self.on_stack[v] = true;
+
+            for &w in &self.cfg.edges[v] {
+                if self.indices[w].is_none() {
+                    self.strongconnect(w);
+                    self.lowlink[v] = self.lowlink[v].min(self.lowlink[w]);
+                } else if self.on_stack[w] {
+                    if let Some(w_idx) = self.indices[w] {
+                        self.lowlink[v] = self.lowlink[v].min(w_idx);
+                    }
+                }
+            }
+
+            if self.indices[v].is_some_and(|idx| self.lowlink[v] == idx) {
+                let mut component = Vec::new();
+                while let Some(w) = self.stack.pop() {
+                    self.on_stack[w] = false;
+                    component.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                self.sccs.push(component);
+            }
+        }
+    }
+
+    let n = cfg.edges.len();
+    let mut tarjan = Tarjan {
+        cfg,
+        index: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; n],
+        indices: vec![None; n],
+        lowlink: vec![0; n],
+        sccs: Vec::new(),
+    };
+    for v in 0..n {
+        if tarjan.indices[v].is_none() {
+            tarjan.strongconnect(v);
+        }
+    }
+    tarjan.sccs
+}
+
+fn is_reducible_cfg(cfg: &Cfg) -> bool {
+    let sccs = tarjans_scc(cfg);
+    for scc in sccs {
+        let node_set: HashSet<usize> = scc.iter().copied().collect();
+        let is_cycle = scc.len() > 1
+            || scc
+                .first()
+                .is_some_and(|n| cfg.edges[*n].iter().any(|m| *m == *n));
+        if !is_cycle {
+            continue;
+        }
+        let mut entries = HashSet::new();
+        for &n in &scc {
+            for (src, succs) in cfg.edges.iter().enumerate() {
+                if !node_set.contains(&src) && succs.contains(&n) {
+                    entries.insert(n);
+                }
+            }
+        }
+        if entries.len() > 1 {
+            return false;
+        }
+    }
+    true
+}
+
+fn analyze_function(ops: &[Operator<'_>]) -> Result<FunctionSummary, String> {
+    let cfg = build_cfg(ops)?;
+    let conditional_branches = ops
+        .iter()
+        .filter(|op| matches!(op, Operator::If { .. } | Operator::BrIf { .. }))
+        .count() as u64;
+    let total_loops = ops
+        .iter()
+        .filter(|op| matches!(op, Operator::Loop { .. }))
+        .count() as u64;
+    Ok(FunctionSummary {
+        conditional_branches,
+        total_loops,
+        cfg,
+    })
+}
+
 /// Verify a Wasm module against ASPEC predicates (§A.1).
 pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut reasons: Vec<String> = Vec::new();
@@ -109,12 +421,12 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut next_defined_func_index: u32 = 0;
     let mut data_segment_bytes: u64 = 0;
     let mut data_bytes: Vec<u8> = Vec::new();
-    let mut has_output_export = false;
-    let mut loop_bound_markers = 0u64;
-    let mut loop_markers_raw = wasm
-        .windows("loop_bound:".len())
-        .filter(|w| *w == b"loop_bound:")
-        .count() as u64;
+    let mut loop_bounds: VecDeque<u64> = VecDeque::new();
+    let mut exported_names = Vec::new();
+    let mut has_run_export = false;
+    let mut has_output_import = false;
+    let mut total_loops: u64 = 0;
+    let mut bounds_used = Vec::new();
 
     let parser = Parser::new(0);
     for payload in parser.parse_all(wasm) {
@@ -145,6 +457,18 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                     import.module, import.name
                                 ));
                             }
+                            if REQUIRED_OUTPUT_IMPORTS
+                                .iter()
+                                .any(|(m, n)| import.module == *m && import.name == *n)
+                            {
+                                has_output_import = true;
+                            }
+                            if is_forbidden_output_import(import.module, import.name) {
+                                reasons.push(format!(
+                                    "forbidden output channel import: {}::{}",
+                                    import.module, import.name
+                                ));
+                            }
                         }
                         TypeRef::Memory(_) => reasons.push(
                             "memory imports are banned (define memory in-module)".to_string(),
@@ -166,10 +490,13 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                             continue;
                         }
                     };
-                    if export.name.to_ascii_lowercase().contains("output")
-                        || export.name.to_ascii_lowercase().contains("result")
-                    {
-                        has_output_export = true;
+                    let name = export.name.to_string();
+                    exported_names.push(name.clone());
+                    if name == "run" {
+                        has_run_export = true;
+                    }
+                    if !ALLOWED_EXPORTS.contains(&name.as_str()) {
+                        reasons.push(format!("disallowed export: {name}"));
                     }
                 }
             }
@@ -194,9 +521,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                 }
             }
             Payload::CustomSection(reader) => {
-                let text = String::from_utf8_lossy(reader.data());
-                loop_bound_markers =
-                    loop_bound_markers.saturating_add(text.matches("loop_bound:").count() as u64);
+                parse_loop_bounds(reader.data(), &mut loop_bounds);
             }
             Payload::FunctionSection(s) => defined_funcs = s.count(),
             Payload::CodeSectionStart { .. } => next_defined_func_index = 0,
@@ -204,12 +529,12 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                 let func_index = imported_funcs + next_defined_func_index;
                 let caller = func_index;
                 next_defined_func_index += 1;
-                let mut conditional_branches = 0u64;
                 let reader = body.get_operators_reader();
                 let Ok(mut reader) = reader else {
                     reasons.push("invalid code section".to_string());
                     continue;
                 };
+                let mut ops = Vec::new();
                 while !reader.eof() {
                     let op = match reader.read() {
                         Ok(op) => op,
@@ -220,25 +545,32 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                     };
                     instruction_count += 1;
                     match op {
-                        // §A.1 P_loops.
-                        Operator::Loop { .. } => match policy.lane {
-                            AspecLane::HighAssurance => {
-                                reasons.push("loops are banned in HighAssurance".to_string())
-                            }
-                            AspecLane::LowAssurance => {
-                                if loop_bound_markers == 0 && loop_markers_raw == 0 {
-                                    reasons.push(
-                                        "LowAssurance loop missing loop_bound:<n> marker"
-                                            .to_string(),
-                                    );
-                                } else if loop_bound_markers > 0 {
-                                    loop_bound_markers -= 1;
-                                } else {
-                                    loop_markers_raw -= 1;
+                        Operator::Loop { .. } => {
+                            total_loops += 1;
+                            match policy.lane {
+                                AspecLane::HighAssurance => {
+                                    reasons.push("loops are banned in HighAssurance".to_string())
+                                }
+                                AspecLane::LowAssurance => {
+                                    if let Some(bound) = loop_bounds.pop_front() {
+                                        if bound > policy.max_loop_bound {
+                                            reasons.push(format!(
+                                                "loop bound {} exceeds cap {}",
+                                                bound, policy.max_loop_bound
+                                            ));
+                                        }
+                                        bounds_used.push(bound);
+                                    } else {
+                                        reasons.push(
+                                            "LowAssurance loop missing loop_bound:<n> marker"
+                                                .to_string(),
+                                        );
+                                    }
                                 }
                             }
-                        },
-                        Operator::BrTable { .. } => reasons.push("br_table is banned".to_string()),
+                        }
+                        Operator::BrTable { .. } => reasons
+                            .push("br_table is banned and treated as irreducible".to_string()),
                         Operator::CallIndirect { .. } => {
                             reasons.push("call_indirect is banned".to_string())
                         }
@@ -256,10 +588,6 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                         | Operator::TableSet { .. }
                         | Operator::TableSize { .. } => {
                             reasons.push("table operations are banned".to_string())
-                        }
-                        Operator::If { .. } | Operator::Br { .. } | Operator::BrIf { .. } => {
-                            conditional_branches += 1;
-                            total_conditional_branches += 1;
                         }
                         Operator::F32Abs
                         | Operator::F32Neg
@@ -347,12 +675,42 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                         }
                         _ => {}
                     }
+                    ops.push(op);
                 }
-                max_cyclomatic_complexity = max_cyclomatic_complexity.max(1 + conditional_branches);
+
+                match analyze_function(&ops) {
+                    Ok(summary) => {
+                        if !is_reducible_cfg(&summary.cfg) {
+                            reasons.push(format!("irreducible CFG in function {func_index}"));
+                        }
+                        total_conditional_branches += summary.conditional_branches;
+                        max_cyclomatic_complexity =
+                            max_cyclomatic_complexity.max(1 + summary.conditional_branches);
+                        if summary.total_loops > 0
+                            && matches!(policy.lane, AspecLane::HighAssurance)
+                        {
+                            // reason already emitted above, keep deterministic loop counting path.
+                        }
+                    }
+                    Err(err) => reasons.push(format!(
+                        "failed to build CFG for function {func_index}: {err}"
+                    )),
+                }
             }
             Payload::End(_) => {}
             _ => {}
         }
+    }
+
+    if !has_run_export {
+        reasons.push("missing required export: run".to_string());
+    }
+    if exported_names.is_empty() {
+        reasons.push("module exports must include run".to_string());
+    }
+
+    if !has_output_import {
+        reasons.push("missing required output import kernel::emit_structured_claim or env::emit_structured_claim".to_string());
     }
 
     // §A.1 P_data.
@@ -383,9 +741,8 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
         ));
     }
 
-    // §A.1 P_io conservative proxy: Wasm cannot statically encode concrete return byte sizes,
-    // so we bound total instruction count as 10x configured output byte budget.
-    if has_output_export && instruction_count > u64::from(policy.max_output_bytes) * 10 {
+    // §A.1 P_io proxy: cap instruction budget by output size.
+    if instruction_count > u64::from(policy.max_output_bytes) * 10 {
         reasons.push(format!(
             "output proxy bound exceeded: instruction_count {} > {}",
             instruction_count,
@@ -460,6 +817,8 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
         max_cyclomatic_complexity,
         kolmogorov_proxy_bits,
         heavy_lane_flag,
+        total_loops,
+        bounds_used,
     }
 }
 
@@ -467,55 +826,269 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
 mod tests {
     use super::*;
 
-    fn assert_rejected(report: AspecReport) {
-        assert!(!report.ok);
-        assert!(!report.reasons.is_empty());
+    fn base_module(body: &str) -> Vec<u8> {
+        let wat = format!(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func $emit (param i32 i32)))
+                (func (export \"run\") {body})
+             )"
+        );
+        wat::parse_str(&wat).unwrap()
     }
 
-    #[test]
-    fn rejects_loop_highassurance() {
-        let wasm = wat::parse_str("(module (func (loop nop)))").expect("valid wat");
-        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
-    }
-
-    #[test]
-    fn accepts_loop_lowassurance_with_bound() {
-        let wasm = wat::parse_str("(module (@custom \"meta\" \"loop_bound:3\") (func (loop nop)))")
-            .expect("valid wat");
-        let mut policy = AspecPolicy {
+    fn low_policy() -> AspecPolicy {
+        AspecPolicy {
             lane: AspecLane::LowAssurance,
             ..AspecPolicy::default()
-        };
-        policy.kolmogorov_proxy_cap = 1;
-        let report = verify_aspec(&wasm, &policy);
+        }
+    }
+
+    #[test]
+    fn p_import_allowlist_pass_and_fail() {
+        let ok = base_module("nop");
+        assert!(verify_aspec(&ok, &AspecPolicy::default()).ok);
+
+        let bad = wat::parse_str(
+            "(module
+                (import \"evil\" \"sink\" (func))
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") nop))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&bad, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_opcode_forbidden_classes_reject() {
+        let modules = [
+            "(module (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32))) (func (export \"run\") (call_indirect (type 0) (i32.const 0))) (type (func)))",
+            "(module (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32))) (func (export \"run\") (return_call 0)))",
+            "(module (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32))) (func (export \"run\") (table.grow (i32.const 0) (ref.null func))))",
+        ];
+        for wat in modules {
+            let wasm = wat::parse_str(wat).unwrap();
+            assert!(!verify_aspec(&wasm, &AspecPolicy::default()).ok);
+        }
+    }
+
+    #[test]
+    fn p_nogrow_memory_grow_reject() {
+        let wasm = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (memory 1)
+                (func (export \"run\") (drop (memory.grow (i32.const 1)))))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&wasm, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_cfg_br_table_reject_as_irreducible() {
+        let wasm = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\")
+                  (block
+                    (br_table 0 (i32.const 0))
+                  )
+                ))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&wasm, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_callgraph_self_and_mutual_recursion_reject() {
+        let self_rec = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") call 1)
+                (func call 1))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&self_rec, &AspecPolicy::default()).ok);
+
+        let mutual = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") call 2)
+                (func call 3)
+                (func call 2))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&mutual, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_loops_high_assurance_reject() {
+        let wasm = base_module("(loop nop)");
+        assert!(!verify_aspec(&wasm, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_loops_low_assurance_bounds_enforced() {
+        let mut policy = low_policy();
+        policy.max_loop_bound = 1;
+
+        let missing = base_module("(loop nop)");
+        assert!(!verify_aspec(&missing, &policy).ok);
+
+        let exact = wat::parse_str(
+            "(module
+                (@custom \"meta\" \"loop_bound:1\")
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") (loop nop)))",
+        )
+        .unwrap();
+        assert!(verify_aspec(&exact, &policy).ok);
+
+        let over = wat::parse_str(
+            "(module
+                (@custom \"meta\" \"loop_bound:2\")
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") (loop nop)))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&over, &policy).ok);
+
+        let two_one_bound = wat::parse_str(
+            "(module
+                (@custom \"meta\" \"loop_bound:1\")
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") (loop nop) (loop nop)))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&two_one_bound, &policy).ok);
+
+        let two_two_bounds = wat::parse_str(
+            "(module
+                (@custom \"meta\" \"loop_bound:1 loop_bound:0\")
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") (loop nop) (loop nop)))",
+        )
+        .unwrap();
+        let report = verify_aspec(&two_two_bounds, &policy);
         assert!(report.ok);
+        assert_eq!(report.total_loops, 2);
+        assert_eq!(report.bounds_used, vec![1, 0]);
     }
 
     #[test]
-    fn rejects_data_segment_too_large() {
-        let bytes = "a".repeat(70000);
-        let wat = format!("(module (memory 2) (data (i32.const 0) \"{}\"))", bytes);
-        let wasm = wat::parse_str(&wat).expect("valid wat");
-        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
+    fn p_data_boundaries() {
+        let mut policy = AspecPolicy::default();
+        policy.max_data_segment_bytes = 1;
+
+        let exact = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (memory 1)
+                (data (i32.const 0) \"a\")
+                (func (export \"run\") nop))",
+        )
+        .unwrap();
+        assert!(verify_aspec(&exact, &policy).ok);
+
+        let over = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (memory 1)
+                (data (i32.const 0) \"ab\")
+                (func (export \"run\") nop))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&over, &policy).ok);
+
+        policy.max_data_segment_bytes = 0;
+        let none = base_module("nop");
+        assert!(verify_aspec(&none, &policy).ok);
     }
 
     #[test]
-    fn rejects_recursion() {
-        let wasm = wat::parse_str("(module (func $a call 1) (func $b call 0))").expect("valid wat");
-        assert_rejected(verify_aspec(&wasm, &AspecPolicy::default()));
-    }
+    fn p_entropy_low_accept_high_with_magic_reject() {
+        let low = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (memory 1)
+                (data (i32.const 0) \"aaaaaaaa\")
+                (func (export \"run\") nop))",
+        )
+        .unwrap();
+        assert!(verify_aspec(&low, &AspecPolicy::default()).ok);
 
-    #[test]
-    fn capacity_bits_smoke() {
-        let wasm = wat::parse_str("(module (func (if (i32.const 1) (then nop))) (memory 1) (data (i32.const 0) \"abcdef\"))")
-            .expect("valid wat");
-        let report = verify_aspec(
-            &wasm,
-            &AspecPolicy {
-                lane: AspecLane::LowAssurance,
-                ..AspecPolicy::default()
-            },
+        let mut bytes = vec![0x1f, 0x8b];
+        bytes.extend(0u8..=255);
+        let mut wat_data = String::new();
+        for b in bytes {
+            wat_data.push_str(&format!("\\{:02x}", b));
+        }
+        let high_wat = format!(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (memory 1)
+                (data (i32.const 0) \"{wat_data}\")
+                (func (export \"run\") nop))"
         );
-        assert!(report.kolmogorov_proxy_bits > 0.0);
+        let high = wat::parse_str(&high_wat).unwrap();
+        assert!(!verify_aspec(&high, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_branch_complexity_boundaries() {
+        let mut policy = AspecPolicy::default();
+        policy.max_cyclomatic_complexity = 2;
+
+        let below = base_module("(if (i32.const 1) (then nop))");
+        assert!(verify_aspec(&below, &policy).ok);
+
+        let above = base_module("(if (i32.const 1) (then nop)) (br_if 0 (i32.const 1))");
+        assert!(!verify_aspec(&above, &policy).ok);
+    }
+
+    #[test]
+    fn p_io_exports_and_imports_enforced() {
+        let missing_run = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"not_run\") nop))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&missing_run, &AspecPolicy::default()).ok);
+
+        let extra_export = wat::parse_str(
+            "(module
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") nop)
+                (func (export \"debug\") nop))",
+        )
+        .unwrap();
+        assert!(!verify_aspec(&extra_export, &AspecPolicy::default()).ok);
+
+        let missing_emit_import = wat::parse_str("(module (func (export \"run\") nop))").unwrap();
+        assert!(!verify_aspec(&missing_emit_import, &AspecPolicy::default()).ok);
+
+        let good = base_module("nop");
+        assert!(verify_aspec(&good, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn boundary_params_output_kolmogorov_and_heavy_flag() {
+        let wasm = base_module("(if (i32.const 1) (then nop))");
+
+        let mut output_policy = AspecPolicy::default();
+        output_policy.max_output_bytes = 0;
+        assert!(!verify_aspec(&wasm, &output_policy).ok);
+
+        output_policy.max_output_bytes = 1;
+        assert!(verify_aspec(&wasm, &output_policy).ok);
+
+        let mut k_policy = AspecPolicy::default();
+        k_policy.kolmogorov_proxy_cap = 2;
+        let report = verify_aspec(&wasm, &k_policy);
+        assert!(report.heavy_lane_flag);
+
+        k_policy.kolmogorov_proxy_cap = 3;
+        let report = verify_aspec(&wasm, &k_policy);
+        assert!(!report.heavy_lane_flag);
     }
 }
