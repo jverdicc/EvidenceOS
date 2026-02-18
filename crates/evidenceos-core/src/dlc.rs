@@ -64,14 +64,6 @@ impl DeterministicLogicalClock {
         Ok(self.current_epoch())
     }
 
-    #[cfg(test)]
-    pub fn tick_infallible(&mut self, cost: u64) -> u64 {
-        match self.tick(cost) {
-            Ok(v) => v,
-            Err(_) => panic!("tick overflow"),
-        }
-    }
-
     pub fn reset_to_epoch(&mut self, epoch: u64) -> EvidenceOSResult<()> {
         self.logical_instructions = epoch
             .checked_mul(self.cfg.epoch_size)
