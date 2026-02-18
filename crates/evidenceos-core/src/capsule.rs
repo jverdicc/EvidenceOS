@@ -58,6 +58,7 @@ pub struct LedgerSnapshot {
     pub epsilon_total: f64,
     pub delta_total: f64,
     pub access_credit_spent: f64,
+    pub compute_fuel_spent: f64,
 }
 
 impl LedgerSnapshot {
@@ -69,11 +70,35 @@ impl LedgerSnapshot {
             barrier: l.barrier(),
             wealth: l.wealth,
             w_max: l.w_max,
+            epsilon_total: 0.0,
+            delta_total: 0.0,
+            access_credit_spent: 0.0,
+            compute_fuel_spent: 0.0,
             epsilon_total: l.epsilon_total,
             delta_total: l.delta_total,
             access_credit_spent: l.access_credit_spent,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestEntry {
+    pub kind: String,
+    pub hash_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LedgerReceipt {
+    pub lane: String,
+    pub value: f64,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvironmentAttestations {
+    pub runtime_version: String,
+    pub aspec_version: String,
+    pub protocol_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,18 +107,20 @@ pub struct ClaimCapsule {
     pub claim_id_hex: String,
     pub topic_id_hex: String,
     pub output_schema_id: String,
+    pub code_ir_manifests: Vec<ManifestEntry>,
+    pub dependency_capsule_hashes: Vec<String>,
     pub structured_output_hash_hex: String,
     pub wasm_hash_hex: String,
     pub judge_trace_hash_hex: String,
     pub holdout_ref: String,
     pub holdout_commitment_hex: String,
     pub ledger: LedgerSnapshot,
+    pub ledger_receipts: Vec<LedgerReceipt>,
     pub e_value: f64,
     pub certified: bool,
     pub decision: i32,
     pub reason_codes: Vec<u32>,
-    pub aspec_version: String,
-    pub runtime_version: String,
+    pub environment_attestations: EnvironmentAttestations,
     pub state: ClaimState,
 }
 
@@ -131,6 +158,8 @@ impl ClaimCapsule {
         claim_id_hex: String,
         topic_id_hex: String,
         output_schema_id: String,
+        mut code_ir_manifests: Vec<ManifestEntry>,
+        mut dependency_capsule_hashes: Vec<String>,
         structured_output: &[u8],
         wasm_bytes: &[u8],
         holdout_commitment_preimage: &[u8],
@@ -139,26 +168,70 @@ impl ClaimCapsule {
         certified: bool,
         decision: i32,
         reason_codes: Vec<u32>,
-        judge_trace_hash_hex: String,
+        judge_trace: &[u8],
         holdout_ref: String,
+        runtime_version: String,
+        aspec_version: String,
+        protocol_version: String,
+        compute_fuel_spent: f64,
     ) -> Self {
+        code_ir_manifests.sort_by(|a, b| {
+            a.kind
+                .cmp(&b.kind)
+                .then_with(|| a.hash_hex.cmp(&b.hash_hex))
+        });
+        dependency_capsule_hashes.sort();
+        let mut ledger_snapshot = LedgerSnapshot::from_ledger(ledger);
+        ledger_snapshot.compute_fuel_spent = compute_fuel_spent;
         Self {
             schema: "evidenceos.v2.claim_capsule".to_string(),
             claim_id_hex,
             topic_id_hex,
             output_schema_id,
+            code_ir_manifests,
+            dependency_capsule_hashes,
             structured_output_hash_hex: sha256_hex(structured_output),
             wasm_hash_hex: sha256_hex(wasm_bytes),
-            judge_trace_hash_hex,
+            judge_trace_hash_hex: sha256_hex(judge_trace),
             holdout_ref,
             holdout_commitment_hex: sha256_hex(holdout_commitment_preimage),
-            ledger: LedgerSnapshot::from_ledger(ledger),
+            ledger: ledger_snapshot.clone(),
+            ledger_receipts: vec![
+                LedgerReceipt {
+                    lane: "wealth_w".to_string(),
+                    value: ledger_snapshot.wealth,
+                    unit: "e_value_product".to_string(),
+                },
+                LedgerReceipt {
+                    lane: "information_k".to_string(),
+                    value: ledger_snapshot.k_bits_total,
+                    unit: "bits".to_string(),
+                },
+                LedgerReceipt {
+                    lane: "privacy_epsilon_delta".to_string(),
+                    value: ledger_snapshot.epsilon_total + ledger_snapshot.delta_total,
+                    unit: "epsilon_plus_delta".to_string(),
+                },
+                LedgerReceipt {
+                    lane: "access_credit".to_string(),
+                    value: ledger_snapshot.access_credit_spent,
+                    unit: "credits".to_string(),
+                },
+                LedgerReceipt {
+                    lane: "compute_fuel".to_string(),
+                    value: ledger_snapshot.compute_fuel_spent,
+                    unit: "fuel".to_string(),
+                },
+            ],
             e_value,
             certified,
             decision,
             reason_codes,
-            aspec_version: "aspec.v1".into(),
-            runtime_version: "unknown".into(),
+            environment_attestations: EnvironmentAttestations {
+                runtime_version,
+                aspec_version,
+                protocol_version,
+            },
             state: ClaimState::Uncommitted,
         }
     }
@@ -180,12 +253,17 @@ mod tests {
     use crate::ledger::ConservationLedger;
 
     #[test]
-    fn capsule_hash_changes_when_state_changes() {
+    fn capsule_hash_changes_on_any_field_change() {
         let l = ConservationLedger::new(0.05).expect("ledger");
         let mut c = ClaimCapsule::new(
             "c".into(),
             "t".into(),
             "schema".into(),
+            vec![ManifestEntry {
+                kind: "ir".into(),
+                hash_hex: "aa".into(),
+            }],
+            vec!["11".into()],
             b"out",
             b"wasm",
             b"hold",
@@ -194,12 +272,15 @@ mod tests {
             false,
             1,
             vec![7],
-            "trace".into(),
+            b"trace",
             "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            123.0,
         );
-        c.state = ClaimState::Sealed;
         let h1 = c.capsule_hash_hex().expect("hash1");
-        c.state = ClaimState::Certified;
+        c.environment_attestations.protocol_version = "evidenceos.v2".to_string();
         let h2 = c.capsule_hash_hex().expect("hash2");
         assert_ne!(h1, h2);
     }
