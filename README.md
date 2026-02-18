@@ -1,7 +1,7 @@
 <!-- Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18676017.svg)](https://doi.org/10.5281/zenodo.18676017)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18676016.svg)](https://doi.org/10.5281/zenodo.18676016)
 
 # EvidenceOS (Rust)
 
@@ -63,7 +63,7 @@ This is a **reference implementation**. Production deployments must:
 This repository is part of the **Universal Verification Protocol (UVP)** research project.
 
 * **Paper:** "The Conservation of Epistemic Integrity: A Kernel–Userland Protocol for Verifiable Reality" (Under Review at FORC 2026).
-* **Archival Version:** For reproducibility, the specific version used in the paper is archived at [DOI: 10.5281/zenodo.18676017](https://doi.org/10.5281/zenodo.18676017).
+* **Citation DOI (all versions):** Cite all versions using [DOI: 10.5281/zenodo.18676016](https://doi.org/10.5281/zenodo.18676016), which always resolves to the latest release.
 
 If you use this code in your research, please cite the Zenodo archive or the forthcoming FORC 2026 paper.
 
