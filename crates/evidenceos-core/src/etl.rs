@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::capsule::ClaimCapsule;
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -267,7 +268,7 @@ pub fn verify_consistency_proof_ct(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationEntry {
-    pub claim_hash_hex: String,
+    pub capsule_hash_hex: String,
     pub reason: String,
     pub revoked_at_index: u64,
 }
@@ -318,8 +319,8 @@ impl Etl {
                 .map_err(|_| EvidenceOSError::Internal)?;
             leaves.push(leaf_hash(&data));
             if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(&data) {
-                if !revocation.claim_hash_hex.is_empty() {
-                    revoked.insert(revocation.claim_hash_hex);
+                if !revocation.capsule_hash_hex.is_empty() {
+                    revoked.insert(revocation.capsule_hash_hex);
                 }
             }
             pos = pos.saturating_add(4 + len as u64);
@@ -358,33 +359,42 @@ impl Etl {
 
     pub fn revoke(
         &mut self,
-        claim_hash_hex: &str,
+        capsule_hash_hex: &str,
         reason: &str,
     ) -> EvidenceOSResult<(u64, Hash32)> {
         let next_idx = self.tree_size();
         let entry = RevocationEntry {
-            claim_hash_hex: claim_hash_hex.to_string(),
+            capsule_hash_hex: capsule_hash_hex.to_string(),
             reason: reason.to_string(),
             revoked_at_index: next_idx,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|_| EvidenceOSError::Internal)?;
         let appended = self.append(&bytes)?;
-        self.revoked.insert(claim_hash_hex.to_string());
+        self.revoked.insert(capsule_hash_hex.to_string());
         Ok(appended)
     }
 
-    pub fn is_revoked(&self, claim_hash_hex: &str) -> bool {
-        self.revoked.contains(claim_hash_hex)
+    pub fn is_revoked(&self, capsule_hash_hex: &str) -> bool {
+        self.revoked.contains(capsule_hash_hex)
     }
 
-    pub fn taint_descendants(
-        &mut self,
-        dependency_dag: &[(String, String)],
-        root_hash: &str,
-    ) -> Vec<String> {
-        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-        for (p, c) in dependency_dag {
-            adj.entry(p).or_default().push(c);
+    pub fn taint_descendants(&mut self, root_hash: &str) -> Vec<String> {
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+        for index in 0..self.tree_size() {
+            let Ok(entry) = self.read_entry(index) else {
+                continue;
+            };
+            let Ok(capsule) = serde_json::from_slice::<ClaimCapsule>(&entry) else {
+                continue;
+            };
+            let Ok(capsule_hash) = capsule.capsule_hash_hex() else {
+                continue;
+            };
+            for parent_hash in capsule.dependency_capsule_hashes {
+                adj.entry(parent_hash.to_string())
+                    .or_default()
+                    .push(capsule_hash.to_string());
+            }
         }
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -400,7 +410,7 @@ impl Etl {
             }
             if let Some(children) = adj.get(cur.as_str()) {
                 for child in children {
-                    q.push_back((*child).to_string());
+                    q.push_back(child.to_string());
                 }
             }
         }
@@ -476,6 +486,8 @@ impl Etl {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use crate::capsule::{ClaimCapsule, ManifestEntry};
+    use crate::ledger::ConservationLedger;
 
     fn test_leaves(n: usize) -> Vec<Hash32> {
         (0..n)
@@ -706,5 +718,141 @@ mod tests {
                 prop_assert!(!verify_inclusion_proof(&tampered, &leaf, idx, size, &root));
             }
         }
+    #[test]
+    fn etl_inclusion_proof_valid_for_capsule_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl.log");
+        let ledger = ConservationLedger::new(0.05).expect("ledger");
+        let capsule = ClaimCapsule::new(
+            "claim-a".into(),
+            "topic-a".into(),
+            "schema".into(),
+            vec![ManifestEntry {
+                kind: "wasm".into(),
+                hash_hex: "00".into(),
+            }],
+            vec![],
+            b"out-a",
+            b"wasm-a",
+            b"hold-a",
+            &ledger,
+            1.25,
+            false,
+            2,
+            vec![99],
+            b"trace-a",
+            "holdout-a".into(),
+            "runtime-a".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            17.0,
+        );
+        let capsule_bytes = capsule.to_json_bytes().expect("capsule bytes");
+        let capsule_hash_hex = capsule.capsule_hash_hex().expect("capsule hash");
+
+        let mut etl = Etl::open_or_create(&path).expect("etl");
+        let (idx, leaf) = etl.append(&capsule_bytes).expect("append capsule");
+        let proof = etl.inclusion_proof(idx).expect("proof");
+        let root = etl.root_hash();
+
+        assert_eq!(leaf, leaf_hash(&capsule_bytes));
+        assert!(verify_inclusion_proof_ct(
+            &leaf,
+            idx as usize,
+            etl.tree_size() as usize,
+            &proof,
+            &root
+        ));
+        assert_eq!(hex::encode(sha256(&capsule_bytes)), capsule_hash_hex);
+    }
+
+    #[test]
+    fn revocation_taints_descendants_via_dependency_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl.log");
+        let mut etl = Etl::open_or_create(&path).expect("etl");
+        let ledger = ConservationLedger::new(0.05).expect("ledger");
+
+        let root = ClaimCapsule::new(
+            "claim-root".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![],
+            b"out-root",
+            b"wasm",
+            b"hold",
+            &ledger,
+            1.1,
+            false,
+            1,
+            vec![1],
+            b"trace-root",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            1.0,
+        );
+        let root_hash = root.capsule_hash_hex().expect("root hash");
+        etl.append(&root.to_json_bytes().expect("root bytes"))
+            .expect("append root");
+
+        let mid = ClaimCapsule::new(
+            "claim-mid".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![root_hash.clone()],
+            b"out-mid",
+            b"wasm",
+            b"hold",
+            &ledger,
+            1.2,
+            false,
+            1,
+            vec![2],
+            b"trace-mid",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            2.0,
+        );
+        let mid_hash = mid.capsule_hash_hex().expect("mid hash");
+        etl.append(&mid.to_json_bytes().expect("mid bytes"))
+            .expect("append mid");
+
+        let leaf = ClaimCapsule::new(
+            "claim-leaf".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![mid_hash.clone()],
+            b"out-leaf",
+            b"wasm",
+            b"hold",
+            &ledger,
+            1.3,
+            false,
+            1,
+            vec![3],
+            b"trace-leaf",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            3.0,
+        );
+        let leaf_hash = leaf.capsule_hash_hex().expect("leaf hash");
+        etl.append(&leaf.to_json_bytes().expect("leaf bytes"))
+            .expect("append leaf");
+
+        etl.revoke(&root_hash, "root revoked").expect("revoke root");
+        let tainted = etl.taint_descendants(&root_hash);
+        assert_eq!(tainted, vec![mid_hash.clone(), leaf_hash.clone()]);
+        assert!(etl.is_revoked(&root_hash));
+        assert!(etl.is_revoked(&mid_hash));
+        assert!(etl.is_revoked(&leaf_hash));
     }
 }

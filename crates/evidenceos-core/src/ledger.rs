@@ -143,6 +143,86 @@ impl JointLeakagePool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopicBudgetPool {
+    pub topic_id: String,
+    pub k_bits_budget: f64,
+    pub access_credit_budget: f64,
+    pub covariance_charge_total: f64,
+    k_bits_spent: f64,
+    access_credit_spent: f64,
+    pub frozen: bool,
+}
+
+impl TopicBudgetPool {
+    pub fn new(
+        topic_id: String,
+        k_bits_budget: f64,
+        access_credit_budget: f64,
+    ) -> EvidenceOSResult<Self> {
+        if !k_bits_budget.is_finite()
+            || !access_credit_budget.is_finite()
+            || k_bits_budget < 0.0
+            || access_credit_budget < 0.0
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        Ok(Self {
+            topic_id,
+            k_bits_budget,
+            access_credit_budget,
+            covariance_charge_total: 0.0,
+            k_bits_spent: 0.0,
+            access_credit_spent: 0.0,
+            frozen: false,
+        })
+    }
+
+    pub fn charge(
+        &mut self,
+        k_bits: f64,
+        access_credit: f64,
+        covariance_charge: f64,
+    ) -> EvidenceOSResult<()> {
+        if self.frozen {
+            return Err(EvidenceOSError::Frozen);
+        }
+        if !k_bits.is_finite()
+            || !access_credit.is_finite()
+            || !covariance_charge.is_finite()
+            || k_bits < 0.0
+            || access_credit < 0.0
+            || covariance_charge < 0.0
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let next_k = self.k_bits_spent + k_bits;
+        let next_access = self.access_credit_spent + access_credit;
+        let next_cov = self.covariance_charge_total + covariance_charge;
+        if !next_k.is_finite() || !next_access.is_finite() || !next_cov.is_finite() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        if next_k > self.k_bits_budget + f64::EPSILON
+            || next_access > self.access_credit_budget + f64::EPSILON
+        {
+            self.frozen = true;
+            return Err(EvidenceOSError::Frozen);
+        }
+        self.k_bits_spent = next_k;
+        self.access_credit_spent = next_access;
+        self.covariance_charge_total = next_cov;
+        Ok(())
+    }
+
+    pub fn k_bits_spent(&self) -> f64 {
+        self.k_bits_spent
+    }
+
+    pub fn access_credit_spent(&self) -> f64 {
+        self.access_credit_spent
+    }
+}
+
 /// §13 Canary Pulse drift circuit breaker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanaryPulse {
@@ -194,10 +274,14 @@ impl CanaryPulse {
 pub struct ConservationLedger {
     pub alpha: f64,
     pub k_bits_total: f64,
+    pub epsilon_total: f64,
+    pub delta_total: f64,
+    pub access_credit_spent: f64,
     pub wealth: f64,
     pub w_max: f64,
     pub events: Vec<LedgerEvent>,
     pub k_bits_budget: Option<f64>,
+    pub access_credit_budget: Option<f64>,
     pub frozen: bool,
 }
 
@@ -209,16 +293,31 @@ impl ConservationLedger {
         Ok(Self {
             alpha,
             k_bits_total: 0.0,
+            epsilon_total: 0.0,
+            delta_total: 0.0,
+            access_credit_spent: 0.0,
             wealth: 1.0,
             w_max: 1.0,
             events: Vec::new(),
             k_bits_budget: None,
+            access_credit_budget: None,
             frozen: false,
         })
     }
 
     pub fn with_budget(mut self, k_bits_budget: Option<f64>) -> Self {
         self.k_bits_budget = k_bits_budget;
+        self.access_credit_budget = k_bits_budget;
+        self
+    }
+
+    pub fn with_budgets(
+        mut self,
+        k_bits_budget: Option<f64>,
+        access_credit_budget: Option<f64>,
+    ) -> Self {
+        self.k_bits_budget = k_bits_budget;
+        self.access_credit_budget = access_credit_budget;
         self
     }
     pub fn alpha_prime(&self) -> f64 {
@@ -235,13 +334,46 @@ impl ConservationLedger {
     }
 
     pub fn charge(&mut self, k_bits: f64, kind: &str, meta: Value) -> EvidenceOSResult<()> {
+        self.charge_all(k_bits, 0.0, 0.0, k_bits, kind, meta)
+    }
+
+    pub fn charge_all(
+        &mut self,
+        k_bits: f64,
+        epsilon: f64,
+        delta: f64,
+        access_credit: f64,
+        kind: &str,
+        meta: Value,
+    ) -> EvidenceOSResult<()> {
         if self.frozen {
             return Err(EvidenceOSError::Frozen);
         }
-        if k_bits < 0.0 {
+        if !k_bits.is_finite()
+            || !epsilon.is_finite()
+            || !delta.is_finite()
+            || !access_credit.is_finite()
+            || k_bits < 0.0
+            || epsilon < 0.0
+            || delta < 0.0
+            || access_credit < 0.0
+        {
             return Err(EvidenceOSError::InvalidArgument);
         }
+
         let new_total = self.k_bits_total + k_bits;
+        let epsilon_next = self.epsilon_total + epsilon;
+        let delta_next = self.delta_total + delta;
+        let access_next = self.access_credit_spent + access_credit;
+
+        if !new_total.is_finite()
+            || !epsilon_next.is_finite()
+            || !delta_next.is_finite()
+            || !access_next.is_finite()
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+
         if let Some(b) = self.k_bits_budget {
             if new_total > b + f64::EPSILON {
                 self.frozen = true;
@@ -253,7 +385,23 @@ impl ConservationLedger {
                 return Err(EvidenceOSError::Frozen);
             }
         }
+
+        if let Some(b) = self.access_credit_budget {
+            if access_next > b + f64::EPSILON {
+                self.frozen = true;
+                self.events.push(LedgerEvent::leak(
+                    "freeze_access_credit_exhausted",
+                    0.0,
+                    json!({"overrun_credit": access_next - b}),
+                ));
+                return Err(EvidenceOSError::Frozen);
+            }
+        }
+
         self.k_bits_total = new_total;
+        self.epsilon_total = epsilon_next;
+        self.delta_total = delta_next;
+        self.access_credit_spent = access_next;
         self.events
             .push(LedgerEvent::leak(kind.to_string(), k_bits, meta));
         Ok(())
@@ -275,6 +423,9 @@ impl ConservationLedger {
             return Err(EvidenceOSError::InvalidArgument);
         }
         self.wealth *= e_value;
+        if !self.wealth.is_finite() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
         self.w_max = self.w_max.max(self.wealth);
         self.events
             .push(LedgerEvent::wealth(kind.to_string(), e_value, meta));
@@ -394,6 +545,67 @@ mod tests {
                 prop_assert!((ledger.wealth - expected_wealth).abs() < 1e-9);
                 prop_assert!((ledger.w_max() - expected_w_max).abs() < 1e-9);
                 prop_assert_eq!(ledger.frozen, expected_frozen);
+    #[test]
+    fn barrier_increases_with_k() {
+        let low = certification_barrier(0.05, 2.0);
+        let high = certification_barrier(0.05, 6.0);
+        assert!(high > low);
+    }
+
+    #[test]
+    fn certify_uses_w_max_not_current() {
+        let mut l = ConservationLedger::new(0.5).expect("ledger");
+        l.settle_e_value(8.0, "rise", Value::Null).expect("settle");
+        l.charge_all(2.0, 0.0, 0.0, 2.0, "leak", Value::Null)
+            .expect("charge");
+        l.settle_e_value(0.1, "drop", Value::Null).expect("settle");
+        assert!(l.wealth < l.barrier());
+        assert!(l.can_certify());
+    }
+
+    #[test]
+    fn topic_budget_is_shared() {
+        let mut pool = TopicBudgetPool::new("topic".into(), 10.0, 10.0).expect("pool");
+        pool.charge(6.0, 6.0, 0.0).expect("first claim");
+        assert!(matches!(
+            pool.charge(5.0, 5.0, 0.0),
+            Err(EvidenceOSError::Frozen)
+        ));
+    }
+
+    #[test]
+    fn dependence_tax_applies_when_shared_holdout() {
+        let dependence_tax_multiplier = 2.0;
+        let base_k = 4.0;
+        let taxed_k = base_k * dependence_tax_multiplier;
+        let mut pool = TopicBudgetPool::new("topic".into(), 10.0, 10.0).expect("pool");
+        assert!(pool.charge(taxed_k, taxed_k, taxed_k - base_k).is_ok());
+        assert!(matches!(
+            pool.charge(taxed_k, taxed_k, taxed_k - base_k),
+            Err(EvidenceOSError::Frozen)
+        ));
+    }
+
+    proptest! {
+        #[test]
+        fn monotone_high_water_mark_never_decreases(e_values in prop::collection::vec(0.0001f64..10.0f64, 1..64)) {
+            let mut ledger = ConservationLedger::new(0.05).expect("ledger");
+            let mut prev = ledger.w_max();
+            for e in e_values {
+                ledger.settle_e_value(e, "prop", Value::Null).expect("settle");
+                prop_assert!(ledger.w_max() + 1e-12 >= prev);
+                prev = ledger.w_max();
+            }
+        }
+
+        #[test]
+        fn k_bits_total_never_decreases(charges in prop::collection::vec(0.0f64..10.0f64, 1..64)) {
+            let mut ledger = ConservationLedger::new(0.05).expect("ledger");
+            let mut prev = ledger.k_bits_total;
+            for k in charges {
+                ledger.charge_all(k, 0.0, 0.0, k, "prop", Value::Null).expect("charge");
+                prop_assert!(ledger.k_bits_total + 1e-12 >= prev);
+                prev = ledger.k_bits_total;
             }
         }
     }

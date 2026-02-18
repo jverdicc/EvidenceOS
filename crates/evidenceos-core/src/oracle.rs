@@ -3,6 +3,10 @@
 
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const ORACLE_CODEC_SPEC_V1: &str =
+    "oracle-resolution/v1;codec=unsigned-big-endian;canonical=zero-high-bits;bucket-range=[0,num_symbols)";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EValueFn {
@@ -35,51 +39,142 @@ impl NullSpec {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TieBreaker {
+    Lower,
+    Upper,
+    NearestEven,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct OracleResolution {
-    pub num_buckets: u32,
-    pub delta_sigma: f64,
-    pub codec_version: u32,
+    pub num_symbols: u32,
+    pub bit_width: u8,
+    pub codec_hash: [u8; 32],
+    pub calibration_manifest_hash: [u8; 32],
+    pub calibrated_at_epoch: u64,
     pub ttl_epochs: Option<u64>,
+    pub delta_sigma: f64,
+    pub tie_breaker: TieBreaker,
 }
 
 impl OracleResolution {
-    pub fn new(num_buckets: u32, delta_sigma: f64) -> EvidenceOSResult<Self> {
-        if num_buckets < 2 || delta_sigma < 0.0 {
+    pub fn new(num_symbols: u32, delta_sigma: f64) -> EvidenceOSResult<Self> {
+        if num_symbols < 2 || delta_sigma < 0.0 || delta_sigma.is_nan() {
             return Err(EvidenceOSError::InvalidArgument);
         }
+        let bit_width = Self::compute_bit_width(num_symbols)?;
+        let codec_hash = Self::codec_hash_for_spec();
         Ok(Self {
-            num_buckets,
-            delta_sigma,
-            codec_version: 1,
+            num_symbols,
+            bit_width,
+            codec_hash,
+            calibration_manifest_hash: [0u8; 32],
+            calibrated_at_epoch: 0,
             ttl_epochs: None,
+            delta_sigma,
+            tie_breaker: TieBreaker::NearestEven,
         })
     }
 
+    pub fn with_calibration(mut self, manifest_hash: [u8; 32], calibrated_at_epoch: u64) -> Self {
+        self.calibration_manifest_hash = manifest_hash;
+        self.calibrated_at_epoch = calibrated_at_epoch;
+        self
+    }
+
+    fn compute_bit_width(num_symbols: u32) -> EvidenceOSResult<u8> {
+        if num_symbols < 2 {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let bits = 32 - (num_symbols - 1).leading_zeros();
+        u8::try_from(bits).map_err(|_| EvidenceOSError::InvalidArgument)
+    }
+
+    fn codec_hash_for_spec() -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(ORACLE_CODEC_SPEC_V1.as_bytes());
+        let digest = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    }
+
     pub fn bits_per_call(&self) -> f64 {
-        (self.num_buckets as f64).log2()
+        (self.num_symbols as f64).log2()
     }
 
-    pub fn quantize_unit_interval(&self, v: f64) -> u32 {
-        let clamped = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
-        let max_idx = (self.num_buckets - 1) as f64;
-        (clamped * max_idx).round().clamp(0.0, max_idx) as u32
+    pub fn encoded_len_bytes(&self) -> usize {
+        (self.bit_width as usize).div_ceil(8)
     }
 
-    pub fn is_expired(&self, current_epoch: u64, calibrated_at_epoch: u64) -> bool {
+    pub fn encode_bucket(&self, bucket: u32) -> EvidenceOSResult<Vec<u8>> {
+        if bucket >= self.num_symbols {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let expected_len = self.encoded_len_bytes();
+        let mut out = vec![0u8; expected_len];
+        let be = bucket.to_be_bytes();
+        let start = be.len().saturating_sub(expected_len);
+        out.copy_from_slice(&be[start..]);
+        Ok(out)
+    }
+
+    pub fn decode_bucket(&self, bytes: &[u8]) -> EvidenceOSResult<u32> {
+        if bytes.len() != self.encoded_len_bytes() {
+            return Err(EvidenceOSError::InvalidCanonicalEncoding);
+        }
+        if !self.bit_width.is_multiple_of(8) {
+            let unused_high_bits = 8 - (self.bit_width % 8);
+            let mask = u8::MAX << (8 - unused_high_bits);
+            if bytes[0] & mask != 0 {
+                return Err(EvidenceOSError::InvalidCanonicalEncoding);
+            }
+        }
+        let mut value = 0u32;
+        for &b in bytes {
+            value = (value << 8) | u32::from(b);
+        }
+        if value >= self.num_symbols {
+            return Err(EvidenceOSError::InvalidCanonicalEncoding);
+        }
+        Ok(value)
+    }
+
+    pub fn quantize_unit_interval(&self, v: f64) -> EvidenceOSResult<u32> {
+        if v.is_nan() {
+            return Err(EvidenceOSError::NaNNotAllowed);
+        }
+        let clamped = v.clamp(0.0, 1.0);
+        let max_idx = (self.num_symbols - 1) as f64;
+        let scaled = (clamped * max_idx).clamp(0.0, max_idx);
+        let bucket = match self.tie_breaker {
+            TieBreaker::Lower => scaled.floor(),
+            TieBreaker::Upper => scaled.ceil(),
+            TieBreaker::NearestEven => {
+                let floor = scaled.floor();
+                let frac = scaled - floor;
+                if (frac - 0.5).abs() < f64::EPSILON {
+                    if (floor as u64) % 2 == 0 {
+                        floor
+                    } else {
+                        floor + 1.0
+                    }
+                } else {
+                    scaled.round()
+                }
+            }
+        };
+        Ok(bucket.clamp(0.0, max_idx) as u32)
+    }
+
+    pub fn ttl_expired(&self, current_epoch: u64) -> bool {
         self.ttl_epochs
-            .map(|ttl| current_epoch.saturating_sub(calibrated_at_epoch) > ttl)
+            .map(|ttl| current_epoch.saturating_sub(self.calibrated_at_epoch) >= ttl)
             .unwrap_or(false)
     }
 
     pub fn validate_canonical_bytes(&self, bytes: &[u8]) -> EvidenceOSResult<u32> {
-        if bytes.len() != 1 {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        let bucket = u32::from(bytes[0]);
-        if bucket >= self.num_buckets {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        Ok(bucket)
+        self.decode_bucket(bytes)
     }
 }
 
@@ -196,7 +291,7 @@ impl AccuracyOracleState {
 
     pub fn query(&mut self, preds: &[u8]) -> EvidenceOSResult<OracleResult> {
         let raw = self.holdout.accuracy(preds)?;
-        let bucket = self.resolution.quantize_unit_interval(raw);
+        let bucket = self.resolution.quantize_unit_interval(raw)?;
         let local = self
             .last_preds
             .as_ref()
@@ -264,10 +359,68 @@ mod tests {
     }
 
     #[test]
-    fn oracle_resolution_ttl_expired() {
+    fn encoding_len_known_values() {
+        let cases = [
+            (2, 1u8, 1usize),
+            (3, 2, 1),
+            (4, 2, 1),
+            (7, 3, 1),
+            (8, 3, 1),
+            (9, 4, 1),
+            (255, 8, 1),
+            (256, 8, 1),
+            (257, 9, 2),
+            (1024, 10, 2),
+        ];
+        for (num_symbols, bit_width, encoded_len) in cases {
+            let r = OracleResolution::new(num_symbols, 0.1).expect("resolution");
+            assert_eq!(r.bit_width, bit_width);
+            assert_eq!(r.encoded_len_bytes(), encoded_len);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_wrong_length() {
+        let r = OracleResolution::new(257, 0.0).expect("resolution");
+        assert!(matches!(
+            r.decode_bucket(&[]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+        assert!(matches!(
+            r.decode_bucket(&[0x00]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+        assert!(matches!(
+            r.decode_bucket(&[0x00, 0x01, 0x02]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_unused_bits_nonzero() {
+        let r = OracleResolution::new(3, 0.0).expect("resolution");
+        assert!(matches!(
+            r.validate_canonical_bytes(&[0b1111_1111]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_bucket_out_of_range() {
+        let r = OracleResolution::new(3, 0.0).expect("resolution");
+        assert!(matches!(
+            r.decode_bucket(&[3]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+    }
+
+    #[test]
+    fn ttl_expired_boundary() {
         let mut r = OracleResolution::new(8, 0.01).expect("resolution");
-        r.ttl_epochs = Some(10);
-        assert!(r.is_expired(15, 3));
+        r.calibrated_at_epoch = 10;
+        r.ttl_epochs = Some(5);
+        assert!(!r.ttl_expired(14));
+        assert!(r.ttl_expired(15));
     }
 
     #[test]
@@ -290,6 +443,33 @@ mod tests {
     }
 
     #[test]
+    fn delta_sigma_zero_disables_hysteresis() {
+        let holdout = HoldoutLabels::new(vec![1, 1, 1, 1]).expect("holdout");
+        let mut state = AccuracyOracleState::new(
+            holdout,
+            OracleResolution::new(8, 0.0).expect("resolution"),
+            NullSpec {
+                domain: "labels".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("state");
+        let _ = state.query(&[1, 1, 1, 1]).expect("query1");
+        let r2 = state.query(&[1, 1, 1, 0]).expect("query2");
+        assert!(!r2.hysteresis_applied);
+    }
+
+    #[test]
+    fn quantize_nan_rejected() {
+        let r = OracleResolution::new(8, 0.0).expect("resolution");
+        assert!(matches!(
+            r.quantize_unit_interval(f64::NAN),
+            Err(EvidenceOSError::NaNNotAllowed)
+        ));
+    }
+
+    #[test]
     fn accuracy_oracle_state_rejects_non_binary_preds() {
         let holdout = HoldoutLabels::new(vec![1, 1]).expect("holdout");
         let mut state = AccuracyOracleState::new(
@@ -304,15 +484,6 @@ mod tests {
         .expect("state");
         assert!(matches!(
             state.query(&[1, 2]),
-            Err(EvidenceOSError::InvalidArgument)
-        ));
-    }
-
-    #[test]
-    fn canonical_bytes_rejects_extra_bytes() {
-        let r = OracleResolution::new(8, 0.0).expect("resolution");
-        assert!(matches!(
-            r.validate_canonical_bytes(&[0, 1]),
             Err(EvidenceOSError::InvalidArgument)
         ));
     }

@@ -16,26 +16,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::executor::{ExecutionError, ExecutionLimits, WasmExecutor};
+use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
-use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState};
+use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
+use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::ledger::ConservationLedger;
+use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::{pb, DOMAIN_CAPSULE_HASH, DOMAIN_CLAIM_ID};
+use evidenceos_protocol::pb;
 
 use pb::evidence_os_server::EvidenceOs;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
+const MAX_DEPENDENCY_ITEMS: usize = 256;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
-const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
 
@@ -85,38 +87,136 @@ impl ClaimState {
             ClaimState::Revoked => Some(CoreClaimState::Revoked),
             ClaimState::Tainted => Some(CoreClaimState::Tainted),
             ClaimState::Stale => Some(CoreClaimState::Stale),
-            ClaimState::Committed | ClaimState::Frozen => None,
+            ClaimState::Frozen => Some(CoreClaimState::Frozen),
+            ClaimState::Committed => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OraclePins {
+    codec_hash: [u8; 32],
+    bit_width: u32,
+    ttl_epochs: u64,
+    pinned_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FreezePreimage {
+    artifacts_hash: [u8; 32],
+    wasm_hash: [u8; 32],
+    dependency_merkle_root: [u8; 32],
+    holdout_ref_hash: [u8; 32],
+    oracle_hash: [u8; 32],
+    sealed_preimage_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Claim {
     claim_id: [u8; 32],
     topic_id: [u8; 32],
+    #[serde(default)]
+    dependency_merkle_root: Option<[u8; 32]>,
     holdout_handle_id: [u8; 32],
     holdout_ref: String,
+    #[serde(default)]
+    metadata_locked: bool,
     claim_name: String,
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
     epoch_size: u64,
+    #[serde(default)]
+    epoch_counter: u64,
     oracle_num_symbols: u32,
+    oracle_resolution: OracleResolution,
     state: ClaimState,
     artifacts: Vec<([u8; 32], String)>,
+    #[serde(default)]
+    dependency_capsule_hashes: Vec<String>,
+    dependency_items: Vec<[u8; 32]>,
+    #[serde(default)]
+    dependency_merkle_root: Option<[u8; 32]>,
     wasm_module: Vec<u8>,
     aspec_rejection: Option<String>,
     lane: Lane,
+    #[serde(default)]
+    heavy_lane_diversion_recorded: bool,
     ledger: ConservationLedger,
     last_decision: Option<i32>,
     last_capsule_hash: Option<[u8; 32]>,
     capsule_bytes: Option<Vec<u8>>,
     etl_index: Option<u64>,
+    #[serde(default)]
+    oracle_pins: Option<OraclePins>,
+    #[serde(default)]
+    freeze_preimage: Option<FreezePreimage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HoldoutBudgetPool {
+    holdout_handle_id: [u8; 32],
+    k_bits_budget: f64,
+    access_credit_budget: f64,
+    k_bits_spent: f64,
+    access_credit_spent: f64,
+    frozen: bool,
+}
+
+impl HoldoutBudgetPool {
+    fn new(
+        holdout_handle_id: [u8; 32],
+        k_bits_budget: f64,
+        access_credit_budget: f64,
+    ) -> Result<Self, Status> {
+        if !k_bits_budget.is_finite()
+            || !access_credit_budget.is_finite()
+            || k_bits_budget < 0.0
+            || access_credit_budget < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool budget"));
+        }
+        Ok(Self {
+            holdout_handle_id,
+            k_bits_budget,
+            access_credit_budget,
+            k_bits_spent: 0.0,
+            access_credit_spent: 0.0,
+            frozen: false,
+        })
+    }
+
+    fn charge(&mut self, k_bits: f64, access_credit: f64) -> Result<(), Status> {
+        if self.frozen {
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        let next_k = self.k_bits_spent + k_bits;
+        let next_access = self.access_credit_spent + access_credit;
+        if !next_k.is_finite() || !next_access.is_finite() {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        if next_k > self.k_bits_budget + f64::EPSILON
+            || next_access > self.access_credit_budget + f64::EPSILON
+        {
+            self.frozen = true;
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        self.k_bits_spent = next_k;
+        self.access_credit_spent = next_access;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct PersistedState {
     claims: Vec<Claim>,
     revocations: Vec<([u8; 32], u64, String)>,
+    topic_pools: Vec<([u8; 32], TopicBudgetPool)>,
+    holdout_pools: Vec<([u8; 32], HoldoutBudgetPool)>,
 }
 
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
@@ -124,6 +224,8 @@ type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 #[derive(Debug)]
 struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
+    topic_pools: Mutex<HashMap<[u8; 32], TopicBudgetPool>>,
+    holdout_pools: Mutex<HashMap<[u8; 32], HoldoutBudgetPool>>,
     etl: Mutex<Etl>,
     data_path: PathBuf,
     revocations: Mutex<Vec<([u8; 32], u64, String)>>,
@@ -144,6 +246,7 @@ impl Drop for KernelState {
 pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
+    dependence_tax_multiplier: f64,
 }
 
 impl EvidenceOsService {
@@ -182,6 +285,8 @@ impl EvidenceOsService {
                     .map(|c| (c.claim_id, c))
                     .collect(),
             ),
+            topic_pools: Mutex::new(persisted.topic_pools.into_iter().collect()),
+            holdout_pools: Mutex::new(persisted.holdout_pools.into_iter().collect()),
             etl: Mutex::new(etl),
             data_path: root,
             revocations: Mutex::new(persisted.revocations),
@@ -194,9 +299,19 @@ impl EvidenceOsService {
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let dependence_tax_multiplier = std::env::var("EVIDENCEOS_DEPENDENCE_TAX_MULTIPLIER")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(2.0);
+        if !dependence_tax_multiplier.is_finite() || dependence_tax_multiplier < 2.0 {
+            return Err(Status::invalid_argument(
+                "dependence_tax_multiplier must be finite and >= 2.0",
+            ));
+        }
         Ok(Self {
             state,
             insecure_v1_enabled,
+            dependence_tax_multiplier,
         })
     }
 
@@ -208,39 +323,166 @@ impl EvidenceOsService {
         if claim.state == to {
             return Ok(());
         }
-        match (claim.state, to) {
-            (ClaimState::Uncommitted, ClaimState::Committed) => {
-                claim.state = ClaimState::Committed;
-                Ok(())
-            }
-            (from, ClaimState::Frozen) => {
-                let _ = from;
-                claim.state = ClaimState::Frozen;
-                Ok(())
-            }
-            (from, target) => {
-                let from_core = from
-                    .as_core()
-                    .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
-                let target_core = target
-                    .as_core()
-                    .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
-                from_core
-                    .transition(target_core)
-                    .map_err(|_| Status::failed_precondition("invalid claim state transition"))?;
-                claim.state = target;
-                Ok(())
-            }
+        if claim.state == ClaimState::Uncommitted && to == ClaimState::Committed {
+            claim.state = ClaimState::Committed;
+            return Ok(());
         }
+        if to == ClaimState::Committed {
+            return Err(Status::failed_precondition(
+                "invalid claim state transition",
+            ));
+        }
+        let from_core = if claim.state == ClaimState::Committed {
+            CoreClaimState::Uncommitted
+        } else {
+            claim
+                .state
+                .as_core()
+                .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?
+        };
+        let target_core = to
+            .as_core()
+            .ok_or_else(|| Status::failed_precondition("invalid claim state transition"))?;
+        from_core
+            .transition(target_core)
+            .map_err(|_| Status::failed_precondition("invalid claim state transition"))?;
+        claim.state = to;
+        Ok(())
+    }
+
+    fn freeze_claim_gates(claim: &mut Claim) -> Result<(), Status> {
+        if claim.freeze_preimage.is_some() && claim.state == ClaimState::Sealed {
+            return Ok(());
+        }
+        if claim.state != ClaimState::Committed && claim.state != ClaimState::Stale {
+            return Err(Status::failed_precondition(
+                "claim must be COMMITTED or STALE to freeze gates",
+            ));
+        }
+        if claim.artifacts.is_empty() {
+            return Err(Status::failed_precondition(
+                "artifacts must be committed before freeze",
+            ));
+        }
+        if claim.wasm_module.is_empty() {
+            return Err(Status::failed_precondition(
+                "wasm bytes must be committed before freeze",
+            ));
+        }
+        if claim.aspec_rejection.is_some() {
+            return Err(Status::failed_precondition("ASPEC report must be accepted"));
+        }
+        if claim.lane == Lane::Heavy && !claim.heavy_lane_diversion_recorded {
+            return Err(Status::failed_precondition(
+                "heavy lane diversion must be recorded before freeze",
+            ));
+        }
+
+        claim
+            .artifacts
+            .sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if claim.dependency_items.len() > MAX_DEPENDENCY_ITEMS {
+            return Err(Status::failed_precondition(
+                "dependency list exceeds allowed size",
+            ));
+        }
+        claim.dependency_items.sort();
+
+        let dependency_merkle_root = dependency_merkle_root(&claim.dependency_items);
+        claim.dependency_merkle_root = Some(dependency_merkle_root);
+
+        let wasm_hash = sha256_bytes(&claim.wasm_module);
+        let artifacts_hash = artifacts_commitment(&claim.artifacts);
+        let holdout_ref_hash = sha256_bytes(claim.holdout_ref.as_bytes());
+
+        let bit_width = canonical_len_for_symbols(claim.oracle_num_symbols)? as u32 * 8;
+        let oracle_pins = OraclePins {
+            codec_hash: sha256_bytes(b"evidenceos.oracle.codec.v1"),
+            bit_width,
+            ttl_epochs: 1,
+            pinned_epoch: current_logical_epoch(claim.epoch_size)?,
+        };
+        let oracle_hash = oracle_pins_hash(&oracle_pins);
+
+        let mut preimage_payload = Vec::new();
+        preimage_payload.extend_from_slice(&artifacts_hash);
+        preimage_payload.extend_from_slice(&wasm_hash);
+        preimage_payload.extend_from_slice(&dependency_merkle_root);
+        preimage_payload.extend_from_slice(&holdout_ref_hash);
+        preimage_payload.extend_from_slice(&oracle_hash);
+        let sealed_preimage_hash = sha256_bytes(&preimage_payload);
+
+        claim.oracle_pins = Some(oracle_pins);
+        claim.freeze_preimage = Some(FreezePreimage {
+            artifacts_hash,
+            wasm_hash,
+            dependency_merkle_root,
+            holdout_ref_hash,
+            oracle_hash,
+            sealed_preimage_hash,
+        });
+        claim.metadata_locked = true;
+        Self::transition_claim(claim, ClaimState::Sealed)
+    }
+
+    fn maybe_mark_stale(claim: &mut Claim, current_epoch: u64) -> Result<(), Status> {
+        let pins = match claim.oracle_pins.as_ref() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        if claim.state != ClaimState::Sealed {
+            return Ok(());
+        }
+        if current_epoch != pins.pinned_epoch {
+            Self::transition_claim(claim, ClaimState::Stale)?;
+            return Ok(());
+        }
+        if current_epoch.saturating_sub(pins.pinned_epoch) > pins.ttl_epochs {
+            Self::transition_claim(claim, ClaimState::Stale)?;
+        }
+        Ok(())
     }
 
     fn record_incident(&self, claim: &mut Claim, reason: &str) -> Result<(), Status> {
         claim.state = ClaimState::Frozen;
         claim.ledger.frozen = true;
-        let mut etl = self.state.etl.lock();
-        etl.revoke(&hex::encode(claim.claim_id), reason)
-            .map_err(|_| Status::internal("etl incident append failed"))?;
+        if let Some(capsule_hash) = claim.last_capsule_hash {
+            let mut etl = self.state.etl.lock();
+            etl.revoke(&hex::encode(capsule_hash), reason)
+                .map_err(|_| Status::internal("etl incident append failed"))?;
+        }
         Ok(())
+    }
+
+    fn validate_budget_value(value: f64, field: &str) -> Result<(), Status> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Status::invalid_argument(format!(
+                "{field} must be finite and >= 0"
+            )));
+        }
+        Ok(())
+    }
+
+    fn dependence_multiplier(&self, claim: &Claim, claims: &HashMap<[u8; 32], Claim>) -> f64 {
+        let mut shared_holdout = false;
+        let mut shared_dependency = false;
+        for other in claims.values() {
+            if other.claim_id == claim.claim_id {
+                continue;
+            }
+            if other.holdout_handle_id == claim.holdout_handle_id {
+                shared_holdout = true;
+            }
+            if claim.dependency_merkle_root.is_some()
+                && claim.dependency_merkle_root == other.dependency_merkle_root
+            {
+                shared_dependency = true;
+            }
+            if shared_holdout || shared_dependency {
+                return self.dependence_tax_multiplier;
+            }
+        }
+        1.0
     }
 }
 
@@ -248,6 +490,18 @@ fn persist_all(state: &KernelState) -> Result<(), Status> {
     let persisted = PersistedState {
         claims: state.claims.lock().values().cloned().collect(),
         revocations: state.revocations.lock().clone(),
+        topic_pools: state
+            .topic_pools
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
+        holdout_pools: state
+            .holdout_pools
+            .lock()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|_| Status::internal("serialize state failed"))?;
@@ -267,6 +521,12 @@ fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
     let mut out = [0u8; 32];
     out.copy_from_slice(bytes);
     Ok(out)
+}
+
+fn decode_hex_hash32(value: &str, field: &str) -> Result<[u8; 32], Status> {
+    let bytes =
+        hex::decode(value).map_err(|_| Status::internal(format!("{field} is not valid hex")))?;
+    parse_hash32(&bytes, field)
 }
 
 const ETL_SIGNING_KEY_REL_PATH: &str = "keys/etl_signing_ed25519";
@@ -313,6 +573,60 @@ fn load_or_create_signing_key(data_dir: &Path) -> Result<SigningKey, Status> {
     }
 
     Ok(key)
+}
+
+fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(payload);
+    let out = h.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
+fn artifacts_commitment(artifacts: &[([u8; 32], String)]) -> [u8; 32] {
+    let mut payload = Vec::new();
+    for (hash, kind) in artifacts {
+        payload.extend_from_slice(hash);
+        payload.extend_from_slice(&(kind.len() as u64).to_be_bytes());
+        payload.extend_from_slice(kind.as_bytes());
+    }
+    sha256_bytes(&payload)
+}
+
+fn dependency_merkle_root(items: &[[u8; 32]]) -> [u8; 32] {
+    if items.is_empty() {
+        return sha256_bytes(&[]);
+    }
+    let mut layer: Vec<[u8; 32]> = items.iter().copied().map(|v| sha256_bytes(&v)).collect();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() {
+                layer[i + 1]
+            } else {
+                left
+            };
+            let mut concat = [0u8; 64];
+            concat[..32].copy_from_slice(&left);
+            concat[32..].copy_from_slice(&right);
+            next.push(sha256_bytes(&concat));
+            i += 2;
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
+fn oracle_pins_hash(pins: &OraclePins) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&pins.codec_hash);
+    payload.extend_from_slice(&pins.bit_width.to_be_bytes());
+    payload.extend_from_slice(&pins.ttl_epochs.to_be_bytes());
+    payload.extend_from_slice(&pins.pinned_epoch.to_be_bytes());
+    sha256_bytes(&payload)
 }
 
 fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
@@ -399,6 +713,12 @@ fn build_revocations_snapshot(
     }
 }
 
+fn execution_limits(
+    claim: &Claim,
+    _expected_output_len: Option<usize>,
+) -> Result<ExecutionLimits, Status> {
+    let canonical_len = claim.oracle_resolution.encoded_len_bytes();
+    let max_output_bytes = canonical_len;
 fn canonical_len_for_symbols(num_symbols: u32) -> Result<usize, Status> {
     if num_symbols < 2 {
         return Err(Status::invalid_argument("oracle_num_symbols must be >= 2"));
@@ -422,12 +742,8 @@ fn decode_canonical_symbol(canonical: &[u8], num_symbols: u32) -> Result<u32, St
     Ok(value)
 }
 
-fn execution_limits(
-    claim: &Claim,
-    _expected_output_len: Option<usize>,
-) -> Result<ExecutionLimits, Status> {
+fn vault_config(claim: &Claim) -> Result<VaultConfig, Status> {
     let canonical_len = canonical_len_for_symbols(claim.oracle_num_symbols)?;
-    let max_output_bytes = canonical_len;
     let max_memory_bytes = if claim.lane == Lane::Heavy {
         2 * 65_536
     } else {
@@ -438,31 +754,39 @@ fn execution_limits(
     } else {
         1_000_000
     };
-    let max_host_calls = if claim.lane == Lane::Heavy { 16 } else { 64 };
-    Ok(ExecutionLimits {
+    let max_oracle_calls = if claim.lane == Lane::Heavy { 8 } else { 32 };
+    Ok(VaultConfig {
         max_fuel,
-        max_memory_bytes,
-        max_output_bytes,
-        max_output_calls: 1,
-        max_host_calls,
+        max_memory_bytes: max_memory_bytes as u64,
+        max_output_bytes: canonical_len as u32,
+        max_oracle_calls,
     })
 }
 
-fn map_execution_error(err: ExecutionError) -> Status {
-    match err {
-        ExecutionError::InvalidModule(_) => Status::failed_precondition("invalid wasm module"),
-        ExecutionError::OutputMissing => Status::failed_precondition("structured output missing"),
-        ExecutionError::OutputTooLarge => {
-            Status::failed_precondition("structured output too large")
-        }
-        ExecutionError::TooManyOutputs => {
-            Status::failed_precondition("too many structured outputs")
-        }
-        ExecutionError::MemoryOob => Status::failed_precondition("guest memory out-of-bounds"),
-        ExecutionError::FuelExhausted => Status::resource_exhausted("fuel exhausted"),
-        ExecutionError::TooManyHostCalls => Status::resource_exhausted("host call limit exceeded"),
-        ExecutionError::Trap(_) => Status::failed_precondition("wasm trap"),
+fn derive_holdout_labels(
+    holdout_handle_id: [u8; 32],
+    holdout_len: usize,
+) -> Result<Vec<u8>, Status> {
+    if holdout_len == 0 || holdout_len > 4096 {
+        return Err(Status::invalid_argument("holdout length out of bounds"));
     }
+    let mut labels = Vec::with_capacity(holdout_len);
+    for idx in 0..holdout_len {
+        let byte = holdout_handle_id[idx % holdout_handle_id.len()];
+        labels.push((byte ^ ((idx as u8).wrapping_mul(31))) & 1);
+    }
+    Ok(labels)
+}
+
+fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
+    if epoch_size == 0 {
+        return Err(Status::invalid_argument("epoch_size must be > 0"));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| Status::internal("system clock before unix epoch"))?
+        .as_secs();
+    Ok(now / epoch_size)
 }
 
 fn execute_wasm(
@@ -472,12 +796,36 @@ fn execute_wasm(
 ) -> Result<(Vec<u8>, u64, [u8; 32]), Status> {
     if wasm.is_empty() {
         return Err(Status::failed_precondition("wasm module not committed"));
+fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
+    let holdout_len = usize::try_from(claim.epoch_size)
+        .map_err(|_| Status::invalid_argument("epoch_size too large"))?;
+    let holdout_labels = derive_holdout_labels(claim.holdout_handle_id, holdout_len)?;
+    Ok(VaultExecutionContext {
+        holdout_labels,
+        oracle_num_buckets: claim.oracle_num_symbols,
+        oracle_delta_sigma: 0.01,
+        oracle_null_accuracy: 0.5,
+    })
+}
+
+fn map_vault_error(err: VaultError) -> Status {
+    match err {
+        VaultError::InvalidConfig(_) => Status::invalid_argument("invalid vault configuration"),
+        VaultError::InvalidModule(_) => Status::failed_precondition("invalid wasm module"),
+        VaultError::OutputMissing => Status::failed_precondition("structured output missing"),
+        VaultError::OutputTooLarge => Status::failed_precondition("structured output too large"),
+        VaultError::OutputAlreadyEmitted => {
+            Status::failed_precondition("too many structured outputs")
+        }
+        VaultError::MemoryOob => Status::failed_precondition("guest memory out-of-bounds"),
+        VaultError::FuelExhausted => Status::resource_exhausted("fuel exhausted"),
+        VaultError::OracleCallLimitExceeded => {
+            Status::resource_exhausted("oracle call limit exceeded")
+        }
+        VaultError::InvalidOracleInput => Status::invalid_argument("invalid oracle input"),
+        VaultError::MissingRunExport => Status::failed_precondition("missing run export"),
+        VaultError::Trap(_) => Status::failed_precondition("wasm trap"),
     }
-    let executor = WasmExecutor::new().map_err(map_execution_error)?;
-    let result = executor
-        .execute(wasm, logical_epoch, limits)
-        .map_err(map_execution_error)?;
-    Ok((result.output, result.fuel_used, result.trace_hash))
 }
 
 #[tonic::async_trait]
@@ -511,41 +859,73 @@ impl EvidenceOs for EvidenceOsService {
         let holdout_handle_id = parse_hash32(&req.holdout_handle_id, "holdout_handle_id")?;
         let phys_hir_hash = parse_hash32(&req.phys_hir_hash, "phys_hir_hash")?;
         let _ = canonical_len_for_symbols(req.oracle_num_symbols)?;
+        let access_credit = req.access_credit as f64;
+        Self::validate_budget_value(access_credit, "access_credit")?;
+        let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
+            .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
         let ledger = ConservationLedger::new(req.alpha)
             .map_err(|_| Status::invalid_argument("alpha must be in (0,1)"))
-            .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
+            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic_id);
         id_payload.extend_from_slice(&holdout_handle_id);
         id_payload.extend_from_slice(&phys_hir_hash);
         id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
-        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
         let claim = Claim {
             claim_id,
             topic_id,
+            dependency_merkle_root: None,
             holdout_handle_id,
             holdout_ref: hex::encode(holdout_handle_id),
+            metadata_locked: false,
             claim_name: "legacy-v1".to_string(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             epoch_size: req.epoch_size,
+            epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
+            oracle_resolution,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: Lane::Fast,
+            heavy_lane_diversion_recorded: false,
             ledger,
             last_decision: None,
             last_capsule_hash: None,
             capsule_bytes: None,
             etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
+        {
+            let mut topic_pools = self.state.topic_pools.lock();
+            if !topic_pools.contains_key(&topic_id) {
+                let pool =
+                    TopicBudgetPool::new(hex::encode(topic_id), access_credit, access_credit)
+                        .map_err(|_| Status::invalid_argument("invalid topic budget"))?;
+                topic_pools.insert(topic_id, pool);
+            }
+        }
+        self.state
+            .holdout_pools
+            .lock()
+            .entry(holdout_handle_id)
+            .or_insert(HoldoutBudgetPool::new(
+                holdout_handle_id,
+                access_credit,
+                access_credit,
+            )?);
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimResponse {
             claim_id: claim_id.to_vec(),
@@ -567,13 +947,41 @@ impl EvidenceOs for EvidenceOsService {
             return Err(Status::invalid_argument("wasm_module is required"));
         }
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let capsule_hash = {
+            let claims = self.state.claims.lock();
+            let claim = claims
+                .get(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            claim
+                .last_capsule_hash
+                .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?
+        };
         {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            if claim.metadata_locked
+                || matches!(
+                    claim.state,
+                    ClaimState::Sealed
+                        | ClaimState::Executing
+                        | ClaimState::Settled
+                        | ClaimState::Certified
+                        | ClaimState::Frozen
+                )
+            {
+                return Err(Status::failed_precondition(
+                    "cannot commit artifacts after freeze",
+                ));
+            }
             Self::transition_claim(claim, ClaimState::Committed)?;
             claim.artifacts.clear();
+            claim.dependency_items.clear();
+            claim.dependency_merkle_root = None;
+            claim.freeze_preimage = None;
+            claim.oracle_pins = None;
+            claim.epoch_counter = claim.epoch_counter.saturating_add(1);
             let mut declared_wasm_hash = None;
             for artifact in req.artifacts {
                 if artifact.kind.is_empty() || artifact.kind.len() > 64 {
@@ -582,6 +990,9 @@ impl EvidenceOs for EvidenceOsService {
                 let artifact_hash = parse_hash32(&artifact.artifact_hash, "artifact_hash")?;
                 if artifact.kind == "wasm" {
                     declared_wasm_hash = Some(artifact_hash);
+                }
+                if artifact.kind == "dependency" {
+                    claim.dependency_items.push(artifact_hash);
                 }
                 claim.artifacts.push((artifact_hash, artifact.kind));
             }
@@ -615,6 +1026,7 @@ impl EvidenceOs for EvidenceOsService {
             } else {
                 Lane::Fast
             };
+            claim.heavy_lane_diversion_recorded = claim.lane == Lane::Heavy;
             claim.wasm_module = req.wasm_module;
         }
         persist_all(&self.state)?;
@@ -633,16 +1045,18 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::FreezeGatesRequest>,
     ) -> Result<Response<pb::FreezeGatesResponse>, Status> {
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
-        let state = self
-            .state
-            .claims
-            .lock()
-            .get(&claim_id)
-            .ok_or_else(|| Status::not_found("claim not found"))?
-            .state;
-        if state != ClaimState::Committed {
-            return Err(Status::failed_precondition("claim must be COMMITTED"));
-        }
+        let state = {
+            let mut claims = self.state.claims.lock();
+            let claim = claims
+                .get_mut(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::freeze_claim_gates(claim).or_else(|err| {
+                let _ = self.record_incident(claim, "freeze_gates_failed");
+                Err(err)
+            })?;
+            claim.state
+        };
+        persist_all(&self.state)?;
         Ok(Response::new(pb::FreezeGatesResponse {
             state: state.to_proto(),
         }))
@@ -653,27 +1067,25 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::SealClaimRequest>,
     ) -> Result<Response<pb::SealClaimResponse>, Status> {
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
-        {
+        let state = {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
-            if claim.artifacts.is_empty() {
-                return Err(Status::failed_precondition(
-                    "cannot seal without committed artifacts",
-                ));
+            if claim.state == ClaimState::Sealed && claim.freeze_preimage.is_some() {
+                claim.state
+            } else {
+                Self::freeze_claim_gates(claim).or_else(|err| {
+                    let _ = self.record_incident(claim, "seal_claim_failed");
+                    Err(err)
+                })?;
+                claim.state
             }
-            Self::transition_claim(claim, ClaimState::Sealed)?;
-        }
+        };
         persist_all(&self.state)?;
-        let state = self
-            .state
-            .claims
-            .lock()
-            .get(&claim_id)
-            .map(|c| c.state.to_proto())
-            .ok_or_else(|| Status::internal("claim disappeared"))?;
-        Ok(Response::new(pb::SealClaimResponse { state }))
+        Ok(Response::new(pb::SealClaimResponse {
+            state: state.to_proto(),
+        }))
     }
 
     async fn execute_claim(
@@ -704,18 +1116,24 @@ impl EvidenceOs for EvidenceOsService {
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
 
-            let (emitted_output, fuel_used, trace_hash) = match execute_wasm(
+            let vault = VaultEngine::new().map_err(map_vault_error)?;
+            let vault_result = match vault.execute(
                 &claim.wasm_module,
-                claim.epoch_size,
+                current_logical_epoch(claim.epoch_size)?,
                 execution_limits(claim, Some(req.canonical_output.len()))?,
+                &vault_context(claim)?,
+                vault_config(claim)?,
             ) {
                 Ok(v) => v,
                 Err(err) => {
                     self.record_incident(claim, "execution_failure")?;
                     persist_all(&self.state)?;
-                    return Err(err);
+                    return Err(map_vault_error(err));
                 }
             };
+            let emitted_output = vault_result.canonical_output;
+            let fuel_used = vault_result.fuel_used;
+            let trace_hash = vault_result.judge_trace_hash;
             if !req.canonical_output.is_empty() && req.canonical_output != emitted_output {
                 self.record_incident(claim, "canonical_output_mismatch")?;
                 persist_all(&self.state)?;
@@ -724,25 +1142,62 @@ impl EvidenceOs for EvidenceOsService {
                 ));
             }
             let canonical_output = emitted_output;
-            let _ = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols).map_err(
-                |_| {
+            let _ = claim
+                .oracle_resolution
+                .validate_canonical_bytes(&canonical_output)
+                .map_err(|_| {
                     let _ = self.record_incident(claim, "non_canonical_output");
                     Status::invalid_argument("non-canonical output")
-                },
-            )?;
+                })?;
 
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let dependence_multiplier = self.dependence_multiplier(claim, &claims);
+            let taxed_bits = charge_bits * dependence_multiplier;
+            let covariance_charge = taxed_bits - charge_bits;
+            let charge_bits = claim.oracle_resolution.bits_per_call();
             claim
                 .ledger
-                .charge(
-                    charge_bits,
+                .charge_all(
+                    taxed_bits,
+                    0.0,
+                    0.0,
+                    taxed_bits,
                     "structured_output",
-                    json!({"post_canonical_bits": charge_bits}),
+                    json!({
+                        "post_canonical_bits": charge_bits,
+                        "dependence_multiplier": dependence_multiplier,
+                        "taxed_k_bits": taxed_bits,
+                    }),
                 )
                 .map_err(|_| {
                     let _ = self.record_incident(claim, "ledger_overrun");
                     Status::failed_precondition("ledger budget exhausted")
                 })?;
+            {
+                let mut topic_pools = self.state.topic_pools.lock();
+                let pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                if pool
+                    .charge(taxed_bits, taxed_bits, covariance_charge)
+                    .is_err()
+                {
+                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("topic budget exhausted"));
+                }
+            }
+            {
+                let mut holdout_pools = self.state.holdout_pools.lock();
+                let pool = holdout_pools
+                    .get_mut(&claim.holdout_handle_id)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                if pool.charge(taxed_bits, taxed_bits).is_err() {
+                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                }
+            }
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
                 persist_all(&self.state)?;
@@ -761,14 +1216,39 @@ impl EvidenceOs for EvidenceOsService {
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
 
             Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
+            if claim.lane == Lane::Heavy {
+                Self::transition_claim(claim, ClaimState::Frozen)?;
+            } else if claim.ledger.can_certify() {
                 Self::transition_claim(claim, ClaimState::Certified)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Revoked)?;
+            let current_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Status::internal("system clock before unix epoch"))?
+                .as_secs()
+                / claim.epoch_size;
+            if claim.oracle_resolution.ttl_expired(current_epoch) {
+                Self::transition_claim(claim, ClaimState::Stale)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Settled)?;
+                if claim.ledger.can_certify() {
+                    Self::transition_claim(claim, ClaimState::Certified)?;
+                }
             }
 
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),
                 hex::encode(claim.topic_id),
                 claim.output_schema_id.clone(),
+                claim
+                    .artifacts
+                    .iter()
+                    .map(|(hash, kind)| ManifestEntry {
+                        kind: kind.clone(),
+                        hash_hex: hex::encode(hash),
+                    })
+                    .collect(),
+                claim.dependency_capsule_hashes.clone(),
                 &canonical_output,
                 &claim.wasm_module,
                 &claim.holdout_handle_id,
@@ -777,11 +1257,13 @@ impl EvidenceOs for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 req.decision,
                 req.reason_codes.clone(),
-                hex::encode(trace_hash),
+                &trace_hash,
                 claim.holdout_ref.clone(),
+                format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
+                "aspec.v1".to_string(),
+                "evidenceos.v1".to_string(),
+                fuel_used as f64,
             );
-            capsule.aspec_version = "aspec.v1".to_string();
-            capsule.runtime_version = format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION"));
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -790,7 +1272,12 @@ impl EvidenceOs for EvidenceOsService {
             let capsule_bytes = capsule
                 .to_json_bytes()
                 .map_err(|_| Status::internal("capsule serialization failed"))?;
-            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let capsule_hash = decode_hex_hash32(
+                &capsule
+                    .capsule_hash_hex()
+                    .map_err(|_| Status::internal("capsule hashing failed"))?,
+                "capsule_hash",
+            )?;
             let etl_index = {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
@@ -835,7 +1322,6 @@ impl EvidenceOs for EvidenceOsService {
             claim.last_capsule_hash = Some(capsule_hash);
             claim.capsule_bytes = Some(capsule_bytes);
             claim.etl_index = Some(etl_index);
-            let _ = fuel_used;
             (capsule_hash, etl_index, claim.state)
         };
 
@@ -911,34 +1397,46 @@ impl EvidenceOs for EvidenceOsService {
         );
 
         let alpha = (metadata.alpha_micros as f64) / 1_000_000.0;
+        let access_credit = req.access_credit as f64;
+        Self::validate_budget_value(access_credit, "access_credit")?;
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
-            .map(|l| l.with_budget(Some(req.access_credit as f64)))?;
+            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
         let mut holdout_hasher = Sha256::new();
         holdout_hasher.update(req.holdout_ref.as_bytes());
         let mut holdout_handle_id = [0u8; 32];
         holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
+
+        let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
+            .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic.topic_id);
         id_payload.extend_from_slice(&holdout_handle_id);
         id_payload.extend_from_slice(&phys);
         id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
-        id_payload.extend_from_slice(&req.oracle_num_symbols.to_be_bytes());
+        id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
+            dependency_merkle_root,
             holdout_handle_id,
             holdout_ref: req.holdout_ref,
+            metadata_locked: false,
             claim_name: req.claim_name,
             output_schema_id: metadata.output_schema_id,
             phys_hir_hash: phys,
             epoch_size: req.epoch_size,
+            epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
+            oracle_resolution,
             state: ClaimState::Uncommitted,
             artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
             wasm_module: Vec::new(),
             aspec_rejection: None,
             lane: if topic.escalate_to_heavy {
@@ -946,13 +1444,33 @@ impl EvidenceOs for EvidenceOsService {
             } else {
                 Lane::Fast
             },
+            heavy_lane_diversion_recorded: topic.escalate_to_heavy,
             ledger,
             last_decision: None,
             last_capsule_hash: None,
             capsule_bytes: None,
             etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
+        self.state
+            .topic_pools
+            .lock()
+            .entry(topic.topic_id)
+            .or_insert(
+                TopicBudgetPool::new(hex::encode(topic.topic_id), access_credit, access_credit)
+                    .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
+            );
+        self.state
+            .holdout_pools
+            .lock()
+            .entry(holdout_handle_id)
+            .or_insert(HoldoutBudgetPool::new(
+                holdout_handle_id,
+                access_credit,
+                access_credit,
+            )?);
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimV2Response {
             claim_id: claim_id.to_vec(),
@@ -981,25 +1499,92 @@ impl EvidenceOs for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
-            if claim.state == ClaimState::Settled || claim.state == ClaimState::Certified {
-                return Err(Status::failed_precondition("execution already settled"));
+            let current_epoch = current_logical_epoch(claim.epoch_size)?;
+            Self::maybe_mark_stale(claim, current_epoch)?;
+            if claim.state == ClaimState::Stale {
+                return Err(Status::failed_precondition(
+                    "claim is stale; re-freeze before execution",
+                ));
+            }
+            if claim.state != ClaimState::Sealed {
+                return Err(Status::failed_precondition(
+                    "claim must be SEALED before execution",
+                ));
+            }
+            if claim.freeze_preimage.is_none() {
+                return Err(Status::failed_precondition("freeze gates not completed"));
             }
             Self::transition_claim(claim, ClaimState::Executing)?;
-            let (canonical_output, _fuel_used, trace_hash) = execute_wasm(
+            let (canonical_output, fuel_used, trace_hash) = execute_wasm(
+            let vault = VaultEngine::new().map_err(map_vault_error)?;
+            let vault_result = match vault.execute(
                 &claim.wasm_module,
-                claim.epoch_size,
+                current_epoch,
                 execution_limits(claim, None)?,
             )?;
+            let _sym = claim
+                .oracle_resolution
+                .decode_bucket(&canonical_output)
+                .map_err(|_| Status::invalid_argument("non-canonical output"))?;
+            let charge_bits = claim.oracle_resolution.bits_per_call();
+                &vault_context(claim)?,
+                vault_config(claim)?,
+            ) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.record_incident(claim, "execution_failure")?;
+                    persist_all(&self.state)?;
+                    return Err(map_vault_error(err));
+                }
+            };
+            let canonical_output = vault_result.canonical_output;
+            let _fuel_used = vault_result.fuel_used;
+            let trace_hash = vault_result.judge_trace_hash;
             let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             let charge_bits = (canonical_len_for_symbols(claim.oracle_num_symbols)? * 8) as f64;
+            let dependence_multiplier = self.dependence_multiplier(claim, &claims);
+            let taxed_bits = charge_bits * dependence_multiplier;
+            let covariance_charge = taxed_bits - charge_bits;
             claim
                 .ledger
-                .charge(
-                    charge_bits,
+                .charge_all(
+                    taxed_bits,
+                    0.0,
+                    0.0,
+                    taxed_bits,
                     "structured_output",
-                    json!({"post_canonical_bits": charge_bits}),
+                    json!({
+                        "post_canonical_bits": charge_bits,
+                        "dependence_multiplier": dependence_multiplier,
+                        "taxed_k_bits": taxed_bits,
+                    }),
                 )
                 .map_err(|_| Status::failed_precondition("ledger budget exhausted"))?;
+            {
+                let mut topic_pools = self.state.topic_pools.lock();
+                let pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                if pool
+                    .charge(taxed_bits, taxed_bits, covariance_charge)
+                    .is_err()
+                {
+                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("topic budget exhausted"));
+                }
+            }
+            {
+                let mut holdout_pools = self.state.holdout_pools.lock();
+                let pool = holdout_pools
+                    .get_mut(&claim.holdout_handle_id)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                if pool.charge(taxed_bits, taxed_bits).is_err() {
+                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                    persist_all(&self.state)?;
+                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                }
+            }
             let decision = if canonical_output.first().copied().unwrap_or(0) == 0 {
                 pb::Decision::Reject as i32
             } else {
@@ -1020,13 +1605,38 @@ impl EvidenceOs for EvidenceOsService {
                 .settle_e_value(e_value, "decision", json!({"decision": decision}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
             Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.ledger.can_certify() {
+            if claim.lane == Lane::Heavy {
+                Self::transition_claim(claim, ClaimState::Frozen)?;
+            } else if claim.ledger.can_certify() {
                 Self::transition_claim(claim, ClaimState::Certified)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Revoked)?;
+            let current_epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| Status::internal("system clock before unix epoch"))?
+                .as_secs()
+                / claim.epoch_size;
+            if claim.oracle_resolution.ttl_expired(current_epoch) {
+                Self::transition_claim(claim, ClaimState::Stale)?;
+            } else {
+                Self::transition_claim(claim, ClaimState::Settled)?;
+                if claim.ledger.can_certify() {
+                    Self::transition_claim(claim, ClaimState::Certified)?;
+                }
             }
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),
                 hex::encode(claim.topic_id),
                 claim.output_schema_id.clone(),
+                claim
+                    .artifacts
+                    .iter()
+                    .map(|(hash, kind)| ManifestEntry {
+                        kind: kind.clone(),
+                        hash_hex: hex::encode(hash),
+                    })
+                    .collect(),
+                claim.dependency_capsule_hashes.clone(),
                 &canonical_output,
                 &claim.wasm_module,
                 &claim.holdout_handle_id,
@@ -1035,8 +1645,12 @@ impl EvidenceOs for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 decision,
                 reason_codes.clone(),
-                hex::encode(trace_hash),
+                &trace_hash,
                 claim.holdout_ref.clone(),
+                format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
+                "aspec.v1".to_string(),
+                "evidenceos.v1".to_string(),
+                fuel_used as f64,
             );
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
@@ -1046,7 +1660,12 @@ impl EvidenceOs for EvidenceOsService {
             let capsule_bytes = capsule
                 .to_json_bytes()
                 .map_err(|_| Status::internal("capsule serialization failed"))?;
-            let capsule_hash = sha256_domain(DOMAIN_CAPSULE_HASH, &capsule_bytes);
+            let capsule_hash = decode_hex_hash32(
+                &capsule
+                    .capsule_hash_hex()
+                    .map_err(|_| Status::internal("capsule hashing failed"))?,
+                "capsule_hash",
+            )?;
             let etl_index = {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
@@ -1262,6 +1881,15 @@ impl EvidenceOs for EvidenceOsService {
             return Err(Status::invalid_argument("reason must be in [1,256]"));
         }
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let capsule_hash = {
+            let claims = self.state.claims.lock();
+            let claim = claims
+                .get(&claim_id)
+                .ok_or_else(|| Status::not_found("claim not found"))?;
+            claim
+                .last_capsule_hash
+                .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?
+        };
         {
             let mut claims = self.state.claims.lock();
             let claim = claims
@@ -1276,21 +1904,33 @@ impl EvidenceOs for EvidenceOsService {
 
         {
             let mut etl = self.state.etl.lock();
-            etl.revoke(&hex::encode(claim_id), &req.reason)
+            etl.revoke(&hex::encode(capsule_hash), &req.reason)
                 .map_err(|_| Status::internal("etl revoke failed"))?;
+            let tainted = etl.taint_descendants(&hex::encode(capsule_hash));
+            if !tainted.is_empty() {
+                let mut claims = self.state.claims.lock();
+                for claim in claims.values_mut() {
+                    if let Some(hash) = claim.last_capsule_hash {
+                        let hash_hex = hex::encode(hash);
+                        if tainted.iter().any(|t| t == &hash_hex) {
+                            claim.state = ClaimState::Tainted;
+                        }
+                    }
+                }
+            }
         }
 
         self.state
             .revocations
             .lock()
-            .push((claim_id, timestamp_unix, req.reason.clone()));
+            .push((capsule_hash, timestamp_unix, req.reason.clone()));
         persist_all(&self.state)?;
 
         let message = {
             let etl = self.state.etl.lock();
             build_revocations_snapshot(
                 &self.state.signing_key,
-                vec![(claim_id, timestamp_unix, req.reason)],
+                vec![(capsule_hash, timestamp_unix, req.reason)],
                 build_signed_tree_head(&etl, &self.state.signing_key),
             )
         };
@@ -1336,7 +1976,8 @@ mod tests {
     #[test]
     fn canonical_encoding_rejects_invalid_without_charge() {
         let mut ledger = ConservationLedger::new(0.1).expect("valid ledger");
-        assert!(decode_canonical_symbol(&[0xFF], 2).is_err());
+        let oracle = OracleResolution::new(2, 0.0).expect("resolution");
+        assert!(oracle.decode_bucket(&[0xFF]).is_err());
         assert_eq!(ledger.k_bits_total, 0.0);
         ledger
             .charge(1.0, "structured_output", json!({}))

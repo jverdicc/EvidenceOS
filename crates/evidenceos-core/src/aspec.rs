@@ -7,10 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasmparser::{Operator, Parser, Payload, TypeRef};
 
-const REQUIRED_OUTPUT_IMPORTS: [(&str, &str); 2] = [
-    ("kernel", "emit_structured_claim"),
-    ("env", "emit_structured_claim"),
-];
+const REQUIRED_OUTPUT_IMPORTS: [(&str, &str); 1] = [("env", "emit_structured_claim")];
 const ALLOWED_EXPORTS: [&str; 2] = ["run", "memory"];
 
 #[derive(Debug, Clone)]
@@ -89,11 +86,8 @@ pub struct AspecPolicy {
 impl Default for AspecPolicy {
     fn default() -> Self {
         let mut allowed = HashSet::new();
-        for module in ["kernel", "env"] {
-            allowed.insert((module.to_string(), "oracle_query".to_string()));
-            allowed.insert((module.to_string(), "emit_structured_claim".to_string()));
-            allowed.insert((module.to_string(), "get_logical_epoch".to_string()));
-        }
+        allowed.insert(("env".to_string(), "oracle_bucket".to_string()));
+        allowed.insert(("env".to_string(), "emit_structured_claim".to_string()));
         Self {
             lane: AspecLane::HighAssurance,
             allowed_imports: allowed,
@@ -461,7 +455,8 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                 .iter()
                                 .any(|(m, n)| import.module == *m && import.name == *n)
                             {
-                                has_output_import = true;
+                                has_required_imports
+                                    .insert((import.module.to_string(), import.name.to_string()));
                             }
                             if is_forbidden_output_import(import.module, import.name) {
                                 reasons.push(format!(
@@ -710,7 +705,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     }
 
     if !has_output_import {
-        reasons.push("missing required output import kernel::emit_structured_claim or env::emit_structured_claim".to_string());
+        reasons.push("missing required import env::emit_structured_claim".to_string());
     }
 
     // §A.1 P_data.
