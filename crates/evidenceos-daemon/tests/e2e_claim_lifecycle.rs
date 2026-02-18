@@ -6,6 +6,7 @@ use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -13,6 +14,41 @@ use tonic::transport::{Channel, Server};
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
+}
+
+const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
+const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
+
+fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(domain);
+    h.update(payload);
+    let out = h.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    digest
+}
+
+fn sth_payload_digest(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&tree_size.to_be_bytes());
+    payload.extend_from_slice(root_hash);
+    sha256_domain(DOMAIN_STH_V1, &payload)
+}
+
+fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
+    let mut payload = Vec::new();
+    for entry in entries {
+        append_len_prefixed_bytes(&mut payload, &entry.claim_id);
+        payload.extend_from_slice(&entry.timestamp_unix.to_be_bytes());
+        append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
+    }
+    sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
 }
 
 fn valid_wasm() -> Vec<u8> {
@@ -282,20 +318,28 @@ async fn e2e_claim_lifecycle_blackbox() {
         &consistency_path,
     ));
 
-    let secret = std::fs::read(data_dir.join("keys/etl_signing_ed25519")).expect("secret key");
-    let mut sk = [0u8; 32];
-    sk.copy_from_slice(&secret);
+    let pubkey = c
+        .get_public_key(pb::GetPublicKeyRequest {})
+        .await
+        .expect("get public key")
+        .into_inner();
     let vk = VerifyingKey::from_bytes(
-        &ed25519_dalek::SigningKey::from_bytes(&sk)
-            .verifying_key()
-            .to_bytes(),
+        pubkey
+            .ed25519_public_key
+            .as_slice()
+            .try_into()
+            .expect("pubkey len"),
     )
     .expect("vk");
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&sth.tree_size.to_be_bytes());
-    msg.extend_from_slice(&sth.root_hash);
+    let key_id = Sha256::digest(&pubkey.ed25519_public_key);
+    assert_eq!(pubkey.key_id, key_id.as_slice());
+    let msg = sth_payload_digest(sth.tree_size, &sth.root_hash);
     let sig = Signature::from_slice(&sth.signature).expect("sig");
     vk.verify(&msg, &sig).expect("sth signature verify");
+
+    let mut tampered = msg;
+    tampered[0] ^= 0x01;
+    assert!(vk.verify(&tampered, &sig).is_err());
 
     let mut stream = c
         .watch_revocations(pb::WatchRevocationsRequest {})
@@ -311,6 +355,14 @@ async fn e2e_claim_lifecycle_blackbox() {
     .expect("revoke");
     let event = stream.message().await.expect("stream ok").expect("event");
     assert!(event.entries.iter().any(|e| e.claim_id == claim_id));
+    let rev_msg = revocations_payload_digest(&event.entries);
+    let rev_sig = Signature::from_slice(&event.signature).expect("revocation signature");
+    vk.verify(&rev_msg, &rev_sig)
+        .expect("revocation signature verify");
+
+    let mut tampered_rev = rev_msg;
+    tampered_rev[0] ^= 0x01;
+    assert!(vk.verify(&tampered_rev, &rev_sig).is_err());
 
     handle.abort();
 }
@@ -391,19 +443,21 @@ async fn persistence_fetch_capsule_stable_after_restart() {
     assert_eq!(before.root_hash, after.root_hash);
     assert_eq!(before.capsule_hash, after.capsule_hash);
 
-    let secret = std::fs::read(data_dir.join("keys/etl_signing_ed25519")).expect("secret key");
-    let mut sk = [0u8; 32];
-    sk.copy_from_slice(&secret);
+    let pubkey = c2
+        .get_public_key(pb::GetPublicKeyRequest {})
+        .await
+        .expect("get public key")
+        .into_inner();
     let vk = VerifyingKey::from_bytes(
-        &ed25519_dalek::SigningKey::from_bytes(&sk)
-            .verifying_key()
-            .to_bytes(),
+        pubkey
+            .ed25519_public_key
+            .as_slice()
+            .try_into()
+            .expect("pubkey len"),
     )
     .expect("vk");
     let sth = after.signed_tree_head.expect("sth");
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&sth.tree_size.to_be_bytes());
-    msg.extend_from_slice(&sth.root_hash);
+    let msg = sth_payload_digest(sth.tree_size, &sth.root_hash);
     let sig = Signature::from_slice(&sth.signature).expect("sig");
     vk.verify(&msg, &sig).expect("sth signature verify");
 

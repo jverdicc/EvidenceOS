@@ -56,7 +56,11 @@ The daemon exposes a one-way claim lifecycle:
 
 `CreateClaim -> CommitArtifacts -> FreezeGates -> SealClaim -> ExecuteClaim`
 
-Read APIs are available for capsule retrieval, signed tree heads, inclusion proofs, consistency checks, and revocation feeds.
+Read APIs are available for capsule retrieval, daemon public-key retrieval (`GetPublicKey`), signed tree heads, inclusion proofs, consistency checks, and revocation feeds.
+
+Signature verification is in-band: clients fetch the Ed25519 public key and `key_id` (`sha256(public_key)`) via `GetPublicKey`, then verify SignedTreeHead and revocation-feed signatures against domain-separated prehashes (`evidenceos:sth:v1` and `evidenceos:revocations:v1`).
+
+Key rotation strategy: rotation is not supported yet. The daemon persists a single signing key under `keys/etl_signing_ed25519`; replacing this key changes `key_id` and will invalidate verification for signatures produced under the previous key unless clients retain historical keys keyed by `key_id`.
 
 ## Research & Citation
 

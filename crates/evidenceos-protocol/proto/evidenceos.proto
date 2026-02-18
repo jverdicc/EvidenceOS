@@ -16,6 +16,8 @@ service EvidenceOS {
   rpc ExecuteClaimV2(ExecuteClaimV2Request) returns (ExecuteClaimV2Response);
   // v1 legacy endpoints preserved for backward compatibility.
   rpc GetCapsule(GetCapsuleRequest) returns (GetCapsuleResponse);
+  // Returns daemon signing key material for in-band signature verification.
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
   rpc GetSignedTreeHead(GetSignedTreeHeadRequest) returns (GetSignedTreeHeadResponse);
   rpc GetInclusionProof(GetInclusionProofRequest) returns (GetInclusionProofResponse);
   rpc GetConsistencyProof(GetConsistencyProofRequest) returns (GetConsistencyProofResponse);
@@ -163,6 +165,14 @@ message GetCapsuleResponse {
   bytes capsule_bytes = 1;
   bytes capsule_hash = 2;
   uint64 etl_index = 3;
+}
+
+message GetPublicKeyRequest {}
+
+message GetPublicKeyResponse {
+  bytes ed25519_public_key = 1;
+  // Key identifier is sha256(ed25519_public_key).
+  bytes key_id = 2;
 }
 
 message GetSignedTreeHeadRequest {}
