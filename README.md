@@ -8,7 +8,7 @@
 **EvidenceOS** is a production-oriented verification kernel for the Universal Verification Protocol (UVP).
 
 - **EvidenceOS** (this repo): trusted kernel that enforces admissibility, deterministic execution, metered oracle access, and auditable settlement.
-- **DiscOS** (separate repo): untrusted discovery/userland orchestrator that proposes claim capsules and consumes kernel responses.
+- **[DiscOS](https://github.com/jverdicc/DiscOS)** (separate repo): untrusted discovery/userland orchestrator that proposes claim capsules and consumes kernel responses.
 - **UVP**: protocol model for certifying claims under adaptive interaction while conserving verification evidence across time and interfaces.
 
 Why this matters: verification systems fail when adaptive querying, side channels, or weak accounting allow attackers to extract holdout information faster than assurance can be maintained. EvidenceOS is designed to constrain this extraction channel, provide auditable receipts, and make risk posture explicit.
@@ -227,7 +227,7 @@ EvidenceOS exposes gRPC/Protobuf APIs defined in:
 
 Versioning and deprecation policy are documented in `docs/PROTOCOL_VERSIONING.md`.
 
-The DiscOS repository includes:
+The [DiscOS repository](https://github.com/jverdicc/DiscOS) includes:
 
 - a Rust client
 - a Python client example
