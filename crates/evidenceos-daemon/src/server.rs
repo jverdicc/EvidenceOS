@@ -51,6 +51,7 @@ use pb::evidence_os_server::EvidenceOs;
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
+const MAX_METADATA_FIELD_LEN: usize = 128;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
@@ -933,6 +934,15 @@ fn requested_lane(lane: &str) -> Result<Lane, Status> {
     }
 }
 
+fn validate_required_str_field(value: &str, field: &str, max_len: usize) -> Result<(), Status> {
+    if value.is_empty() || value.len() > max_len {
+        return Err(Status::invalid_argument(format!(
+            "{field} must be in [1,{max_len}]"
+        )));
+    }
+    Ok(())
+}
+
 fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
     if epoch_size == 0 {
         return Err(Status::invalid_argument("epoch_size must be > 0"));
@@ -1478,18 +1488,24 @@ impl EvidenceOs for EvidenceOsService {
         request: Request<pb::CreateClaimV2Request>,
     ) -> Result<Response<pb::CreateClaimV2Response>, Status> {
         let req = request.into_inner();
-        if req.claim_name.is_empty() || req.claim_name.len() > 128 {
-            return Err(Status::invalid_argument("claim_name must be in [1,128]"));
-        }
+        validate_required_str_field(&req.claim_name, "claim_name", 128)?;
         if req.epoch_size == 0 {
             return Err(Status::invalid_argument("epoch_size must be > 0"));
         }
-        if req.holdout_ref.is_empty() || req.holdout_ref.len() > 128 {
-            return Err(Status::invalid_argument("holdout_ref must be in [1,128]"));
-        }
+        validate_required_str_field(&req.holdout_ref, "holdout_ref", 128)?;
         let metadata = req
             .metadata
             .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
+        validate_required_str_field(
+            &metadata.epoch_config_ref,
+            "metadata.epoch_config_ref",
+            MAX_METADATA_FIELD_LEN,
+        )?;
+        validate_required_str_field(
+            &metadata.output_schema_id,
+            "metadata.output_schema_id",
+            MAX_METADATA_FIELD_LEN,
+        )?;
         let signals = req
             .signals
             .ok_or_else(|| Status::invalid_argument("signals are required"))?;
