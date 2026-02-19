@@ -20,12 +20,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use clap::Parser;
+use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
+use evidenceos_core::oracle_registry::OracleRegistry;
+use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
+use evidenceos_daemon::config::DaemonOracleConfig;
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
@@ -75,6 +79,12 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9464")]
     metrics_listen: String,
 
+    #[arg(long, default_value = "./oracles")]
+    oracle_dir: String,
+
+    #[arg(long)]
+    trusted_oracle_keys: Option<String>,
+
     #[arg(long)]
     rpc_timeout_ms: Option<u64>,
 }
@@ -103,6 +113,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_addr: SocketAddr = args.metrics_listen.parse()?;
     let telemetry = Arc::new(Telemetry::new()?);
     let _metrics_handle = telemetry.clone().spawn_metrics_server(metrics_addr).await?;
+    let oracle_cfg =
+        DaemonOracleConfig::load(&args.oracle_dir, args.trusted_oracle_keys.as_deref())?;
+    let mut oracle_aspec_policy = AspecPolicy::default();
+    oracle_aspec_policy.float_policy = FloatPolicy::Allow;
+    let registry = OracleRegistry::load_from_dir(
+        &oracle_cfg.oracle_dir,
+        &oracle_cfg.trusted_authorities,
+        &oracle_aspec_policy,
+        WasmOracleSandboxPolicy::default(),
+    )?;
+    let loaded_oracles = registry.oracle_ids();
+    tracing::info!(count=%loaded_oracles.len(), "loaded oracle bundles");
+
     let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry)?;
 
     if args.auth_token.is_some() && args.auth_hmac_key.is_some() {

@@ -37,6 +37,9 @@ pub mod error;
 pub mod etl;
 pub mod ledger;
 pub mod oracle;
+pub mod oracle_bundle;
+pub mod oracle_registry;
+pub mod oracle_wasm;
 pub mod structured_claims;
 pub mod topicid;
 

@@ -37,6 +37,18 @@ jobs:
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 
+      - name: Rust format check
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      - name: Coverage summary
+        run: cargo llvm-cov --workspace --all-features --summary-only
+
       - name: Upload test output artifact
         uses: actions/upload-artifact@v4
         with:

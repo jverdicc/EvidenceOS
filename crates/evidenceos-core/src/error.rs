@@ -40,6 +40,9 @@ pub enum EvidenceOSError {
     #[error("NaN values are not allowed")]
     NaNNotAllowed,
 
+    #[error("oracle sandbox or bundle violation")]
+    OracleViolation,
+
     #[error("internal error")]
     Internal,
 }
@@ -53,6 +56,7 @@ impl EvidenceOSError {
             EvidenceOSError::AspecRejected => ErrorCode::EAspecRejected,
             EvidenceOSError::InvalidCanonicalEncoding => ErrorCode::EInvalidArgument,
             EvidenceOSError::NaNNotAllowed => ErrorCode::EInvalidArgument,
+            EvidenceOSError::OracleViolation => ErrorCode::EInternal,
             EvidenceOSError::Internal => ErrorCode::EInternal,
         }
     }

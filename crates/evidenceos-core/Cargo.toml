@@ -20,6 +20,8 @@ rand_chacha = "0.3"
 wasmparser = "0.121"
 parking_lot = "0.12"
 crc32fast = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+wasmtime = { version = "25", default-features = false, features = ["cranelift", "runtime"] }
 
 [dev-dependencies]
 proptest = "1"
