@@ -305,3 +305,47 @@ For CI-equivalent outputs (coverage/fuzz logs plus scenario artifacts):
 ```bash
 make test-evidence
 ```
+
+## External Policy Oracles (Super Judges)
+
+EvidenceOS supports externally provided “Super-Judge” policy oracles that operators can deploy without modifying kernel source. These plugins are intended for third-party safety policy overlays (for example, independent AI safety firms), and are intentionally constrained to preserve kernel safety and conservation guarantees.
+
+Policy oracles are **veto-only**: they can only make outcomes more conservative (`DEFER`/`REJECT`). They cannot certify claims and cannot increase evidence wealth. In particular, oracle vetoes never upgrade a reject path, and veto-driven outcomes clamp settlement behavior so positive evidence is not minted from policy intervention.
+
+Oracles run as untrusted Wasm in a deterministic sandbox: no imports, strict fuel and memory limits, fixed ABI exports, and fail-closed behavior on any trap, OOM, invalid return code, or malformed module. Oracle outputs are low-bandwidth by construction (single integer decision code) and receipts are canonicalized and embedded in claim capsules for verifier auditability.
+
+The daemon loads manifests and Wasm blobs from `<data_dir>/policy-oracles/`, verifies pinned `sha256` hashes, enforces manifest schema/range constraints, and optionally verifies Ed25519 publisher signatures against `trusted_keys.json`.
+
+Minimal policy oracle (WAT):
+
+```wat
+(module
+  (memory (export "memory") 1)
+  (func (export "alloc") (param i32) (result i32) i32.const 0)
+  (func (export "policy_oracle_decide") (param i32 i32) (result i32)
+    i32.const 1)) ;; 1 = DeferToHeavy
+```
+
+Sample manifest:
+
+```json
+{
+  "schema": "evidenceos.v1.policy_oracle_manifest",
+  "oracle_id": "acme.superjudge.v1",
+  "vendor": "Acme Safety",
+  "version": "1.0.0",
+  "description": "Conservative policy veto",
+  "wasm_filename": "acme_superjudge.wasm",
+  "wasm_sha256_hex": "<sha256>",
+  "reason_code": 9001,
+  "decision_mode": "veto_only",
+  "max_fuel": 100000,
+  "max_memory_bytes": 65536,
+  "max_input_bytes": 4096,
+  "require_signature": false,
+  "signer_pubkey_ed25519_hex": null,
+  "signature_ed25519_hex": null
+}
+```
+
+See `docs/ORACLE_PLUGINS.md` for deployment and ABI details. UVP references: (Module B: Oracle Resolution… §10.1–10.5) and Canonical Realization §5.1.

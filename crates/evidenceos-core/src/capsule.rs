@@ -112,6 +112,15 @@ pub struct EnvironmentAttestations {
     pub protocol_version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyOracleReceiptLike {
+    pub oracle_id: String,
+    pub manifest_hash_hex: String,
+    pub wasm_hash_hex: String,
+    pub decision: String,
+    pub reason_code: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimCapsule {
     pub schema: String,
@@ -131,6 +140,8 @@ pub struct ClaimCapsule {
     pub certified: bool,
     pub decision: i32,
     pub reason_codes: Vec<u32>,
+    #[serde(default)]
+    pub policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
     pub environment_attestations: EnvironmentAttestations,
     pub state: ClaimState,
 }
@@ -179,6 +190,7 @@ impl ClaimCapsule {
         certified: bool,
         decision: i32,
         reason_codes: Vec<u32>,
+        policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
         judge_trace: &[u8],
         holdout_ref: String,
         runtime_version: String,
@@ -200,6 +212,7 @@ impl ClaimCapsule {
             certified,
             decision,
             reason_codes,
+            policy_oracle_receipts,
             judge_trace,
             holdout_ref,
             runtime_version,
@@ -225,6 +238,7 @@ impl ClaimCapsule {
         certified: bool,
         decision: i32,
         reason_codes: Vec<u32>,
+        policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
         judge_trace: &[u8],
         holdout_ref: String,
         runtime_version: String,
@@ -285,6 +299,7 @@ impl ClaimCapsule {
             certified,
             decision,
             reason_codes,
+            policy_oracle_receipts,
             environment_attestations: EnvironmentAttestations {
                 runtime_version,
                 aspec_version,
@@ -330,6 +345,7 @@ mod tests {
             false,
             1,
             vec![7],
+            Vec::new(),
             b"trace",
             "holdout".into(),
             "runtime".into(),
