@@ -1,0 +1,46 @@
+name: Documentation
+description: Report docs issues or propose docs improvements
+labels:
+  - documentation
+body:
+  - type: textarea
+    id: issue
+    attributes:
+      label: Documentation issue
+      description: What is incorrect, missing, or unclear?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Steps a reader followed that led to confusion/error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed documentation change
+      description: Suggested wording, sections, or links.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test/evidence updates needed
+      description: If docs reflect behavior changes, describe corresponding tests/evidence docs to update.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I provided reproducible reader steps.
+          required: true
+        - label: I identified needed test/evidence documentation updates.
+          required: true

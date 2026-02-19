@@ -1,23 +1,24 @@
 # Contributing to EvidenceOS
 
-Thanks for your interest in improving EvidenceOS. This repository is a Rust verification-kernel implementation, so contribution quality is judged by **determinism, fail-closed behavior, and auditability**.
+Thanks for contributing to EvidenceOS, a security-critical verification kernel.
 
-## Before you start
+## Development setup
 
-1. Read `AGENTS.md` for repository-level guardrails and CI requirements.
-2. Read `TESTING_EVIDENCE.md` and `docs/TEST_EVIDENCE.md` for the expected validation workflow.
-3. Read `docs/TEST_COVERAGE_MATRIX.md` to understand required test coverage patterns for ASPEC, ledger, oracle, and ETL surfaces.
+```bash
+cargo build --workspace
+```
 
-## Development workflow
+Run the daemon locally:
 
-1. Create a topic branch from `main`.
-2. Keep pull requests scoped (one concern per PR).
-3. Prefer small commits with clear messages.
-4. Update documentation and tests in the same PR when behavior or interfaces change.
+```bash
+cargo run -p evidenceos-daemon -- --listen 127.0.0.1:50051 --data-dir ./data
+```
 
-## Required local checks
+> `--etl-path` is deprecated. Use `--data-dir` for local and production launches.
 
-Run these before opening or updating a PR:
+## Required checks
+
+Before opening a PR, run:
 
 ```bash
 cargo fmt --check
@@ -25,37 +26,33 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-For stronger evidence, run the project harness:
+Optional extended evidence:
 
 ```bash
 make test-evidence
 ```
 
-## Testing policy for contributors
+## Test and coverage expectations
 
-- Test behavior through public APIs and externally visible interfaces.
-- Do **not** copy production logic into tests; use fixtures and expected outcomes.
-- Add boundary-case tests for numeric parameters (limits, zero, negatives when invalid, NaN/Inf where relevant).
-- Add determinism assertions for deterministic functions (stable ordering, hash/canonicalization consistency, repeatability).
-- New endpoints or protocol-surface changes require explicit justification and tests.
+- Add tests for any protocol-impacting change.
+- Prefer black-box tests through public APIs and observable behavior.
+- Add boundary and determinism checks for new numeric/configurable parameters.
+- If you add or change a parameterized behavior, update the relevant row(s) in `docs/TEST_COVERAGE_MATRIX.md` in the same PR.
+- If you add new test assets or claims about behavior, update `docs/TEST_EVIDENCE.md`.
 
-The matrix in `docs/TEST_COVERAGE_MATRIX.md` should be updated when adding new parameterized behavior.
+## Pull request process
 
-## Pull request checklist
+1. Keep scope narrow and security-relevant rationale explicit.
+2. Include docs updates for user-facing behavior/flags.
+3. Include a short validation section in the PR body with the commands you ran.
+4. Ensure no new daemon launch examples use deprecated `--etl-path`.
 
-- [ ] Scope is clear and justified.
-- [ ] No unintended protocol-logic drift.
-- [ ] Tests are black-box focused and cover boundaries.
-- [ ] Determinism expectations are explicitly tested where applicable.
-- [ ] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` pass.
-- [ ] Documentation updates included (`README.md`, `TESTING_EVIDENCE.md`, or docs under `docs/` as needed).
+## Security review focus
 
-## Code review expectations
+Reviewers prioritize:
 
-Reviewers will prioritize:
-
-- nondeterminism risks in ledger hashes, ordering, and canonicalization,
-- panic risk on daemon/request paths,
+- nondeterminism in hashes, canonicalization, ordering,
+- panic risk in request/runtime paths,
 - input validation and fail-closed behavior,
 - logging hygiene (no secrets/raw payloads), and
-- compatibility with existing test evidence expectations.
+- evidence-backed claims.

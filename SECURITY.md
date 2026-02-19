@@ -1,58 +1,43 @@
 # Security Policy
 
-## Supported scope
-
-Security reports are accepted for:
-
-- `evidenceos-core` and `evidenceos-daemon`,
-- gRPC and protocol validation paths,
-- deterministic execution and canonicalization behavior,
-- ledger/accounting and ETL integrity.
-
 ## Reporting a vulnerability
 
-Please report privately to **security@evidenceos.org**.
+Please report vulnerabilities privately to **security@evidenceos.org**.
 
-Include:
+Do not file public GitHub issues for unpatched vulnerabilities or suspected 0-day findings.
 
-- affected commit/tag,
+Include, when possible:
+
+- affected version/commit,
 - impact summary,
-- reproduction steps or proof-of-concept,
-- any suggested mitigation.
+- reproduction details,
+- logs/artifacts sanitized of secrets,
+- suggested mitigation (optional).
 
-Do **not** open a public issue for unpatched vulnerabilities.
+## Disclosure process
 
-## Response targets
+- We acknowledge receipt and begin triage.
+- We may request additional technical details to validate impact.
+- We coordinate fixes and release notes before public disclosure.
+- Reporter credit is offered unless anonymity is requested.
 
-- Initial acknowledgement: within 3 business days.
-- Triage status update: within 7 business days.
-- Fix timeline: depends on severity and release risk.
+This process describes workflow only and does not guarantee specific outcomes.
 
-## Disclosure policy
+## Response expectations
 
-- Coordinate disclosure with maintainers.
-- Public advisory follows availability of a fix or mitigation.
-- Credit reporters unless anonymity is requested.
+Typical targets (not guarantees):
 
-## Severity guidance
+- acknowledgement within 3 business days,
+- initial triage update within 7 business days,
+- remediation timeline set according to severity and release risk.
 
-The project treats as high priority:
+## Scope and priorities
 
-- nondeterminism affecting hashes/ordering/canonicalization,
-- panics on daemon request paths/runtime,
-- validation gaps in network-facing input handling,
-- weaknesses in ETL proof/signature verification paths.
+Primary scope includes:
 
-These priorities align with `AGENTS.md` and existing test evidence expectations.
+- `evidenceos-core` and `evidenceos-daemon`,
+- gRPC input validation and fail-closed behavior,
+- deterministic execution/canonicalization,
+- conservation ledger and ETL integrity.
 
-## Validation requirements for fixes
-
-Security fixes should include regression tests and pass:
-
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-See `TESTING_EVIDENCE.md`, `docs/TEST_EVIDENCE.md`, and `docs/TEST_COVERAGE_MATRIX.md` for broader verification and coverage expectations.
+High-priority classes include nondeterminism affecting certification, panic paths in daemon handling, and validation gaps in network-facing surfaces.
