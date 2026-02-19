@@ -73,3 +73,10 @@ path = "fuzz_targets/fuzz_grpc_claim_capsule_kernel.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_probe_detector"
+path = "fuzz_targets/fuzz_probe_detector.rs"
+test = false
+doc = false
+bench = false

@@ -40,3 +40,11 @@ This matrix links key kernel/daemon behaviors to unit tests, property/fuzz tests
 | Scenario spec parsing and deterministic ordering (`scenario_id`, `category`, `deterministic_seed`) | N/A | N/A | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
 | Scenario expected outcome enforcement (`PASS`, `REJECT`) | N/A | N/A | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
 | Public ETL evidence verification in scenario runner | `crates/evidenceos-core/src/etl.rs::tests::inclusion_proof_full_space_and_tamper_resistance` | `fuzz/fuzz_targets/fuzz_etl_ops.rs::fuzz_target` | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
+
+## Probe / distillation detection
+
+| Behavior | Unit tests | Property/Fuzz | System/Integration |
+|---|---|---|---|
+| Probe thresholds and boundary transitions (Clean/Throttle/Escalate/Freeze) | `crates/evidenceos-daemon/src/probe.rs::tests::threshold_boundaries` | `crates/evidenceos-daemon/src/probe.rs::tests::detector_invariants` | `crates/evidenceos-daemon/tests/probing_detection_system.rs::probing_detection_grades_response_and_emits_evidence` |
+| Sliding-window expiry and cooldown | `crates/evidenceos-daemon/src/probe.rs::tests::window_expiry_and_cooldown` | `fuzz/fuzz_targets/fuzz_probe_detector.rs::fuzz_target` | `crates/evidenceos-daemon/tests/probing_detection_system.rs::probing_detection_grades_response_and_emits_evidence` |
+| Semantic uniqueness and topic diversity accounting | `crates/evidenceos-daemon/src/probe.rs::tests::diversity_counts` | `fuzz/fuzz_targets/fuzz_probe_detector.rs::fuzz_target` | `crates/evidenceos-daemon/tests/probing_detection_system.rs::probing_detection_grades_response_and_emits_evidence` |

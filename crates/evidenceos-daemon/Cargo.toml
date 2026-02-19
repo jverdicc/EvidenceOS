@@ -41,6 +41,7 @@ prost = "0.13"
 wat = "1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 rcgen = "0.13"
+proptest = "1"
 
 [[bench]]
 name = "verification_latency"
