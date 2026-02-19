@@ -300,6 +300,10 @@ pub struct EvidenceOsService {
 
 impl EvidenceOsService {
     pub fn build(data_dir: &str) -> Result<Self, Status> {
+        Self::build_with_options(data_dir, false)
+    }
+
+    pub fn build_with_options(data_dir: &str, durable_etl: bool) -> Result<Self, Status> {
         let root = PathBuf::from(data_dir);
         std::fs::create_dir_all(&root).map_err(|_| Status::internal("mkdir failed"))?;
 
@@ -323,8 +327,11 @@ impl EvidenceOsService {
         let signing_key = load_or_create_signing_key(&root)?;
         let verifying_key = signing_key.verifying_key();
         let etl_path = root.join("etl.log");
-        let etl =
-            Etl::open_or_create(&etl_path).map_err(|_| Status::internal("etl init failed"))?;
+        let etl = Etl::open_or_create_with_options(&etl_path, durable_etl)
+            .map_err(|_| Status::internal("etl init failed"))?;
+        if etl.recovered_from_partial_write() {
+            tracing::warn!(path=%etl_path.display(), "etl recovered from partial trailing write");
+        }
 
         let state = Arc::new(KernelState {
             claims: Mutex::new(

@@ -42,6 +42,9 @@ struct Args {
 
     #[arg(long, default_value = "info")]
     log: String,
+
+    #[arg(long, default_value_t = false)]
+    durable_etl: bool,
 }
 
 #[tokio::main]
@@ -65,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
 
     let addr: SocketAddr = args.listen.parse()?;
-    let svc = EvidenceOsService::build(&args.data_dir)?;
+    let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl)?;
 
     tracing::info!(%addr, data_dir=%args.data_dir, "starting EvidenceOS gRPC server");
 

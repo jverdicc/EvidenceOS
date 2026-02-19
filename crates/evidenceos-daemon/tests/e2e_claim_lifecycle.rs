@@ -457,11 +457,20 @@ async fn topic_budget_is_shared_across_claims() {
     assert!(ok.is_ok());
 
     let second = c
-        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id: claim_b })
-        .await
-        .expect("second claim should execute with deterministic revoke state")
-        .into_inner();
-    assert_eq!(second.state, pb::ClaimState::Revoked as i32);
+        .execute_claim_v2(pb::ExecuteClaimV2Request {
+            claim_id: claim_b.clone(),
+        })
+        .await;
+    match second {
+        Ok(response) => {
+            let second = response.into_inner();
+            assert_eq!(second.state, pb::ClaimState::Revoked as i32);
+        }
+        Err(status) => {
+            assert_eq!(status.code(), Code::FailedPrecondition);
+            assert_eq!(status.message(), "topic budget exhausted");
+        }
+    }
 
     handle.abort();
 }

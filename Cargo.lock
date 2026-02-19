@@ -577,6 +577,7 @@ name = "evidenceos-core"
 version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "evidenceos-protocol",
  "hex",
  "parking_lot",
