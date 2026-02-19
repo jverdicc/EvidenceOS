@@ -1,0 +1,52 @@
+name: Good first issue
+description: Starter task proposal for new contributors
+labels:
+  - good first issue
+  - help wanted
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to define beginner-friendly, low-risk tasks.
+        Keep scope tight and align with `CONTRIBUTING.md` and test evidence docs.
+
+  - type: input
+    id: title
+    attributes:
+      label: Proposed issue title
+    validations:
+      required: true
+
+  - type: textarea
+    id: task
+    attributes:
+      label: Task description
+      description: What should be changed and why?
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable outcomes and documentation updates
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: starter-checklist
+    attributes:
+      label: Quality gates for this starter task
+      options:
+        - label: The task can be validated with black-box tests through public APIs.
+          required: true
+        - label: The required tests avoid copy/pasting production logic.
+          required: true
+        - label: Numeric boundary cases are included where any numeric params exist.
+          required: true
+        - label: Deterministic behavior checks are included for deterministic functions.
+          required: true
+        - label: Completion requires `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+          required: true
+        - label: Completion requires no new `unsafe` code.
+          required: true

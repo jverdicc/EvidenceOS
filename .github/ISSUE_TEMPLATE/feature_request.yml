@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose an improvement for EvidenceOS
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests should preserve protocol determinism and fail-closed behavior.
+        Use `docs/TEST_COVERAGE_MATRIX.md` to map the test surface for any new parameterized behavior.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user/problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Public API shape, expected behavior, and non-goals
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Determinism and safety impact
+      description: Mention ordering/canonicalization, panic risk, validation, and logging implications.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Engineering checklist
+      options:
+        - label: Test plan is black-box (public API/external behavior), not coupled to private internals.
+          required: true
+        - label: Test assertions do not replicate production logic.
+          required: true
+        - label: Numeric parameter boundaries are explicitly tested.
+          required: true
+        - label: Deterministic paths include determinism assertions.
+          required: true
+        - label: CI gates will pass (`fmt`, `clippy -D warnings`, workspace tests).
+          required: true
+        - label: No new `unsafe` usage is required.
+          required: true

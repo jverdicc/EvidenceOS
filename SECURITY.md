@@ -1,33 +1,58 @@
-# Security Policy: EvidenceOS & UVP
+# Security Policy
 
-As a protocol designed to mitigate high-stakes AI risks (including CBRN), we take security with extreme seriousness. We appreciate the efforts of the security research community to help us harden the Universal Verification Protocol kernel.
+## Supported scope
 
-## Supported Versions
-Currently, only the latest release on the `main` branch is supported for security updates.
+Security reports are accepted for:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1.0 | :x:                |
+- `evidenceos-core` and `evidenceos-daemon`,
+- gRPC and protocol validation paths,
+- deterministic execution and canonicalization behavior,
+- ledger/accounting and ETL integrity.
 
-## Reporting a Vulnerability
-**Do not open a public GitHub Issue for security vulnerabilities.**
+## Reporting a vulnerability
 
-If you discover a security flaw—particularly one that allows for "Adaptivity Leakage" bypass, "Sealed Vault" escape, or "Ledger Wealth" spoofing—please report it privately.
+Please report privately to **security@evidenceos.org**.
 
-**Contact:** [Your Email Address]
-**GPG Key:** [Optional: Your PGP Key ID]
+Include:
 
-Please include:
-1. A detailed description of the vulnerability.
-2. Steps to reproduce (Proof of Concept).
-3. The potential impact on the Conservation Ledger's safety bounds.
+- affected commit/tag,
+- impact summary,
+- reproduction steps or proof-of-concept,
+- any suggested mitigation.
 
-## Our Commitment
-* **Acknowledgment:** We will acknowledge your report within 48 hours.
-* **Triage:** We will provide a preliminary assessment of the risk within 7 days.
-* **Fix:** We aim to resolve critical vulnerabilities within 90 days.
-* **Disclosure:** We follow Coordinated Vulnerability Disclosure (CVD). We ask that you do not disclose the vulnerability publicly until a fix is released.
+Do **not** open a public issue for unpatched vulnerabilities.
 
-## Safe Harbor
-If you act in good faith, follow this policy, and do not attempt to exfiltrate sensitive data or disrupt production systems, we will not pursue legal action against you for your research.
+## Response targets
+
+- Initial acknowledgement: within 3 business days.
+- Triage status update: within 7 business days.
+- Fix timeline: depends on severity and release risk.
+
+## Disclosure policy
+
+- Coordinate disclosure with maintainers.
+- Public advisory follows availability of a fix or mitigation.
+- Credit reporters unless anonymity is requested.
+
+## Severity guidance
+
+The project treats as high priority:
+
+- nondeterminism affecting hashes/ordering/canonicalization,
+- panics on daemon request paths/runtime,
+- validation gaps in network-facing input handling,
+- weaknesses in ETL proof/signature verification paths.
+
+These priorities align with `AGENTS.md` and existing test evidence expectations.
+
+## Validation requirements for fixes
+
+Security fixes should include regression tests and pass:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+See `TESTING_EVIDENCE.md`, `docs/TEST_EVIDENCE.md`, and `docs/TEST_COVERAGE_MATRIX.md` for broader verification and coverage expectations.
