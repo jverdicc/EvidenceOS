@@ -218,16 +218,36 @@ fn vault_rejects_invalid_holdout_labels() {
 
 #[test]
 fn vault_rejects_invalid_null_accuracy() {
-    assert!(context().oracle_null_accuracy.is_finite());
+    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "run")))"#)
+        .expect("wat");
+    let engine = VaultEngine::new().expect("engine");
+    for acc in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
+        let mut bad = context();
+        bad.oracle_null_accuracy = acc;
+        let err = engine
+            .execute(&wasm, &bad, config())
+            .expect_err("invalid null accuracy");
+        assert!(matches!(err, VaultError::InvalidConfig(_)));
+    }
 }
+
 #[test]
-fn vault_lr_e_value_is_reasonable() {
-    assert!(context().oracle_null_accuracy > 0.0 && context().oracle_null_accuracy <= 1.0);
-}
-#[test]
-fn vault_nullspec_domain_does_not_change_e_value() {
-    assert_eq!(
-        context().oracle_null_accuracy,
-        context().oracle_null_accuracy
-    );
+fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
+    let wasm = wat::parse_str(
+        r#"(module
+          (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\00\00\00\00")
+          (func (export "run")
+            i32.const 0 i32.const 4 call $oracle drop
+            i32.const 0 i32.const 1 call $emit drop))"#,
+    )
+    .expect("wat");
+    let engine = VaultEngine::new().expect("engine");
+    let mut ctx = context();
+    ctx.holdout_labels = vec![1, 1, 1, 1];
+    ctx.oracle_null_accuracy = 0.5;
+    let out = engine.execute(&wasm, &ctx, config()).expect("execute");
+    assert_eq!(out.e_value_total, 0.0);
 }

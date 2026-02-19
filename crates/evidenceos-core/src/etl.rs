@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 
 pub type Hash32 = [u8; 32];
 
+fn validate_entry_len(len: usize) -> EvidenceOSResult<u32> {
+    u32::try_from(len).map_err(|_| EvidenceOSError::InvalidArgument)
+}
+
 fn sha256(bytes: &[u8]) -> Hash32 {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -387,10 +391,7 @@ impl Etl {
     }
 
     pub fn append(&mut self, data: &[u8]) -> EvidenceOSResult<(u64, Hash32)> {
-        let len: u32 = data
-            .len()
-            .try_into()
-            .map_err(|_| EvidenceOSError::InvalidArgument)?;
+        let len = validate_entry_len(data.len())?;
         let start = self
             .file
             .seek(SeekFrom::End(0))
@@ -595,6 +596,18 @@ mod tests {
             sn_idx /= 2;
         }
         used == audit_path.len() && &hash == root
+    }
+
+    #[test]
+    fn validate_entry_len_boundaries() {
+        assert_eq!(validate_entry_len(0).expect("0"), 0);
+        assert_eq!(validate_entry_len(1).expect("1"), 1);
+        assert_eq!(
+            validate_entry_len(u32::MAX as usize).expect("u32::MAX"),
+            u32::MAX
+        );
+        assert!(validate_entry_len((u32::MAX as usize).saturating_add(1)).is_err());
+        assert!(validate_entry_len(usize::MAX).is_err());
     }
 
     #[test]
