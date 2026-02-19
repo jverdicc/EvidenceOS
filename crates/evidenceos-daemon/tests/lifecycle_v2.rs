@@ -78,7 +78,7 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8, epoch_size
             lane: "fast".to_string(),
             alpha_micros: 50_000,
             epoch_config_ref: format!("epoch-{seed}"),
-            output_schema_id: format!("schema-{seed}"),
+            output_schema_id: "legacy/v1".to_string(),
         }),
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(seed),

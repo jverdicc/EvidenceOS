@@ -293,6 +293,13 @@ impl AccuracyOracleState {
         resolution: OracleResolution,
         null_spec: NullSpec,
     ) -> EvidenceOSResult<Self> {
+        if null_spec.domain.trim().is_empty()
+            || !null_spec.null_accuracy.is_finite()
+            || null_spec.null_accuracy <= 0.0
+            || null_spec.null_accuracy > 1.0
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
         Ok(Self {
             resolution,
             null_spec,
@@ -555,6 +562,44 @@ mod matrix_tests {
         assert!(HoldoutLabels::new(vec![0, 2]).is_err());
     }
     #[test]
+    fn holdout_labels_rejects_empty() {
+        assert!(HoldoutLabels::new(vec![]).is_err());
+    }
+    #[test]
+    fn tie_breaker_unit_cases() {
+        let mut r = OracleResolution::new(3, 0.0).expect("r");
+        r.tie_breaker = TieBreaker::Lower;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 0);
+        r.tie_breaker = TieBreaker::Upper;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 1);
+        r.tie_breaker = TieBreaker::NearestEven;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 0);
+    }
+    #[test]
+    fn null_spec_rejects_empty_domain() {
+        let hold = HoldoutLabels::new(vec![1, 0]).expect("h");
+        let resolution = OracleResolution::new(8, 0.0).expect("r");
+        let spec = NullSpec {
+            domain: "   ".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::Fixed(1.0),
+        };
+        assert!(AccuracyOracleState::new(hold, resolution, spec).is_err());
+    }
+    #[test]
+    fn null_spec_rejects_invalid_null_accuracy() {
+        for acc in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
+            let hold = HoldoutLabels::new(vec![1, 0]).expect("h");
+            let resolution = OracleResolution::new(8, 0.0).expect("r");
+            let spec = NullSpec {
+                domain: "d".into(),
+                null_accuracy: acc,
+                e_value_fn: EValueFn::Fixed(1.0),
+            };
+            assert!(AccuracyOracleState::new(hold, resolution, spec).is_err());
+        }
+    }
+    #[test]
     fn accuracy_oracle_state_rejects_len_mismatch() {
         let hold = HoldoutLabels::new(vec![1, 0]).expect("h");
         let mut s = AccuracyOracleState::new(
@@ -631,6 +676,14 @@ mod matrix_tests {
         #[test] fn oracle_roundtrip_varlen_symbols_proptest(num in 2u32..4096u32, b in 0u32..4095u32) { prop_assume!(b<num); let r=OracleResolution::new(num,0.0).expect("r"); let enc=r.encode_bucket(b).expect("e"); let dec=r.decode_bucket(&enc).expect("d"); prop_assert_eq!(dec,b); }
         #[test] fn tie_breaker_proptest(v in 0.0f64..1.0f64) { let r=OracleResolution::new(16,0.0).expect("r"); let b=r.quantize_unit_interval(v).expect("q"); prop_assert!(b<16); }
         #[test] fn ttl_expiry_proptest(base in 0u64..1000u64, ttl in 1u64..100u64) { let mut r=OracleResolution::new(8,0.0).expect("r"); r.calibrated_at_epoch=base; r.ttl_epochs=Some(ttl); prop_assert!(!r.ttl_expired(base+ttl-1)); prop_assert!(r.ttl_expired(base+ttl)); }
+        #[test] fn ttl_monotone_proptest(calibrated in 0u64..10_000u64, ttl in 1u64..1024u64, current_a in 0u64..12_000u64, current_b in 0u64..12_000u64) {
+            let mut r=OracleResolution::new(8,0.0).expect("r");
+            r.calibrated_at_epoch=calibrated;
+            r.ttl_epochs=Some(ttl);
+            let low = current_a.min(current_b);
+            let high = current_a.max(current_b);
+            prop_assert!(u8::from(r.ttl_expired(low)) <= u8::from(r.ttl_expired(high)));
+        }
         #[test] fn quantize_proptest(v in -10.0f64..10.0f64) { let r=OracleResolution::new(8,0.0).expect("r"); let b=r.quantize_unit_interval(v); prop_assert!(b.is_ok() || v.is_nan()); }
         #[test] fn holdout_labels_proptest(xs in prop::collection::vec(0u8..2u8,1..128)) { let h=HoldoutLabels::new(xs.clone()).expect("h"); prop_assert_eq!(h.len(), xs.len()); }
         #[test] fn oracle_query_proptest(xs in prop::collection::vec(0u8..2u8,2..64)) { let hold=HoldoutLabels::new(xs.clone()).expect("h"); let mut s=AccuracyOracleState::new(hold, OracleResolution::new(8,0.1).expect("r"), NullSpec{domain:"d".into(),null_accuracy:0.5,e_value_fn:EValueFn::Fixed(1.0)}).expect("s"); let r=s.query(&xs).expect("q"); prop_assert!(r.k_bits.is_finite()); }

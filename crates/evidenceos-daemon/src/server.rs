@@ -1487,7 +1487,9 @@ impl EvidenceOs for EvidenceOsService {
             let canonical_output = vault_result.canonical_output;
             let fuel_used = vault_result.fuel_used;
             let trace_hash = vault_result.judge_trace_hash;
-            let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
+            if claim.output_schema_id == "legacy/v1" {
+                let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
+            }
             let charge_bits = claim.oracle_resolution.bits_per_call()
                 * f64::from(vault_result.oracle_calls.max(1));
             let dependence_multiplier = self.dependence_tax_multiplier;

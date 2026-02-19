@@ -733,11 +733,69 @@ mod matrix_tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn e_merge_weights_invariants_proptest(
+            e_values in prop::collection::vec(0.0f64..8.0f64, 2..16),
+            raw_weights in prop::collection::vec(0.0001f64..8.0f64, 2..16),
+            bump in 0.0f64..2.0f64,
+        ) {
+            prop_assume!(e_values.len() == raw_weights.len());
+            let total_w: f64 = raw_weights.iter().sum();
+            prop_assume!(total_w.is_finite() && total_w > 0.0);
+            let weights: Vec<f64> = raw_weights.iter().map(|w| *w / total_w).collect();
+            let merged = e_merge(&e_values, &weights).expect("merge");
+            let min = e_values.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = e_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            prop_assert!(merged.is_finite());
+            prop_assert!(merged + 1e-12 >= min);
+            prop_assert!(merged <= max + 1e-12);
+
+            let mut raised = e_values.clone();
+            raised[0] += bump;
+            let merged_raised = e_merge(&raised, &weights).expect("merge raised");
+            prop_assert!(merged_raised + 1e-12 >= merged);
+        }
         #[test] fn events_never_decrease_under_random_ops(ops in prop::collection::vec(0.0f64..3.0f64,1..64)) { let mut l=ConservationLedger::new(0.1).expect("l"); let mut prev=0usize; for v in ops { let _=l.charge(v,"x",Value::Null); prop_assert!(l.events.len()>=prev); prev=l.events.len(); } }
         #[test] fn random_meta_does_not_panic(v in any::<u64>()) { let mut l=ConservationLedger::new(0.1).expect("l"); let _=l.charge(0.1,"x",json!({"v":v})); prop_assert!(true); }
-        #[test] fn canary_pulse_proptest_freezes_at_threshold(alpha in 0.01f64..0.9f64) { let mut c=CanaryPulse::new(alpha).expect("c"); let b=certification_barrier(alpha,0.0); let r=c.update(b+1.0); prop_assert!(matches!(r,Err(EvidenceOSError::Frozen))); }
+        #[test] fn canary_pulse_invariants_proptest(alpha in 0.01f64..0.99f64, increments in prop::collection::vec(0.000001f64..4.0f64, 1..64)) {
+            let mut c=CanaryPulse::new(alpha).expect("c");
+            let threshold = 1.0 / alpha;
+            let mut running = 1.0f64;
+            let mut froze = false;
+            for inc in increments {
+                let expected_cross = running * inc >= threshold;
+                let result = c.update(inc);
+                if expected_cross {
+                    froze = true;
+                    prop_assert!(matches!(result,Err(EvidenceOSError::Frozen)));
+                    prop_assert!(c.is_frozen());
+                    break;
+                } else {
+                    running *= inc;
+                    prop_assert!(result.is_ok());
+                    prop_assert!(!c.is_frozen());
+                }
+            }
+            if froze {
+                prop_assert!(matches!(c.update(1.01), Err(EvidenceOSError::Frozen)));
+            }
+        }
         #[test] fn joint_pool_invariants_proptest(a in 0.1f64..10.0f64, x in 0.0f64..5.0f64) { let mut p=JointLeakagePool::new("h".into(), a).expect("p"); let _=p.charge(x); prop_assert!(p.k_bits_remaining() <= a + 1e-12); }
-        #[test] fn topic_pool_invariants_proptest(a in 0.1f64..10.0f64, b in 0.1f64..10.0f64, x in 0.0f64..5.0f64) { let mut p=TopicBudgetPool::new("t".into(), a,b).expect("p"); let _=p.charge(x,x,0.0); prop_assert!(p.k_bits_spent() >= 0.0); }
+        #[test] fn topic_pool_invariants_proptest(a in 0.1f64..10.0f64, b in 0.1f64..10.0f64, x in 0.0f64..5.0f64, covariance_charge in 0.0f64..8.0f64) {
+            let mut p=TopicBudgetPool::new("t".into(), a,b).expect("p");
+            let before_cov = p.covariance_charge_total;
+            let expected_freeze = x > a + f64::EPSILON || x > b + f64::EPSILON;
+            let result = p.charge(x,x,covariance_charge);
+            if expected_freeze {
+                prop_assert!(matches!(result, Err(EvidenceOSError::Frozen)));
+                prop_assert!(p.frozen);
+            } else {
+                prop_assert!(result.is_ok());
+                prop_assert!(p.covariance_charge_total + 1e-12 >= before_cov);
+                prop_assert!((p.covariance_charge_total - (before_cov + covariance_charge)).abs() < 1e-9);
+            }
+            prop_assert_eq!(p.frozen, expected_freeze);
+        }
         #[test] fn e_merge_proptest_invariants(xs in prop::collection::vec(0.1f64..10.0f64,1..8)) { let w=vec![1.0/xs.len() as f64; xs.len()]; let v=e_merge(&xs,&w).expect("m"); prop_assert!(v.is_finite() && v>=0.0); }
         #[test] fn e_product_proptest_invariants(xs in prop::collection::vec(0.1f64..10.0f64,1..8)) { let v=e_product(&xs).expect("m"); prop_assert!(v.is_finite() && v>=0.0); }
     }

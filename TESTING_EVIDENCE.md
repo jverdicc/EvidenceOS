@@ -1,24 +1,30 @@
 # Testing Evidence
 
-## Commands
+## Command
 
 ```bash
-cargo test --all
-cargo test --workspace
-cargo fuzz run fuzz_aspec_verify -runs=2000
-cargo fuzz run fuzz_etl_read_entry -runs=2000
+./scripts/test_evidence.sh
 ```
 
-## Tool versions
+## Captured Example (abridged)
 
-Capture with:
-
-```bash
-rustc --version
-cargo --version
-cargo fuzz --version
+```text
+== cargo fmt ==
+== cargo clippy ==
+== cargo test ==
+== cargo llvm-cov (with integration/system tests) ==
+== cargo fuzz smoke (30s per target) ==
 ```
 
-## What this proves
+## Expected Artifacts
 
-These checks exercise unit tests, integration/system tests (including tonic server lifecycle paths), bounded proptests embedded in crate tests, and fuzz smoke for ASPEC/ETL parser invariants. Together they provide fail-closed checks for policy validation, ledger accounting/monotonicity, oracle encoding and null-spec behavior, and ETL proof parsing and verification.
+- `artifacts/test_output.txt` (combined test log)
+- `artifacts/coverage.lcov` (coverage output)
+- `artifacts/fuzz_aspec_verify.log`
+- `artifacts/fuzz_etl_read_entry.log`
+- `artifacts/fuzz_structured_claim_validate.log`
+
+## Gates
+
+- Coverage threshold gate enforced by `cargo llvm-cov --fail-under-lines 95`.
+- Fuzz smoke tests run each target for 30 seconds to catch panic-level regressions.
