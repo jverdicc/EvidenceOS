@@ -21,8 +21,10 @@
 
 use clap::Parser;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
+use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 
@@ -45,6 +47,30 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     durable_etl: bool,
+
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    #[arg(long)]
+    tls_key: Option<String>,
+
+    #[arg(long)]
+    mtls_client_ca: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    require_client_cert: bool,
+
+    #[arg(long)]
+    auth_token: Option<String>,
+
+    #[arg(long)]
+    auth_hmac_key: Option<String>,
+
+    #[arg(long, default_value_t = 4 * 1024 * 1024)]
+    max_request_bytes: usize,
+
+    #[arg(long)]
+    rpc_timeout_ms: Option<u64>,
 }
 
 #[tokio::main]
@@ -70,10 +96,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = args.listen.parse()?;
     let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl)?;
 
-    tracing::info!(%addr, data_dir=%args.data_dir, "starting EvidenceOS gRPC server");
+    if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
+        return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());
+    }
+    if args.require_client_cert && args.mtls_client_ca.is_none() {
+        return Err("--require-client-cert requires --mtls-client-ca".into());
+    }
+    if args.tls_cert.is_some() ^ args.tls_key.is_some() {
+        return Err("--tls-cert and --tls-key must be provided together".into());
+    }
 
-    tonic::transport::Server::builder()
-        .add_service(EvidenceOsServer::new(svc))
+    let auth = match (args.auth_token.clone(), args.auth_hmac_key.clone()) {
+        (Some(token), None) => Some(AuthConfig::BearerToken(token)),
+        (None, Some(hmac)) => Some(AuthConfig::HmacKey(hmac.into_bytes())),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("validated above"),
+    };
+    let timeout = args.rpc_timeout_ms.map(Duration::from_millis);
+    let interceptor = RequestGuard::new(auth, timeout);
+
+    tracing::info!(
+        %addr,
+        data_dir=%args.data_dir,
+        tls_enabled=%args.tls_cert.is_some(),
+        mtls_required=%args.require_client_cert,
+        max_request_bytes=%args.max_request_bytes,
+        auth_enabled=%(args.auth_token.is_some() || args.auth_hmac_key.is_some()),
+        "starting EvidenceOS gRPC server"
+    );
+
+    let mut builder = tonic::transport::Server::builder();
+    if let (Some(cert_path), Some(key_path)) = (args.tls_cert.as_ref(), args.tls_key.as_ref()) {
+        let cert_pem = std::fs::read(cert_path)?;
+        let key_pem = std::fs::read(key_path)?;
+        let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+        let mut tls = tonic::transport::ServerTlsConfig::new().identity(identity);
+        if args.require_client_cert {
+            let ca_path = args
+                .mtls_client_ca
+                .as_ref()
+                .ok_or("--require-client-cert requires --mtls-client-ca")?;
+            let ca_pem = std::fs::read(ca_path)?;
+            let ca = tonic::transport::Certificate::from_pem(ca_pem);
+            tls = tls.client_ca_root(ca);
+        }
+        builder = builder.tls_config(tls)?;
+    }
+
+    builder
+        .max_decoding_message_size(args.max_request_bytes)
+        .add_service(EvidenceOsServer::with_interceptor(svc, interceptor))
         .serve(addr)
         .await?;
 
