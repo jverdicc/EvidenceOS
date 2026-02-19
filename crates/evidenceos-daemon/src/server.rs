@@ -35,11 +35,12 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy};
+use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::oracle::OracleResolution;
+use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
@@ -149,6 +150,8 @@ struct Claim {
     dependency_merkle_root: Option<[u8; 32]>,
     wasm_module: Vec<u8>,
     aspec_rejection: Option<String>,
+    #[serde(default)]
+    aspec_report_summary: Option<String>,
     lane: Lane,
     #[serde(default)]
     heavy_lane_diversion_recorded: bool,
@@ -171,6 +174,41 @@ struct HoldoutBudgetPool {
     k_bits_spent: f64,
     access_credit_spent: f64,
     frozen: bool,
+}
+
+#[derive(Debug, Clone)]
+struct LaneConfig {
+    aspec_policy: AspecPolicy,
+    oracle_resolution: OracleResolution,
+    k_bits_budget: f64,
+    access_credit_budget: f64,
+    dp_epsilon_budget: f64,
+    dp_delta_budget: f64,
+}
+
+impl LaneConfig {
+    fn for_lane(lane: Lane, num_symbols: u32, access_credit: f64) -> Result<Self, Status> {
+        let mut policy = AspecPolicy::default();
+        let (oracle_delta_sigma, k_bits_budget, dp_epsilon_budget, dp_delta_budget) = match lane {
+            Lane::Fast => (0.0, access_credit, 0.0, 0.0),
+            Lane::Heavy => {
+                policy.lane = AspecLane::LowAssurance;
+                policy.float_policy = FloatPolicy::Allow;
+                policy.max_loop_bound = 10_000;
+                policy.max_output_bytes = structured_claims::max_bytes_upper_bound();
+                (0.25, access_credit, 0.1, 1e-9)
+            }
+        };
+        Ok(Self {
+            aspec_policy: policy,
+            oracle_resolution: OracleResolution::new(num_symbols, oracle_delta_sigma)
+                .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?,
+            k_bits_budget,
+            access_credit_budget: access_credit,
+            dp_epsilon_budget,
+            dp_delta_budget,
+        })
+    }
 }
 
 impl HoldoutBudgetPool {
@@ -738,12 +776,38 @@ fn vault_config(claim: &Claim) -> Result<VaultConfig, Status> {
         1_000_000
     };
     let max_oracle_calls = if claim.lane == Lane::Heavy { 8 } else { 32 };
+    let max_output_bytes = if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
+        canonical_len as u32
+    } else {
+        structured_claims::max_bytes_upper_bound()
+    };
     Ok(VaultConfig {
         max_fuel,
         max_memory_bytes: max_memory_bytes as u64,
-        max_output_bytes: canonical_len as u32,
+        max_output_bytes,
         max_oracle_calls,
     })
+}
+
+fn kernel_structured_output(
+    output_schema_id: &str,
+    canonical_output: &[u8],
+    decision: i32,
+    reason_codes: &[u32],
+    e_value: f64,
+) -> Result<Vec<u8>, Status> {
+    if output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
+        return Ok(canonical_output.to_vec());
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(canonical_output)
+        .map_err(|_| Status::internal("structured canonical output is not valid JSON"))?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| Status::internal("structured canonical output is not object JSON"))?;
+    obj.insert("kernel_decision".to_string(), json!(decision));
+    obj.insert("kernel_reason_codes".to_string(), json!(reason_codes));
+    obj.insert("kernel_e_value_total".to_string(), json!(e_value));
+    serde_json::to_vec(&value).map_err(|_| Status::internal("failed to encode structured output"))
 }
 
 fn derive_holdout_labels(
@@ -759,6 +823,16 @@ fn derive_holdout_labels(
         labels.push((byte ^ ((idx as u8).wrapping_mul(31))) & 1);
     }
     Ok(labels)
+}
+
+fn requested_lane(lane: &str) -> Result<Lane, Status> {
+    match lane.to_ascii_lowercase().as_str() {
+        "fast" | "highassurance" | "high_assurance" => Ok(Lane::Fast),
+        "heavy" | "lowassurance" | "low_assurance" => Ok(Lane::Heavy),
+        _ => Err(Status::invalid_argument(
+            "metadata.lane must be fast or heavy",
+        )),
+    }
 }
 
 fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
@@ -875,6 +949,7 @@ impl EvidenceOs for EvidenceOsService {
             dependency_items: Vec::new(),
             wasm_module: Vec::new(),
             aspec_rejection: None,
+            aspec_report_summary: None,
             lane: Lane::Fast,
             heavy_lane_diversion_recorded: false,
             ledger,
@@ -981,8 +1056,21 @@ impl EvidenceOs for EvidenceOsService {
                 }
             }
 
-            let policy = AspecPolicy::default();
-            let report = verify_aspec(&req.wasm_module, &policy);
+            let lane_cfg = LaneConfig::for_lane(
+                claim.lane,
+                claim.oracle_num_symbols,
+                claim.ledger.access_credit_budget.unwrap_or(0.0),
+            )?;
+            let report = verify_aspec(&req.wasm_module, &lane_cfg.aspec_policy);
+            let summary = format!(
+                "lane={:?};ok={};imports={};loops={};kproxy={:.3}",
+                report.lane,
+                report.ok,
+                report.imported_funcs,
+                report.total_loops,
+                report.kolmogorov_proxy_bits
+            );
+            claim.aspec_report_summary = Some(summary);
             if !report.ok {
                 let reason = report.reasons.join("; ");
                 claim.aspec_rejection = Some(reason.clone());
@@ -1338,7 +1426,7 @@ impl EvidenceOs for EvidenceOsService {
         phys.copy_from_slice(&signals.phys_hir_signature_hash);
         let topic = compute_topic_id(
             &CoreClaimMetadataV2 {
-                lane: metadata.lane,
+                lane: metadata.lane.clone(),
                 alpha_micros: metadata.alpha_micros,
                 epoch_config_ref: metadata.epoch_config_ref,
                 output_schema_id: metadata.output_schema_id.clone(),
@@ -1353,16 +1441,27 @@ impl EvidenceOs for EvidenceOsService {
         let alpha = (metadata.alpha_micros as f64) / 1_000_000.0;
         let access_credit = req.access_credit as f64;
         Self::validate_budget_value(access_credit, "access_credit")?;
+        let requested = requested_lane(&metadata.lane)?;
+        let lane = if topic.escalate_to_heavy {
+            Lane::Heavy
+        } else {
+            requested
+        };
+        let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
-            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
+            .map(|l| {
+                l.with_budgets(
+                    Some(lane_cfg.k_bits_budget),
+                    Some(lane_cfg.access_credit_budget),
+                )
+            })?;
         let mut holdout_hasher = Sha256::new();
         holdout_hasher.update(req.holdout_ref.as_bytes());
         let mut holdout_handle_id = [0u8; 32];
         holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
 
-        let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
-            .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
+        let oracle_resolution = lane_cfg.oracle_resolution;
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic.topic_id);
@@ -1392,12 +1491,9 @@ impl EvidenceOs for EvidenceOsService {
             dependency_items: Vec::new(),
             wasm_module: Vec::new(),
             aspec_rejection: None,
-            lane: if topic.escalate_to_heavy {
-                Lane::Heavy
-            } else {
-                Lane::Fast
-            },
-            heavy_lane_diversion_recorded: topic.escalate_to_heavy,
+            aspec_report_summary: None,
+            lane,
+            heavy_lane_diversion_recorded: lane == Lane::Heavy,
             ledger,
             last_decision: None,
             last_capsule_hash: None,
@@ -1412,8 +1508,12 @@ impl EvidenceOs for EvidenceOsService {
             .lock()
             .entry(topic.topic_id)
             .or_insert(
-                TopicBudgetPool::new(hex::encode(topic.topic_id), access_credit, access_credit)
-                    .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
+                TopicBudgetPool::new(
+                    hex::encode(topic.topic_id),
+                    lane_cfg.k_bits_budget,
+                    lane_cfg.access_credit_budget,
+                )
+                .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
             );
         self.state
             .holdout_pools
@@ -1481,7 +1581,7 @@ impl EvidenceOs for EvidenceOsService {
             let canonical_output = vault_result.canonical_output;
             let fuel_used = vault_result.fuel_used;
             let trace_hash = vault_result.judge_trace_hash;
-            if claim.output_schema_id == "legacy/v1" {
+            if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
                 let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             }
             let charge_bits = claim.oracle_resolution.bits_per_call()
@@ -1489,28 +1589,45 @@ impl EvidenceOs for EvidenceOsService {
             let dependence_multiplier = self.dependence_tax_multiplier;
             let taxed_bits = charge_bits * dependence_multiplier;
             let covariance_charge = taxed_bits - charge_bits;
+            let lane_cfg = LaneConfig::for_lane(
+                claim.lane,
+                claim.oracle_num_symbols,
+                claim.ledger.access_credit_budget.unwrap_or(0.0),
+            )?;
+            let dp_epsilon = lane_cfg.dp_epsilon_budget * 0.0;
+            let dp_delta = lane_cfg.dp_delta_budget * 0.0;
             claim
                 .ledger
                 .charge_all(
                     taxed_bits,
-                    0.0,
-                    0.0,
+                    dp_epsilon,
+                    dp_delta,
                     taxed_bits,
                     "structured_output",
                     json!({
                         "post_canonical_bits": charge_bits,
                         "dependence_multiplier": dependence_multiplier,
                         "taxed_k_bits": taxed_bits,
+                        "dp_epsilon": dp_epsilon,
+                        "dp_delta": dp_delta,
                     }),
                 )
                 .map_err(|_| Status::failed_precondition("ledger budget exhausted"))?;
+            claim
+                .ledger
+                .charge_kout_bits(vault_result.kout_bits_total)
+                .map_err(|_| Status::failed_precondition("ledger kout budget exhausted"))?;
             {
                 let mut topic_pools = self.state.topic_pools.lock();
                 let pool = topic_pools
                     .get_mut(&claim.topic_id)
                     .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
                 if pool
-                    .charge(taxed_bits, taxed_bits, covariance_charge)
+                    .charge(
+                        taxed_bits + vault_result.kout_bits_total,
+                        taxed_bits + vault_result.kout_bits_total,
+                        covariance_charge,
+                    )
                     .is_err()
                 {
                     let _ = self.record_incident(claim, "topic_budget_exhausted");
@@ -1522,38 +1639,46 @@ impl EvidenceOs for EvidenceOsService {
                 let pool = holdout_pools
                     .get_mut(&claim.holdout_handle_id)
                     .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
-                if pool.charge(taxed_bits, taxed_bits).is_err() {
+                if pool
+                    .charge(
+                        taxed_bits + vault_result.kout_bits_total,
+                        taxed_bits + vault_result.kout_bits_total,
+                    )
+                    .is_err()
+                {
                     let _ = self.record_incident(claim, "holdout_budget_exhausted");
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
-            let decision = if canonical_output.first().copied().unwrap_or(0) == 0 {
-                pb::Decision::Reject as i32
-            } else {
-                pb::Decision::Approve as i32
-            };
-            let reason_codes = if decision == pb::Decision::Approve as i32 {
-                vec![1]
-            } else {
-                vec![2]
-            };
-            let e_value = if decision == pb::Decision::Approve as i32 {
-                2.0
-            } else {
-                1.25
-            };
+            let e_value = vault_result.e_value_total;
             claim
                 .ledger
-                .settle_e_value(e_value, "decision", json!({"decision": decision}))
+                .settle_e_value(e_value, "decision", json!({"e_value_total": e_value}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
             Self::transition_claim(claim, ClaimState::Settled)?;
-            if claim.lane == Lane::Heavy {
+            let can_certify = claim.ledger.can_certify();
+            let decision = if claim.ledger.frozen || claim.lane == Lane::Heavy {
                 Self::transition_claim(claim, ClaimState::Frozen)?;
-            } else if claim.ledger.can_certify() {
+                pb::Decision::Defer as i32
+            } else if can_certify {
                 Self::transition_claim(claim, ClaimState::Certified)?;
+                pb::Decision::Approve as i32
             } else {
                 Self::transition_claim(claim, ClaimState::Revoked)?;
-            }
+                pb::Decision::Reject as i32
+            };
+            let reason_codes = match decision {
+                x if x == pb::Decision::Approve as i32 => vec![1],
+                x if x == pb::Decision::Defer as i32 => vec![3],
+                _ => vec![2],
+            };
+            let canonical_output = kernel_structured_output(
+                &claim.output_schema_id,
+                &canonical_output,
+                decision,
+                &reason_codes,
+                e_value,
+            )?;
             let mut capsule = ClaimCapsule::new(
                 hex::encode(claim.claim_id),
                 hex::encode(claim.topic_id),
@@ -1930,6 +2055,17 @@ mod tests {
         let mut tampered = digest;
         tampered[0] ^= 0x01;
         assert!(signing_key.verifying_key().verify(&tampered, &sig).is_err());
+    }
+
+    #[test]
+    fn lane_config_mapping_is_deterministic() {
+        assert_eq!(requested_lane("fast").expect("fast"), Lane::Fast);
+        assert_eq!(requested_lane("heavy").expect("heavy"), Lane::Heavy);
+        let fast = LaneConfig::for_lane(Lane::Fast, 4, 64.0).expect("fast cfg");
+        let heavy = LaneConfig::for_lane(Lane::Heavy, 4, 64.0).expect("heavy cfg");
+        assert!(matches!(fast.aspec_policy.lane, AspecLane::HighAssurance));
+        assert!(matches!(heavy.aspec_policy.lane, AspecLane::LowAssurance));
+        assert!(heavy.aspec_policy.max_loop_bound >= fast.aspec_policy.max_loop_bound);
     }
 
     #[test]

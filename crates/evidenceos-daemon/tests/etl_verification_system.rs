@@ -1,13 +1,16 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use evidenceos_core::etl::{leaf_hash, verify_consistency_proof, verify_inclusion_proof};
+use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{transport::Channel, transport::Server};
+
+const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 
 async fn start_server(data_dir: &str) -> EvidenceOsClient<Channel> {
     let svc = EvidenceOsService::build(data_dir).expect("service");
@@ -26,8 +29,18 @@ async fn start_server(data_dir: &str) -> EvidenceOsClient<Channel> {
         .expect("connect")
 }
 
+fn sth_payload(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
+    let mut msg = Vec::with_capacity(8 + root_hash.len());
+    msg.extend_from_slice(DOMAIN_STH_V1);
+    msg.extend_from_slice(&tree_size.to_be_bytes());
+    msg.extend_from_slice(root_hash);
+    let mut h = Sha256::new();
+    h.update(msg);
+    h.finalize().into()
+}
+
 fn wasm_legacy() -> Vec<u8> {
-    wat::parse_str("(module (import \"env\" \"oracle_bucket\" (func $oracle (param i32 i32) (result i32))) (import \"env\" \"emit_structured_claim\" (func $emit (param i32 i32) (result i32))) (memory (export \"memory\") 1) (data (i32.const 0) \"\\01\") (func (export \"run\") i32.const 0 i32.const 1 call $emit drop))").expect("wat")
+    wat::parse_str("(module (import \"env\" \"emit_structured_claim\" (func $emit (param i32 i32) (result i32))) (memory (export \"memory\") 1) (data (i32.const 0) \"\\01\") (func (export \"run\") i32.const 0 i32.const 1 call $emit drop))").expect("wat")
 }
 
 async fn execute_once(
@@ -51,17 +64,26 @@ async fn execute_once(
             holdout_ref: "h".into(),
             epoch_size: 10,
             oracle_num_symbols: 4,
-            access_credit: 64,
+            access_credit: 128,
         })
         .await
         .expect("create")
         .into_inner()
         .claim_id;
+    let wasm = wasm_legacy();
+    let artifact_hash = {
+        let mut h = Sha256::new();
+        h.update(&wasm);
+        h.finalize().to_vec()
+    };
     client
         .commit_artifacts(pb::CommitArtifactsRequest {
             claim_id: claim_id.clone(),
-            artifacts: vec![],
-            wasm_module: wasm_legacy(),
+            artifacts: vec![pb::Artifact {
+                kind: "wasm".into(),
+                artifact_hash,
+            }],
+            wasm_module: wasm,
         })
         .await
         .expect("commit");
@@ -78,11 +100,8 @@ async fn execute_once(
         .await
         .expect("seal");
     client
-        .execute_claim(pb::ExecuteClaimRequest {
+        .execute_claim_v2(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
-            decision: pb::Decision::Approve as i32,
-            reason_codes: vec![],
-            canonical_output: vec![],
         })
         .await
         .expect("execute");
@@ -105,13 +124,14 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
     let key =
         VerifyingKey::from_bytes(&pubk.ed25519_public_key.try_into().expect("pk len")).expect("vk");
 
-    let first = execute_once(&mut client, "c1").await;
+    let _first = execute_once(&mut client, "c1").await;
     let second = execute_once(&mut client, "c2").await;
 
     let ip = second.inclusion_proof.expect("inclusion");
     let sth = second.signed_tree_head.expect("sth");
-    let leaf: [u8; 32] = ip.leaf_hash.clone().try_into().expect("leaf");
-    let root_hash: [u8; 32] = sth.root_hash.clone().try_into().expect("root");
+
+    let leaf: [u8; 32] = ip.leaf_hash.try_into().expect("leaf");
+    let root_hash: [u8; 32] = second.root_hash.try_into().expect("root");
     let path: Vec<[u8; 32]> = ip
         .audit_path
         .into_iter()
@@ -125,35 +145,31 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
         &root_hash
     ));
 
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&sth.tree_size.to_be_bytes());
-    msg.extend_from_slice(&sth.root_hash);
+    let digest = sth_payload(sth.tree_size, &sth.root_hash);
     let sig = Signature::from_slice(&sth.signature).expect("sig");
-    assert!(key.verify(&msg, &sig).is_ok());
+    assert!(key.verify(&digest, &sig).is_ok());
 
     let cp = second.consistency_proof.expect("consistency");
-    if cp.new_tree_size > cp.old_tree_size && cp.old_tree_size > 0 {
-        let proof = client
-            .get_consistency_proof(pb::GetConsistencyProofRequest {
-                first_tree_size: cp.old_tree_size,
-                second_tree_size: cp.new_tree_size,
-            })
-            .await
-            .expect("cp")
-            .into_inner();
-        let old_root: [u8; 32] = proof.first_root_hash.try_into().expect("old");
-        let new_root: [u8; 32] = proof.second_root_hash.try_into().expect("new");
-        let empty: Vec<[u8; 32]> = Vec::new();
-        assert!(
-            verify_consistency_proof(
-                &old_root,
-                &new_root,
-                cp.old_tree_size as usize,
-                cp.new_tree_size as usize,
-                &empty
-            ) || proof.consistent
-        );
-    }
-
-    let _ = leaf_hash(&first.capsule_bytes);
+    let proof = client
+        .get_consistency_proof(pb::GetConsistencyProofRequest {
+            first_tree_size: cp.old_tree_size,
+            second_tree_size: cp.new_tree_size,
+        })
+        .await
+        .expect("cp")
+        .into_inner();
+    let old_root: [u8; 32] = proof.first_root_hash.try_into().expect("old");
+    let new_root: [u8; 32] = proof.second_root_hash.try_into().expect("new");
+    let cp_path: Vec<[u8; 32]> = cp
+        .path
+        .into_iter()
+        .map(|x| x.try_into().expect("cp path"))
+        .collect();
+    assert!(verify_consistency_proof(
+        &old_root,
+        &new_root,
+        cp.old_tree_size as usize,
+        cp.new_tree_size as usize,
+        &cp_path
+    ));
 }

@@ -23,8 +23,9 @@ Evidence artifacts are generated with Makefile targets at repository root.
 
 - `artifacts/coverage.lcov`
 - `artifacts/coverage-html/`
-- `artifacts/test.log`
-- `artifacts/lint.log`
+- `artifacts/test_output.txt`
+- `artifacts/clippy-report.txt`
+- `artifacts/fuzz_*.log`
 
 `make audit` writes:
 
@@ -37,3 +38,8 @@ Evidence artifacts are generated with Makefile targets at repository root.
 - No ignored tests unless explicitly documented with rationale.
 
 The `make test-evidence` target enforces both coverage minimums and rejects ignored tests in crate sources.
+
+
+## Allowed ignored tests
+
+- `crates/evidenceos-daemon/tests/aspec_rejections.rs` `#[ignore = "long-running system matrix test"]` (scheduled workflow only).

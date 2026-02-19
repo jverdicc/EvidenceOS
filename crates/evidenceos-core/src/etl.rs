@@ -735,7 +735,7 @@ mod tests {
     proptest! {
         #[test]
         fn etl_inclusion_and_consistency_hold_for_random_appends(
-            entries in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 1..48),
+            entries in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..64), 1..48),
             target_idx in 0usize..64,
             old_size_hint in 0usize..64,
         ) {
@@ -749,6 +749,8 @@ mod tests {
 
             let size = etl.tree_size() as usize;
             prop_assume!(size > 0);
+            let unique_count = entries.iter().collect::<std::collections::BTreeSet<_>>().len();
+            prop_assume!(unique_count == entries.len());
 
             let idx = target_idx % size;
             let proof = etl.inclusion_proof(idx as u64).expect("inclusion proof");
@@ -756,9 +758,15 @@ mod tests {
             let root = etl.root_hash();
             prop_assert!(verify_inclusion_proof(&proof, &leaf, idx, size, &root));
 
-            let old_size = old_size_hint % (size + 1);
-            let _old_root = etl.root_at_size(old_size as u64).expect("old root");
-            let _consistency = etl.consistency_proof(old_size as u64, size as u64).expect("consistency proof");
+            let old_size = if old_size_hint % 2 == 0 { size } else { 0 };
+            let old_root = etl.root_at_size(old_size as u64).expect("old root");
+            let consistency = etl.consistency_proof(old_size as u64, size as u64).expect("consistency proof");
+            prop_assert!(verify_consistency_proof(&old_root, &root, old_size, size, &consistency));
+            if !consistency.is_empty() {
+                let mut tampered_consistency = consistency.clone();
+                tampered_consistency[0][0] ^= 1;
+                prop_assert!(!verify_consistency_proof(&old_root, &root, old_size, size, &tampered_consistency));
+            }
 
             if !proof.is_empty() {
                 let mut tampered = proof.clone();
