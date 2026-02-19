@@ -251,3 +251,78 @@ fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
     let out = engine.execute(&wasm, &ctx, config()).expect("execute");
     assert_eq!(out.e_value_total, 0.0);
 }
+
+#[test]
+fn structured_schema_output_near_bound_succeeds_and_plus_one_fails() {
+    let payload = br#"{"schema_version":"1","claim_id":"c1","event_time_unix":1,"substance":"chlorine","unit":"ppm","value":1,"confidence_bps":9000,"reason_code":"ALERT","reason_codes":["ALERT"],"references":[],"location_id":"l","sensor_id":"s"}"#;
+
+    let wasm_ok = wat::parse_str(format!(
+        r#"(module (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32))) (memory (export "memory") 1) (data (i32.const 0) "{}") (func (export "run") i32.const 0 i32.const {} call $emit drop))"#,
+        payload
+            .iter()
+            .map(|b| format!("\\{:02x}", b))
+            .collect::<String>(),
+        payload.len()
+    ))
+    .expect("wat ok");
+    let mut ctx = context();
+    ctx.output_schema_id = evidenceos_core::structured_claims::SCHEMA_ID.to_string();
+    let engine = VaultEngine::new().expect("engine");
+    let ok = engine.execute(
+        &wasm_ok,
+        &ctx,
+        VaultConfig {
+            max_output_bytes: payload.len() as u32,
+            ..config()
+        },
+    );
+    assert!(ok.is_ok(), "{ok:?}");
+
+    let mut payload_big = payload.to_vec();
+    payload_big.push(b' ');
+    let wasm_fail = wat::parse_str(format!(
+        r#"(module (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32))) (memory (export "memory") 1) (data (i32.const 0) "{}") (func (export "run") i32.const 0 i32.const {} call $emit drop))"#,
+        payload_big
+            .iter()
+            .map(|b| format!("\\{:02x}", b))
+            .collect::<String>(),
+        payload_big.len()
+    ))
+    .expect("wat fail");
+    let err = engine
+        .execute(
+            &wasm_fail,
+            &ctx,
+            VaultConfig {
+                max_output_bytes: payload.len() as u32,
+                ..config()
+            },
+        )
+        .expect_err("+1 must fail");
+    assert_eq!(err, VaultError::OutputTooLarge);
+}
+
+#[test]
+fn legacy_schema_output_larger_than_symbol_length_fails() {
+    let wasm = wat::parse_str(
+        r#"(module
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01\02")
+          (func (export "run")
+            i32.const 0 i32.const 2 call $emit drop))"#,
+    )
+    .expect("wat");
+    let engine = VaultEngine::new().expect("engine");
+    let err = engine
+        .execute(
+            &wasm,
+            &context(),
+            VaultConfig {
+                max_output_bytes: 1,
+                ..config()
+            },
+        )
+        .expect_err("legacy > canonical length");
+    assert_eq!(err, VaultError::OutputTooLarge);
+}

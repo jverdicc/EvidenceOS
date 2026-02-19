@@ -71,3 +71,13 @@ This matrix maps each externally meaningful parameter to **unit + property/fuzz 
 | reason codes bounds | `structured_claims.rs::tests::validates_and_canonicalizes_cbrn_sc` | `structured_claims.rs::tests::cbrn_sc_roundtrip_proptest` | `structured_claims_system.rs::valid_cbrn_sc_output_passes_and_returns_capsule` |
 | deterministic canonical bytes | `structured_claims.rs::tests::validates_and_canonicalizes_cbrn_sc` | `structured_claims.rs::tests::cbrn_sc_roundtrip_proptest` | `structured_claims_system.rs::valid_cbrn_sc_output_passes_and_returns_capsule` |
 | kout accounting | `structured_claims.rs::tests::validates_and_canonicalizes_cbrn_sc` | `fuzz_structured_claim_validate` | `structured_claims_system.rs::valid_cbrn_sc_output_passes_and_returns_capsule` |
+
+## ExecuteClaimV2 Settlement / Lane Config (`crates/evidenceos-daemon/src/server.rs`)
+
+| Parameter / behavior | Unit test(s) | Property/fuzz | System/integration |
+| --- | --- | --- | --- |
+| `vault_result.e_value_total` settlement | `vault_execution.rs::vault_e_value_becomes_zero_when_accuracy_is_zero` | `fuzz/fuzz_targets/fuzz_oracle_roundtrip.rs::fuzz_target` | `crates/evidenceos-daemon/tests/structured_claims_system.rs::valid_cbrn_sc_output_passes_and_returns_capsule` |
+| `kout_bits_total` leakage charge | `vault_execution.rs::structured_schema_output_near_bound_succeeds_and_plus_one_fails` | `fuzz/fuzz_targets/fuzz_structured_claim_validate.rs::fuzz_target` | `structured_claims_system.rs::valid_cbrn_sc_output_passes_and_returns_capsule` |
+| structured output size bound by schema | `vault_execution.rs::structured_schema_output_near_bound_succeeds_and_plus_one_fails` | `fuzz_structured_claim_validate` | `structured_claims_system.rs::structured_output_too_large_rejected` |
+| lane to policy mapping (`requested_lane`/`LaneConfig`) | `server.rs` unit tests (lane mapping) | `evidenceos-core aspec property tests` | `structured_claims_system.rs` + `lifecycle_v2.rs` |
+| STH domain-separated signature digest | `server.rs::signed_tree_head_signature_verifies_and_tamper_fails` | `fuzz_etl_ops` | `etl_verification_system.rs::verifies_inclusion_consistency_and_sth_signature` |
