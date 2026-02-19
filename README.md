@@ -1,7 +1,7 @@
 <!-- Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18676016.svg)](https://doi.org/10.5281/zenodo.18676016)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18685556.svg)](https://zenodo.org/records/18685556)
 
 # EvidenceOS (Rust)
 
@@ -67,7 +67,7 @@ Key rotation strategy: rotation is not supported yet. The daemon persists a sing
 This repository is part of the **Universal Verification Protocol (UVP)** research project.
 
 * **Paper:** "The Conservation of Epistemic Integrity: A Kernel–Userland Protocol for Verifiable Reality" (Under Review at FORC 2026).
-* **Citation DOI (all versions):** Cite all versions using [DOI: 10.5281/zenodo.18676016](https://doi.org/10.5281/zenodo.18676016), which always resolves to the latest release.
+* **Citation DOI (all versions):** Cite all versions using [DOI: 10.5281/zenodo.18685556](https://doi.org/10.5281/zenodo.18685556), which always resolves to the latest release.
 
 If you use this code in your research, please cite the Zenodo archive or the forthcoming FORC 2026 paper.
 
