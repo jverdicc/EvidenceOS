@@ -86,3 +86,9 @@ Expected artifacts:
 - `artifacts/scenarios/reject_invalid_claim.json`
 
 Each artifact contains: scenario metadata, request/response summaries, expected vs observed verdict, and ETL proof verification results.
+
+## Ignored test allowlist
+
+The following ignored test is intentionally excluded from default CI runtime because it is a long-running system matrix job:
+
+- `crates/evidenceos-daemon/tests/aspec_rejections.rs` — `#[ignore = "long-running system matrix test"]`
