@@ -122,7 +122,7 @@ pub struct JointLeakagePool {
 
 impl JointLeakagePool {
     pub fn new(holdout_id: String, k_bits_budget: f64) -> EvidenceOSResult<Self> {
-        if k_bits_budget < 0.0 {
+        if !k_bits_budget.is_finite() || k_bits_budget < 0.0 {
             return Err(EvidenceOSError::InvalidArgument);
         }
         Ok(Self {
@@ -320,8 +320,9 @@ impl ConservationLedger {
     }
 
     pub fn with_budget(mut self, k_bits_budget: Option<f64>) -> Self {
-        self.k_bits_budget = k_bits_budget;
-        self.access_credit_budget = k_bits_budget;
+        let valid = k_bits_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.k_bits_budget = valid;
+        self.access_credit_budget = valid;
         self
     }
 
@@ -330,8 +331,8 @@ impl ConservationLedger {
         k_bits_budget: Option<f64>,
         access_credit_budget: Option<f64>,
     ) -> Self {
-        self.k_bits_budget = k_bits_budget;
-        self.access_credit_budget = access_credit_budget;
+        self.k_bits_budget = k_bits_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.access_credit_budget = access_credit_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self
     }
     pub fn alpha_prime(&self) -> f64 {
@@ -655,10 +656,12 @@ mod matrix_tests {
         let mut l = ConservationLedger::new(0.5)
             .expect("l")
             .with_budget(Some(-1.0));
-        assert!(matches!(
-            l.charge(0.0, "x", Value::Null),
-            Err(EvidenceOSError::Frozen)
-        ));
+        assert!(l.charge(1.0, "x", Value::Null).is_ok());
+
+        let mut l2 = ConservationLedger::new(0.5)
+            .expect("l")
+            .with_budgets(Some(f64::NAN), Some(f64::INFINITY));
+        assert!(l2.charge_all(1.0, 0.0, 0.0, 1.0, "x", Value::Null).is_ok());
     }
     #[test]
     fn charge_all_rejects_negative_or_nonfinite() {
@@ -712,6 +715,8 @@ mod matrix_tests {
     #[test]
     fn joint_pool_rejects_invalid_budget() {
         assert!(JointLeakagePool::new("a".into(), -1.0).is_err());
+        assert!(JointLeakagePool::new("a".into(), f64::NAN).is_err());
+        assert!(JointLeakagePool::new("a".into(), f64::INFINITY).is_err());
     }
     #[test]
     fn topic_pool_rejects_invalid_budget() {

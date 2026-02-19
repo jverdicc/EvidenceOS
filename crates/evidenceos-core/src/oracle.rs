@@ -541,8 +541,34 @@ mod matrix_tests {
     #[test]
     fn tie_breaker_halfway_boundary() {
         let mut r = OracleResolution::new(3, 0.0).expect("r");
+        r.tie_breaker = TieBreaker::Lower;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 0);
+        r.tie_breaker = TieBreaker::Upper;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 1);
         r.tie_breaker = TieBreaker::NearestEven;
         assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 0);
+    }
+
+    #[test]
+    fn encode_decode_handles_multibyte_symbol_space() {
+        let r = OracleResolution::new(1024, 0.0).expect("r");
+        let bytes = r.encode_bucket(700).expect("enc");
+        assert_eq!(bytes.len(), 2);
+        assert_eq!(r.decode_bucket(&bytes).expect("dec"), 700);
+        assert_eq!(r.validate_canonical_bytes(&bytes).expect("val"), 700);
+    }
+
+    #[test]
+    fn ttl_none_vs_zero_and_one_boundaries() {
+        let mut r = OracleResolution::new(8, 0.0).expect("r");
+        r.calibrated_at_epoch = 10;
+        r.ttl_epochs = None;
+        assert!(!r.ttl_expired(10));
+        r.ttl_epochs = Some(0);
+        assert!(r.ttl_expired(10));
+        r.ttl_epochs = Some(1);
+        assert!(!r.ttl_expired(10));
+        assert!(r.ttl_expired(11));
     }
     #[test]
     fn quantize_clamps_out_of_range() {

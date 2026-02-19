@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "evidenceos-core"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "evidenceos-protocol",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "evidenceos-daemon"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "evidenceos-protocol"
-version = "0.1.0"
+version = "0.1.0-alpha"
 dependencies = [
  "hex",
  "prost",
