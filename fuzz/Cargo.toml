@@ -11,6 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 evidenceos-core = { path = "../crates/evidenceos-core" }
 tempfile = "3"
+arbitrary = { version = "1", features = ["derive"] }
+rand = "0.8"
 
 [[bin]]
 name = "fuzz_aspec_verify"
@@ -29,6 +31,27 @@ bench = false
 [[bin]]
 name = "fuzz_structured_claim_validate"
 path = "fuzz_targets/fuzz_structured_claim_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ledger_ops"
+path = "fuzz_targets/fuzz_ledger_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_oracle_roundtrip"
+path = "fuzz_targets/fuzz_oracle_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_etl_ops"
+path = "fuzz_targets/fuzz_etl_ops.rs"
 test = false
 doc = false
 bench = false

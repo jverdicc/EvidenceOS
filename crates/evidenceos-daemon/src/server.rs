@@ -1091,7 +1091,6 @@ impl EvidenceOs for EvidenceOsService {
                     Ok(v) => v,
                     Err(err) => {
                         self.record_incident(claim, "execution_failure")?;
-                        persist_all(&self.state)?;
                         return Err(map_vault_error(err));
                     }
                 };
@@ -1100,7 +1099,6 @@ impl EvidenceOs for EvidenceOsService {
             let trace_hash = vault_result.judge_trace_hash;
             if !req.canonical_output.is_empty() && req.canonical_output != emitted_output {
                 self.record_incident(claim, "canonical_output_mismatch")?;
-                persist_all(&self.state)?;
                 return Err(Status::invalid_argument(
                     "canonical_output mismatch with wasm emission",
                 ));
@@ -1147,7 +1145,6 @@ impl EvidenceOs for EvidenceOsService {
                     .is_err()
                 {
                     let _ = self.record_incident(claim, "topic_budget_exhausted");
-                    persist_all(&self.state)?;
                     return Err(Status::failed_precondition("topic budget exhausted"));
                 }
             }
@@ -1158,7 +1155,6 @@ impl EvidenceOs for EvidenceOsService {
                     .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
                 if pool.charge(taxed_bits, taxed_bits).is_err() {
                     let _ = self.record_incident(claim, "holdout_budget_exhausted");
-                    persist_all(&self.state)?;
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
@@ -1171,7 +1167,6 @@ impl EvidenceOs for EvidenceOsService {
                 })?;
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
-                persist_all(&self.state)?;
                 return Err(Status::failed_precondition(
                     "heavy lane output policy rejected",
                 ));
@@ -1480,7 +1475,6 @@ impl EvidenceOs for EvidenceOsService {
                     Ok(v) => v,
                     Err(err) => {
                         self.record_incident(claim, "execution_failure")?;
-                        persist_all(&self.state)?;
                         return Err(map_vault_error(err));
                     }
                 };
@@ -1520,7 +1514,6 @@ impl EvidenceOs for EvidenceOsService {
                     .is_err()
                 {
                     let _ = self.record_incident(claim, "topic_budget_exhausted");
-                    persist_all(&self.state)?;
                     return Err(Status::failed_precondition("topic budget exhausted"));
                 }
             }
@@ -1531,7 +1524,6 @@ impl EvidenceOs for EvidenceOsService {
                     .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
                 if pool.charge(taxed_bits, taxed_bits).is_err() {
                     let _ = self.record_incident(claim, "holdout_budget_exhausted");
-                    persist_all(&self.state)?;
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }

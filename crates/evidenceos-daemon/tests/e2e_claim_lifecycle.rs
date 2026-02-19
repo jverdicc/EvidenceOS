@@ -29,6 +29,8 @@ fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
 }
 
+const LEGACY_SCHEMA_ID: &str = "legacy/v1";
+
 const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
 
@@ -420,7 +422,7 @@ async fn topic_budget_is_shared_across_claims() {
             lane: "fast".to_string(),
             alpha_micros: 50_000,
             epoch_config_ref: "shared-epoch".to_string(),
-            output_schema_id: "shared-schema".to_string(),
+            output_schema_id: LEGACY_SCHEMA_ID.to_string(),
         }),
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(41),
