@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible defect in EvidenceOS
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please provide reproducible details.
+        Review `AGENTS.md`, `TESTING_EVIDENCE.md`, `docs/TEST_EVIDENCE.md`, and `docs/TEST_COVERAGE_MATRIX.md` before submitting protocol-impacting changes.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Tag or commit SHA where the bug was observed
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, rustc/cargo versions, and runtime details
+      placeholder: |
+        rustc --version
+        cargo --version
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact commands and inputs
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: quality
+    attributes:
+      label: Validation checklist
+      options:
+        - label: I can reproduce this via public APIs / externally visible behavior (black-box), not internal helper calls.
+          required: true
+        - label: My tests do not copy/paste production logic into test assertions.
+          required: true
+        - label: I covered boundary numeric cases (limits, 0, negatives, NaN/Inf where relevant).
+          required: true
+        - label: I added determinism assertions for deterministic functions/flows.
+          required: true
+        - label: I ran `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+          required: true
+        - label: I did not introduce new `unsafe` code.
+          required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs / artifacts
+      description: Do not include secrets or raw sensitive payloads.
