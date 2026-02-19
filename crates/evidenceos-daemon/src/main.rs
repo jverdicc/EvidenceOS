@@ -154,7 +154,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     builder
-        .max_decoding_message_size(args.max_request_bytes)
         .add_service(EvidenceOsV2Server::with_interceptor(
             svc.clone(),
             interceptor.clone(),

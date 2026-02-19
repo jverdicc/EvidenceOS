@@ -98,6 +98,45 @@ ETL (Merkle log, STH/inclusion/consistency proofs)
 Claim Capsules (lineage DAG, revocation-aware settlement)
 ```
 
+## Plain-English Overview (Why this exists)
+
+EvidenceOS and DiscOS implement the Universal Verification Protocol (UVP): a way to certify “claims” (machine-checkable outputs) even when an adversary can adapt their strategy across many interactions.
+
+If you’ve ever seen a system where each individual request looks normal — but the aggregate behavior across time, accounts, or channels is clearly probing — that’s the failure mode UVP is designed to close. We treat the *operation* (the coordinated campaign) as the object that gets metered and controlled, not just the single request.
+
+**What you get:**
+- A hardened verifier daemon (EvidenceOS) that executes claims in a sealed sandbox, meters oracle access, and publishes auditable evidence (ETL log + inclusion/consistency proofs).
+- An untrusted client/tooling layer (DiscOS) that prepares claims deterministically and consumes verifier responses without expanding the trust boundary.
+- A reproducible test/evidence story: system tests, fuzzing, coverage gates, and scenario artifacts under `artifacts/`.
+
+**What you do *not* get:**
+- A content moderation system.
+- A guarantee about “human-led physical execution quality.”
+- A way to make unsafe capabilities safe by policy alone (UVP is about verifiable certification + evidence conservation + measurable leakage control).
+
+### What happens when someone probes the system?
+
+EvidenceOS is designed to make probing:
+1) measurable (k-bits / budget consumption, lane transitions, rejects),
+2) expensive (budgets and throttles are operation-scoped),
+3) auditable (ETL evidence), and
+4) stoppable (graded response that can fail-closed).
+
+## Practical Use Cases and Outcomes
+
+| Use case category | Adversarial vector (plain English) | EvidenceOS mechanism | Mitigation / outcome | Reproducible evidence |
+| --- | --- | --- | --- | --- |
+| Transport/auth probing | Credential stuffing, missing token, invalid token attempts | TLS/mTLS + bearer/HMAC auth gates + fail-closed interceptor | REJECT / UNAUTHENTICATED | `crates/evidenceos-daemon/tests/transport_hardening_system.rs`, `crates/evidenceos-daemon/src/auth.rs::tests::wrong_token_rejected` |
+| Oversized payload / decode limits probing | Oversized protobuf payloads intended to exhaust decode/memory paths | Bounded decode (`decode_with_max_size`) + strict gRPC size checks | REJECT (`RESOURCE_EXHAUSTED`) | `fuzz/fuzz_targets/fuzz_daemon_decode_limits.rs`, `crates/evidenceos-daemon/src/auth.rs` |
+| Schema alias probing / topic-drift attempt | Alternate schema aliases or drift attempts to bypass canonical topic binding | Schema canonicalization + `topic_id` derivation from canonical metadata/signals | PASS only for canonicalized aliases; otherwise REJECT | `crates/evidenceos-daemon/tests/schema_aliases_system.rs`, `docs/TEST_COVERAGE_MATRIX.md` |
+| Distillation-like high-volume probing | Many diverse claim attempts to learn internal behavior over time | Operation/token-scoped probe detector over request volume + semantic diversity + topic diversity, with k-bits/accounting visibility | THROTTLE → ESCALATE → FROZEN/REJECT | `crates/evidenceos-daemon/tests/probing_detection_system.rs`, `artifacts/probing/probing_detection_system.json`, `fuzz/fuzz_targets/fuzz_probe_detector.rs` |
+| ETL tamper attempt | Bad inclusion/consistency proof or fork-history claim | ETL Merkle inclusion/consistency verification + signed tree heads | REJECT / incident | `crates/evidenceos-daemon/tests/etl_verification_system.rs`, `crates/evidenceos-daemon/tests/etl_proofs_system.rs` |
+| Sealed-vault escape attempts | Excess oracle calls, oversized output, forbidden runtime behavior (and float-op policy rejection where configured) | Sealed vault limits + ASPEC policy + lane controls + deterministic settlement checks | THROTTLE/REJECT/FROZEN depending on violation | `crates/evidenceos-daemon/tests/vault_execution.rs`, `crates/evidenceos-daemon/tests/aspec_rejections.rs`, `fuzz/fuzz_targets/fuzz_aspec_verify.rs` |
+
+### Case study: distillation-style probing (public reporting)
+
+A commonly reported class of incidents is high-volume prompting campaigns intended to clone model behavior and coerce internal reasoning traces. EvidenceOS treats this as an operation-level security event at the verifier boundary: it detects high-volume/high-diversity probing patterns in real time, applies graded response (THROTTLE, then ESCALATE, then FROZEN/REJECT), and records auditable ETL evidence that the response occurred.
+
 ## Assurance status
 
 - **Proven (paper-level model):** UVP conservation framing, transcript accounting, and theorem-backed risk bounds under stated kernel assumptions.
@@ -176,6 +215,7 @@ cargo fuzz run fuzz_oracle_roundtrip
 cargo fuzz run fuzz_etl_ops
 cargo fuzz run fuzz_etl_read_entry
 cargo fuzz run fuzz_structured_claim_validate
+cargo fuzz run fuzz_probe_detector
 ```
 
 ## IPC API

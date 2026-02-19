@@ -23,6 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
@@ -31,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
@@ -299,12 +301,13 @@ impl Drop for KernelState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
     dependence_tax_multiplier: f64,
     telemetry: Arc<Telemetry>,
+    probe_detector: Arc<Mutex<ProbeDetector>>,
 }
 
 impl EvidenceOsService {
@@ -383,6 +386,7 @@ impl EvidenceOsService {
             insecure_v1_enabled,
             dependence_tax_multiplier,
             telemetry,
+            probe_detector: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig::from_env()))),
         })
     }
 
@@ -585,6 +589,122 @@ impl EvidenceOsService {
             etl.revoke(&hex::encode(capsule_hash), reason)
                 .map_err(|_| Status::internal("etl incident append failed"))?;
         }
+        Ok(())
+    }
+
+    fn principal_id_from_metadata(metadata: &tonic::metadata::MetadataMap) -> String {
+        if let Some(v) = metadata.get("authorization").and_then(|v| v.to_str().ok()) {
+            if let Some(token) = v.strip_prefix("Bearer ") {
+                return format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes())));
+            }
+        }
+        if let Some(v) = metadata
+            .get("x-evidenceos-signature")
+            .and_then(|v| v.to_str().ok())
+        {
+            return format!("hmac:{}", hex::encode(sha256_bytes(v.as_bytes())));
+        }
+        if let Some(v) = metadata
+            .get("x-client-cert-fp")
+            .and_then(|v| v.to_str().ok())
+        {
+            return format!("mtls:{}", hex::encode(sha256_bytes(v.as_bytes())));
+        }
+        "anonymous".to_string()
+    }
+
+    fn probe_semantic_hash(signals: Option<&pb::TopicSignalsV2>) -> String {
+        if let Some(sig) = signals {
+            if sig.semantic_hash.len() == 32 {
+                return hex::encode(&sig.semantic_hash);
+            }
+            if sig.phys_hir_signature_hash.len() == 32 {
+                return hex::encode(&sig.phys_hir_signature_hash);
+            }
+        }
+        "none".to_string()
+    }
+
+    fn observe_probe(
+        &self,
+        principal_id: String,
+        operation_id: String,
+        topic_id: String,
+        semantic_hash: String,
+    ) -> Result<(), Status> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|v| v.as_millis() as u64)
+            .map_err(|_| Status::internal("system clock before unix epoch"))?;
+        let (verdict, snapshot) = self.probe_detector.lock().observe(
+            &ProbeObservation {
+                principal_id: principal_id.clone(),
+                operation_id: operation_id.clone(),
+                topic_id: topic_id.clone(),
+                semantic_hash,
+            },
+            now_ms,
+        );
+        self.telemetry
+            .set_probe_risk_score(&operation_id, snapshot.total_requests_window as f64);
+        match verdict {
+            ProbeVerdict::Clean => Ok(()),
+            ProbeVerdict::Throttle {
+                reason,
+                retry_after_ms,
+            } => {
+                tracing::warn!(target: "evidenceos.probe", reason=%reason, principal_id=%principal_id, operation_id=%operation_id, topic_id=%topic_id, retry_after_ms=retry_after_ms, "probe throttled");
+                self.telemetry.record_probe_throttled(reason);
+                self.telemetry.record_probe_suspected(reason);
+                Err(Status::resource_exhausted(format!(
+                    "PROBE_THROTTLED: {reason}; retry_after_ms={retry_after_ms}"
+                )))
+            }
+            ProbeVerdict::Escalate { reason } => {
+                tracing::warn!(target: "evidenceos.probe", reason=%reason, principal_id=%principal_id, operation_id=%operation_id, topic_id=%topic_id, "probe escalated");
+                self.telemetry.record_probe_escalated(reason);
+                self.telemetry.record_probe_suspected(reason);
+                self.append_probe_event(
+                    &operation_id,
+                    &principal_id,
+                    &topic_id,
+                    reason,
+                    "ESCALATE",
+                )?;
+                Ok(())
+            }
+            ProbeVerdict::Freeze { reason } => {
+                tracing::error!(target: "evidenceos.probe", reason=%reason, principal_id=%principal_id, operation_id=%operation_id, topic_id=%topic_id, "probe frozen");
+                self.telemetry.record_probe_frozen(reason);
+                self.telemetry.record_probe_suspected(reason);
+                self.append_probe_event(&operation_id, &principal_id, &topic_id, reason, "FREEZE")?;
+                Err(Status::permission_denied(format!("PROBE_FROZEN: {reason}")))
+            }
+        }
+    }
+
+    fn append_probe_event(
+        &self,
+        operation_id: &str,
+        principal_id: &str,
+        topic_id: &str,
+        reason: &str,
+        action: &str,
+    ) -> Result<(), Status> {
+        let entry = serde_json::to_vec(&json!({
+            "kind": "probe_event",
+            "operation_id": operation_id,
+            "principal_hash": hex::encode(sha256_bytes(principal_id.as_bytes())),
+            "topic_hash": hex::encode(sha256_bytes(topic_id.as_bytes())),
+            "reason": reason,
+            "action": action,
+        }))
+        .map_err(|_| Status::internal("probe event encoding failed"))?;
+        self.state
+            .etl
+            .lock()
+            .append(&entry)
+            .map_err(|_| Status::internal("probe event append failed"))?;
         Ok(())
     }
 
@@ -1605,6 +1725,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::CreateClaimV2Request>,
     ) -> Result<Response<pb::CreateClaimV2Response>, Status> {
+        let principal_id = Self::principal_id_from_metadata(request.metadata());
         let req = request.into_inner();
         validate_required_str_field(&req.claim_name, "claim_name", 128)?;
         if req.epoch_size == 0 {
@@ -1722,6 +1843,12 @@ impl EvidenceOsV2 for EvidenceOsService {
             "create_claim_v2",
             Some(phys),
         );
+        self.observe_probe(
+            principal_id,
+            operation_id.clone(),
+            hex::encode(topic.topic_id),
+            Self::probe_semantic_hash(Some(&signals)),
+        )?;
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
@@ -1788,6 +1915,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimV2Request>,
     ) -> Result<Response<pb::ExecuteClaimV2Response>, Status> {
+        let principal_id = Self::principal_id_from_metadata(request.metadata());
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         let (
@@ -1829,6 +1957,12 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "execute_claim_v2",
                 Some(claim.phys_hir_hash),
             );
+            self.observe_probe(
+                principal_id.clone(),
+                claim.operation_id.clone(),
+                hex::encode(claim.topic_id),
+                hex::encode(claim.phys_hir_hash),
+            )?;
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let context = vault_context(claim)?;
@@ -2040,10 +2174,12 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::GetCapsuleRequest>,
     ) -> Result<Response<pb::GetCapsuleResponse>, Status> {
         let claim_id = request.into_inner().claim_id;
-        let resp = self
-            .fetch_capsule(Request::new(pb::FetchCapsuleRequest { claim_id }))
-            .await?
-            .into_inner();
+        let resp = <Self as EvidenceOsV2>::fetch_capsule(
+            self,
+            Request::new(pb::FetchCapsuleRequest { claim_id }),
+        )
+        .await?
+        .into_inner();
         Ok(Response::new(pb::GetCapsuleResponse {
             capsule_bytes: resp.capsule_bytes,
             capsule_hash: resp.capsule_hash,
@@ -2145,9 +2281,11 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::GetRevocationFeedRequest>,
     ) -> Result<Response<pb::GetRevocationFeedResponse>, Status> {
         let _ = request;
-        let response = self
-            .watch_revocations(Request::new(pb::WatchRevocationsRequest {}))
-            .await?;
+        let response = <Self as EvidenceOsV2>::watch_revocations(
+            self,
+            Request::new(pb::WatchRevocationsRequest {}),
+        )
+        .await?;
         let mut stream = response.into_inner();
         let item = stream
             .next()

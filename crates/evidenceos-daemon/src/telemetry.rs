@@ -30,7 +30,7 @@ pub struct LifecycleEvent<'a> {
     pub to: &'a str,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct TelemetryState {
     oracle_calls_total: HashMap<(String, String), u64>,
     lane_escalations_total: HashMap<(String, String), u64>,
@@ -38,9 +38,14 @@ struct TelemetryState {
     k_bits_remaining: HashMap<String, f64>,
     w_current: HashMap<String, f64>,
     frozen: HashMap<String, i64>,
+    probe_suspected_total: HashMap<String, u64>,
+    probe_throttled_total: HashMap<String, u64>,
+    probe_escalated_total: HashMap<String, u64>,
+    probe_frozen_total: HashMap<String, u64>,
+    probe_risk_score: HashMap<String, f64>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Telemetry {
     state: Arc<Mutex<TelemetryState>>,
 }
@@ -76,6 +81,49 @@ impl Telemetry {
         let mut guard = self.state.lock();
         let entry = guard.rejects_total.entry(reason.to_string()).or_insert(0);
         *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_probe_suspected(&self, reason: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .probe_suspected_total
+            .entry(reason.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_probe_throttled(&self, reason: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .probe_throttled_total
+            .entry(reason.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_probe_escalated(&self, reason: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .probe_escalated_total
+            .entry(reason.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_probe_frozen(&self, reason: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .probe_frozen_total
+            .entry(reason.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn set_probe_risk_score(&self, operation_id: &str, score: f64) {
+        let mut guard = self.state.lock();
+        guard
+            .probe_risk_score
+            .insert(operation_id.to_string(), score);
     }
 
     pub fn update_operation_gauges(
@@ -117,6 +165,43 @@ impl Telemetry {
         out.push_str("# TYPE rejects_total counter\n");
         for (reason, value) in &guard.rejects_total {
             let _ = writeln!(out, "rejects_total{{reason=\"{}\"}} {}", reason, value);
+        }
+
+        out.push_str("# TYPE probe_suspected_total counter\n");
+        for (reason, value) in &guard.probe_suspected_total {
+            let _ = writeln!(
+                out,
+                "probe_suspected_total{{reason=\"{}\"}} {}",
+                reason, value
+            );
+        }
+        out.push_str("# TYPE probe_throttled_total counter\n");
+        for (reason, value) in &guard.probe_throttled_total {
+            let _ = writeln!(
+                out,
+                "probe_throttled_total{{reason=\"{}\"}} {}",
+                reason, value
+            );
+        }
+        out.push_str("# TYPE probe_escalated_total counter\n");
+        for (reason, value) in &guard.probe_escalated_total {
+            let _ = writeln!(
+                out,
+                "probe_escalated_total{{reason=\"{}\"}} {}",
+                reason, value
+            );
+        }
+        out.push_str("# TYPE probe_frozen_total counter\n");
+        for (reason, value) in &guard.probe_frozen_total {
+            let _ = writeln!(out, "probe_frozen_total{{reason=\"{}\"}} {}", reason, value);
+        }
+        out.push_str("# TYPE probe_risk_score gauge\n");
+        for (operation_id, value) in &guard.probe_risk_score {
+            let _ = writeln!(
+                out,
+                "probe_risk_score{{operation_id=\"{}\"}} {}",
+                operation_id, value
+            );
         }
         out.push_str("# TYPE k_bits_remaining gauge\n");
         for (operation_id, value) in &guard.k_bits_remaining {

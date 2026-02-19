@@ -92,3 +92,17 @@ Each artifact contains: scenario metadata, request/response summaries, expected 
 The following ignored test is intentionally excluded from default CI runtime because it is a long-running system matrix job:
 
 - `crates/evidenceos-daemon/tests/aspec_rejections.rs` — `#[ignore = "long-running system matrix test"]`
+
+## Probe / distillation detection evidence
+
+Run the dedicated system evidence test:
+
+```bash
+cargo test -p evidenceos-daemon probing_detection_system -- --nocapture
+```
+
+Expected artifact:
+
+- `artifacts/probing/probing_detection_system.json`
+
+The test drives high-volume/high-diversity create-claim probing from one principal and verifies graded response (`RESOURCE_EXHAUSTED` throttle before `PERMISSION_DENIED` freeze), probe metrics in `/metrics`, and ETL `probe_event` evidence publication.
