@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -169,6 +170,8 @@ struct Claim {
     oracle_pins: Option<OraclePins>,
     #[serde(default)]
     freeze_preimage: Option<FreezePreimage>,
+    #[serde(default)]
+    operation_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,14 +304,21 @@ pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
     dependence_tax_multiplier: f64,
+    telemetry: Arc<Telemetry>,
 }
 
 impl EvidenceOsService {
     pub fn build(data_dir: &str) -> Result<Self, Status> {
-        Self::build_with_options(data_dir, false)
+        let telemetry =
+            Arc::new(Telemetry::new().map_err(|_| Status::internal("telemetry init failed"))?);
+        Self::build_with_options(data_dir, false, telemetry)
     }
 
-    pub fn build_with_options(data_dir: &str, durable_etl: bool) -> Result<Self, Status> {
+    pub fn build_with_options(
+        data_dir: &str,
+        durable_etl: bool,
+        telemetry: Arc<Telemetry>,
+    ) -> Result<Self, Status> {
         let root = PathBuf::from(data_dir);
         std::fs::create_dir_all(&root).map_err(|_| Status::internal("mkdir failed"))?;
 
@@ -372,6 +382,7 @@ impl EvidenceOsService {
             state,
             insecure_v1_enabled,
             dependence_tax_multiplier,
+            telemetry,
         })
     }
 
@@ -382,7 +393,29 @@ impl EvidenceOsService {
             .ok_or_else(|| Status::internal("active signing key missing"))
     }
 
-    fn transition_claim(claim: &mut Claim, to: ClaimState) -> Result<(), Status> {
+    fn lane_name(lane: Lane) -> &'static str {
+        match lane {
+            Lane::Fast => "fast",
+            Lane::Heavy => "heavy",
+        }
+    }
+
+    fn state_name(state: ClaimState) -> &'static str {
+        match state {
+            ClaimState::Uncommitted => "UNCOMMITTED",
+            ClaimState::Committed => "COMMITTED",
+            ClaimState::Sealed => "SEALED",
+            ClaimState::Executing => "EXECUTING",
+            ClaimState::Settled => "SETTLED",
+            ClaimState::Certified => "CERTIFIED",
+            ClaimState::Revoked => "REVOKED",
+            ClaimState::Tainted => "TAINTED",
+            ClaimState::Stale => "STALE",
+            ClaimState::Frozen => "FROZEN",
+        }
+    }
+
+    fn transition_claim_internal(claim: &mut Claim, to: ClaimState) -> Result<(), Status> {
         if claim.state == to {
             return Ok(());
         }
@@ -410,6 +443,44 @@ impl EvidenceOsService {
             .transition(target_core)
             .map_err(|_| Status::failed_precondition("invalid claim state transition"))?;
         claim.state = to;
+        Ok(())
+    }
+
+    fn transition_claim(
+        &self,
+        claim: &mut Claim,
+        to: ClaimState,
+        delta_k_bits: f64,
+        delta_w: f64,
+        decision: Option<i32>,
+    ) -> Result<(), Status> {
+        let from = claim.state;
+        Self::transition_claim_internal(claim, to)?;
+        let claim_id = hex::encode(claim.claim_id);
+        let topic_id = hex::encode(claim.topic_id);
+        let event = LifecycleEvent {
+            claim_id: &claim_id,
+            topic_id: &topic_id,
+            operation_id: &claim.operation_id,
+            lane: Self::lane_name(claim.lane),
+            delta_k_bits,
+            delta_w,
+            decision,
+            epoch: claim.epoch_counter,
+            from: Self::state_name(from),
+            to: Self::state_name(to),
+        };
+        self.telemetry.lifecycle_event(&event);
+        let remaining = claim
+            .ledger
+            .k_bits_budget
+            .map_or(0.0, |budget| (budget - claim.ledger.k_bits_total).max(0.0));
+        self.telemetry.update_operation_gauges(
+            &claim.operation_id,
+            remaining,
+            claim.ledger.wealth,
+            claim.ledger.frozen || claim.state == ClaimState::Frozen,
+        );
         Ok(())
     }
 
@@ -485,7 +556,7 @@ impl EvidenceOsService {
             sealed_preimage_hash,
         });
         claim.metadata_locked = true;
-        Self::transition_claim(claim, ClaimState::Sealed)
+        Self::transition_claim_internal(claim, ClaimState::Sealed)
     }
 
     fn maybe_mark_stale(claim: &mut Claim, current_epoch: u64) -> Result<(), Status> {
@@ -497,11 +568,11 @@ impl EvidenceOsService {
             return Ok(());
         }
         if current_epoch != pins.pinned_epoch {
-            Self::transition_claim(claim, ClaimState::Stale)?;
+            Self::transition_claim_internal(claim, ClaimState::Stale)?;
             return Ok(());
         }
         if current_epoch.saturating_sub(pins.pinned_epoch) > pins.ttl_epochs {
-            Self::transition_claim(claim, ClaimState::Stale)?;
+            Self::transition_claim_internal(claim, ClaimState::Stale)?;
         }
         Ok(())
     }
@@ -958,6 +1029,25 @@ fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
     Ok(now / epoch_size)
 }
 
+fn build_operation_id(
+    topic_id: [u8; 32],
+    lineage_root: Option<[u8; 32]>,
+    claim_hash: [u8; 32],
+    action_class: &str,
+    phys_signature_hash: Option<[u8; 32]>,
+) -> String {
+    let lineage = lineage_root.unwrap_or(claim_hash);
+    let phys = phys_signature_hash
+        .map(hex::encode)
+        .unwrap_or_else(|| "none".to_string());
+    derive_operation_id(vec![
+        ("topic_id", hex::encode(topic_id)),
+        ("lineage_root", hex::encode(lineage)),
+        ("action_class", action_class.to_string()),
+        ("phys_signature_hash", phys),
+    ])
+}
+
 fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
     let holdout_len = usize::try_from(claim.epoch_size)
         .map_err(|_| Status::invalid_argument("epoch_size too large"))?;
@@ -1041,6 +1131,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
+        let operation_id = build_operation_id(
+            topic_id,
+            None,
+            claim_id,
+            "create_claim_v1",
+            Some(phys_hir_hash),
+        );
         let claim = Claim {
             claim_id,
             topic_id,
@@ -1071,6 +1168,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             etl_index: None,
             oracle_pins: None,
             freeze_preimage: None,
+            operation_id,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -1132,7 +1230,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     "cannot commit artifacts after freeze",
                 ));
             }
-            Self::transition_claim(claim, ClaimState::Committed)?;
+            self.transition_claim(claim, ClaimState::Committed, 0.0, 0.0, None)?;
             claim.artifacts.clear();
             claim.dependency_items.clear();
             claim.dependency_merkle_root = None;
@@ -1279,10 +1377,20 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            let claim_id_hex = hex::encode(claim.claim_id);
+            let span = tracing::info_span!("execute_claim", operation_id=%claim.operation_id, claim_id=%claim_id_hex);
+            let _guard = span.enter();
             if claim.state == ClaimState::Settled || claim.state == ClaimState::Certified {
                 return Err(Status::failed_precondition("execution already settled"));
             }
-            Self::transition_claim(claim, ClaimState::Executing)?;
+            claim.operation_id = build_operation_id(
+                claim.topic_id,
+                claim.dependency_merkle_root,
+                claim.claim_id,
+                "execute_claim_v1",
+                Some(claim.phys_hir_hash),
+            );
+            self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let context = vault_context(claim)?;
@@ -1381,13 +1489,19 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .settle_e_value(e_value, "decision", json!({"decision": req.decision}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
 
-            Self::transition_claim(claim, ClaimState::Settled)?;
+            self.transition_claim(
+                claim,
+                ClaimState::Settled,
+                taxed_bits + vault_result.kout_bits_total,
+                e_value,
+                None,
+            )?;
             if claim.lane == Lane::Heavy {
-                Self::transition_claim(claim, ClaimState::Frozen)?;
+                self.transition_claim(claim, ClaimState::Frozen, 0.0, 0.0, None)?;
             } else if claim.ledger.can_certify() {
-                Self::transition_claim(claim, ClaimState::Certified)?;
+                self.transition_claim(claim, ClaimState::Certified, 0.0, 0.0, None)?;
             } else {
-                Self::transition_claim(claim, ClaimState::Revoked)?;
+                self.transition_claim(claim, ClaimState::Revoked, 0.0, 0.0, None)?;
             }
 
             let mut capsule = ClaimCapsule::new(
@@ -1573,6 +1687,10 @@ impl EvidenceOsV2 for EvidenceOsService {
         } else {
             requested
         };
+        if lane != requested {
+            self.telemetry
+                .record_lane_escalation(Self::lane_name(requested), Self::lane_name(lane));
+        }
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
@@ -1597,6 +1715,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
+        let operation_id = build_operation_id(
+            topic.topic_id,
+            dependency_merkle_root,
+            claim_id,
+            "create_claim_v2",
+            Some(phys),
+        );
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
@@ -1627,6 +1752,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             etl_index: None,
             oracle_pins: None,
             freeze_preimage: None,
+            operation_id,
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         self.state
@@ -1678,6 +1804,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            let claim_id_hex = hex::encode(claim.claim_id);
+            let span = tracing::info_span!("execute_claim_v2", operation_id=%claim.operation_id, claim_id=%claim_id_hex);
+            let _guard = span.enter();
             let current_epoch = current_logical_epoch(claim.epoch_size)?;
             Self::maybe_mark_stale(claim, current_epoch)?;
             if claim.state == ClaimState::Stale {
@@ -1693,7 +1822,14 @@ impl EvidenceOsV2 for EvidenceOsService {
             if claim.freeze_preimage.is_none() {
                 return Err(Status::failed_precondition("freeze gates not completed"));
             }
-            Self::transition_claim(claim, ClaimState::Executing)?;
+            claim.operation_id = build_operation_id(
+                claim.topic_id,
+                claim.dependency_merkle_root,
+                claim.claim_id,
+                "execute_claim_v2",
+                Some(claim.phys_hir_hash),
+            );
+            self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let context = vault_context(claim)?;
             let vault_result =
@@ -1704,6 +1840,11 @@ impl EvidenceOsV2 for EvidenceOsService {
                         return Err(map_vault_error(err));
                     }
                 };
+            self.telemetry.record_oracle_calls(
+                Self::lane_name(claim.lane),
+                "vault_oracle_bucket",
+                u64::from(vault_result.oracle_calls),
+            );
             let canonical_output = vault_result.canonical_output;
             let fuel_used = vault_result.fuel_used;
             let trace_hash = vault_result.judge_trace_hash;
@@ -1781,22 +1922,34 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .ledger
                 .settle_e_value(e_value, "decision", json!({"e_value_total": e_value}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
-            Self::transition_claim(claim, ClaimState::Settled)?;
+            self.transition_claim(
+                claim,
+                ClaimState::Settled,
+                taxed_bits + vault_result.kout_bits_total,
+                e_value,
+                None,
+            )?;
             let can_certify = claim.ledger.can_certify();
             let decision = if claim.ledger.frozen || claim.lane == Lane::Heavy {
-                Self::transition_claim(claim, ClaimState::Frozen)?;
+                self.transition_claim(claim, ClaimState::Frozen, 0.0, 0.0, None)?;
                 pb::Decision::Defer as i32
             } else if can_certify {
-                Self::transition_claim(claim, ClaimState::Certified)?;
+                self.transition_claim(claim, ClaimState::Certified, 0.0, 0.0, None)?;
                 pb::Decision::Approve as i32
             } else {
-                Self::transition_claim(claim, ClaimState::Revoked)?;
+                self.transition_claim(claim, ClaimState::Revoked, 0.0, 0.0, None)?;
                 pb::Decision::Reject as i32
             };
             let reason_codes = match decision {
                 x if x == pb::Decision::Approve as i32 => vec![1],
-                x if x == pb::Decision::Defer as i32 => vec![3],
-                _ => vec![2],
+                x if x == pb::Decision::Defer as i32 => {
+                    self.telemetry.record_reject("defer");
+                    vec![3]
+                }
+                _ => {
+                    self.telemetry.record_reject("reject");
+                    vec![2]
+                }
             };
             let canonical_output = kernel_structured_output(
                 &claim.output_schema_id,

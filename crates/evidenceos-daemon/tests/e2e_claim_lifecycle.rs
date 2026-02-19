@@ -14,13 +14,16 @@
 //
 #![allow(dead_code)]
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use evidenceos_daemon::server::EvidenceOsService;
+use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{transport::Channel, transport::Server, Code};
@@ -517,6 +520,65 @@ async fn topic_budget_is_shared_across_claims() {
             assert_eq!(status.message(), "topic budget exhausted");
         }
     }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn metrics_endpoint_increments_after_lifecycle() {
+    let dir = TempDir::new().expect("tmp");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+    let metrics_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("metrics bind");
+    let metrics_addr = metrics_listener.local_addr().expect("metrics addr");
+    drop(metrics_listener);
+    let _metrics = telemetry
+        .clone()
+        .spawn_metrics_server(metrics_addr)
+        .await
+        .expect("metrics server");
+
+    let svc = EvidenceOsService::build_with_options(&data_dir.to_string_lossy(), false, telemetry)
+        .expect("service");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let incoming = TcpListenerStream::new(listener);
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(EvidenceOsServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+            .expect("server run");
+    });
+
+    let mut c = client(addr).await;
+    let claim_id = create_claim_v2(&mut c, 19).await;
+    commit_freeze_seal(&mut c, claim_id.clone(), valid_wasm()).await;
+    let _ = c
+        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id })
+        .await
+        .expect("execute");
+
+    let mut stream = tokio::net::TcpStream::connect(metrics_addr)
+        .await
+        .expect("metrics connect");
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("metrics write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("metrics read");
+    let text = String::from_utf8(raw).expect("utf8");
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("http body")
+        .to_string();
+    assert!(body.contains("oracle_calls_total"));
+    assert!(body.contains("k_bits_remaining"));
 
     handle.abort();
 }
