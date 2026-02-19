@@ -339,10 +339,26 @@ pub struct Etl {
     leaves: Vec<Hash32>,
     offsets: Vec<u64>,
     revoked: HashSet<String>,
+    recovered_from_partial_write: bool,
+    durable: bool,
+}
+
+fn record_checksum(len_bytes: [u8; 4], payload: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&len_bytes);
+    hasher.update(payload);
+    hasher.finalize()
 }
 
 impl Etl {
     pub fn open_or_create(path: impl AsRef<Path>) -> EvidenceOSResult<Self> {
+        Self::open_or_create_with_options(path, false)
+    }
+
+    pub fn open_or_create_with_options(
+        path: impl AsRef<Path>,
+        durable: bool,
+    ) -> EvidenceOSResult<Self> {
         let path = path.as_ref().to_path_buf();
         let file = OpenOptions::new()
             .create(true)
@@ -354,32 +370,74 @@ impl Etl {
         let mut offsets = Vec::new();
         let mut pos = 0u64;
         let mut all_entries = Vec::new();
+        let mut recovered_from_partial_write = false;
+
         let mut reader = BufReader::new(
             OpenOptions::new()
                 .read(true)
                 .open(&path)
                 .map_err(|_| EvidenceOSError::Internal)?,
         );
+        let file_len = reader
+            .get_ref()
+            .metadata()
+            .map_err(|_| EvidenceOSError::Internal)?
+            .len();
+
         loop {
+            if pos >= file_len {
+                break;
+            }
             offsets.push(pos);
             let mut len_bytes = [0u8; 4];
             match reader.read_exact(&mut len_bytes) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     offsets.pop();
+                    recovered_from_partial_write = true;
                     break;
                 }
                 Err(_) => return Err(EvidenceOSError::Internal),
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
+            let record_end = pos.saturating_add(8).saturating_add(len as u64);
+            if record_end > file_len {
+                offsets.pop();
+                recovered_from_partial_write = true;
+                break;
+            }
+
             let mut data = vec![0u8; len];
-            reader
-                .read_exact(&mut data)
-                .map_err(|_| EvidenceOSError::Internal)?;
+            if reader.read_exact(&mut data).is_err() {
+                offsets.pop();
+                recovered_from_partial_write = true;
+                break;
+            }
+            let mut checksum_bytes = [0u8; 4];
+            if reader.read_exact(&mut checksum_bytes).is_err() {
+                offsets.pop();
+                recovered_from_partial_write = true;
+                break;
+            }
+
+            let expected = u32::from_le_bytes(checksum_bytes);
+            let actual = record_checksum(len_bytes, &data);
+            if expected != actual {
+                offsets.pop();
+                recovered_from_partial_write = true;
+                break;
+            }
+
             leaves.push(leaf_hash(&data));
             all_entries.push(data);
-            pos = pos.saturating_add(4 + len as u64);
+            pos = record_end;
         }
+
+        if recovered_from_partial_write {
+            file.set_len(pos).map_err(|_| EvidenceOSError::Internal)?;
+            file.sync_all().map_err(|_| EvidenceOSError::Internal)?;
+        }
+
         let revoked = rebuild_revocation_closure(&all_entries);
         Ok(Self {
             path,
@@ -387,27 +445,43 @@ impl Etl {
             leaves,
             offsets,
             revoked,
+            recovered_from_partial_write,
+            durable,
         })
     }
 
     pub fn append(&mut self, data: &[u8]) -> EvidenceOSResult<(u64, Hash32)> {
         let len = validate_entry_len(data.len())?;
+        let len_bytes = len.to_le_bytes();
+        let checksum = record_checksum(len_bytes, data);
         let start = self
             .file
             .seek(SeekFrom::End(0))
             .map_err(|_| EvidenceOSError::Internal)?;
         self.file
-            .write_all(&len.to_le_bytes())
+            .write_all(&len_bytes)
             .map_err(|_| EvidenceOSError::Internal)?;
         self.file
             .write_all(data)
             .map_err(|_| EvidenceOSError::Internal)?;
+        self.file
+            .write_all(&checksum.to_le_bytes())
+            .map_err(|_| EvidenceOSError::Internal)?;
         self.file.flush().map_err(|_| EvidenceOSError::Internal)?;
+        if self.durable {
+            self.file
+                .sync_data()
+                .map_err(|_| EvidenceOSError::Internal)?;
+        }
         self.offsets.push(start);
         let h = leaf_hash(data);
         let idx = self.leaves.len() as u64;
         self.leaves.push(h);
         Ok((idx, h))
+    }
+
+    pub fn recovered_from_partial_write(&self) -> bool {
+        self.recovered_from_partial_write
     }
 
     pub fn revoke(
@@ -534,6 +608,14 @@ impl Etl {
         let mut data = vec![0u8; len];
         f.read_exact(&mut data)
             .map_err(|_| EvidenceOSError::Internal)?;
+        let mut checksum_bytes = [0u8; 4];
+        f.read_exact(&mut checksum_bytes)
+            .map_err(|_| EvidenceOSError::Internal)?;
+        let expected = u32::from_le_bytes(checksum_bytes);
+        let actual = record_checksum(len_bytes, &data);
+        if expected != actual {
+            return Err(EvidenceOSError::Internal);
+        }
         Ok(data)
     }
 }
@@ -608,6 +690,21 @@ mod tests {
         );
         assert!(validate_entry_len((u32::MAX as usize).saturating_add(1)).is_err());
         assert!(validate_entry_len(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn checksum_matches_known_record() {
+        let len_bytes = (3u32).to_le_bytes();
+        let checksum = record_checksum(len_bytes, b"abc");
+        assert_eq!(checksum, 0x66e15d33);
+    }
+
+    #[test]
+    fn checksum_detects_tamper() {
+        let len_bytes = (4u32).to_le_bytes();
+        let checksum = record_checksum(len_bytes, b"data");
+        let tampered = record_checksum(len_bytes, b"dAta");
+        assert_ne!(checksum, tampered);
     }
 
     #[test]
@@ -774,6 +871,96 @@ mod tests {
                 prop_assert!(!verify_inclusion_proof(&tampered, &leaf, idx, size, &root));
             }
         }
+    }
+
+    proptest! {
+        #[test]
+        fn etl_random_records_roundtrip_and_single_bit_corruption_detected(
+            entries in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..64), 1..40),
+            entry_idx in 0usize..64,
+            bit_idx in 0usize..7,
+        ) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("etl-corruption.log");
+            let mut etl = Etl::open_or_create(&path).expect("etl");
+
+            for entry in &entries {
+                etl.append(entry).expect("append");
+            }
+            for (idx, entry) in entries.iter().enumerate() {
+                prop_assert_eq!(etl.read_entry(idx as u64).expect("read"), entry.clone());
+            }
+
+            let offset_idx = entry_idx % entries.len();
+            let start = etl.offsets[offset_idx];
+            drop(etl);
+
+            let len = entries[offset_idx].len() as u64;
+            let payload_pos = start + 4 + (bit_idx as u64 % len.max(1));
+            let mut f = OpenOptions::new().read(true).write(true).open(&path).expect("open");
+            f.seek(SeekFrom::Start(payload_pos)).expect("seek");
+            let mut b = [0u8;1];
+            f.read_exact(&mut b).expect("read byte");
+            b[0] ^= 1u8 << (bit_idx % 8);
+            f.seek(SeekFrom::Start(payload_pos)).expect("seek2");
+            f.write_all(&b).expect("write byte");
+            f.flush().expect("flush");
+
+            let reopened = Etl::open_or_create(&path).expect("reopen");
+            prop_assert!(reopened.recovered_from_partial_write());
+            prop_assert_eq!(reopened.tree_size() as usize, offset_idx);
+        }
+    }
+
+    #[test]
+    fn etl_salvages_partial_trailing_record_and_continues() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl-partial.log");
+
+        let mut etl = Etl::open_or_create(&path).expect("etl");
+        let (idx0, leaf0) = etl.append(b"first").expect("append first");
+        etl.append(b"second").expect("append second");
+
+        let proof0_before = etl.inclusion_proof(idx0).expect("proof before");
+        let root_before = etl.root_hash();
+        assert!(verify_inclusion_proof_ct(
+            &leaf0,
+            idx0 as usize,
+            etl.tree_size() as usize,
+            &proof0_before,
+            &root_before
+        ));
+
+        drop(etl);
+
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open append");
+        let payload = b"broken-record";
+        let len = payload.len() as u32;
+        f.write_all(&len.to_le_bytes()).expect("write len");
+        f.write_all(&payload[..payload.len() / 2])
+            .expect("write half payload");
+        f.flush().expect("flush");
+        drop(f);
+
+        let mut recovered = Etl::open_or_create(&path).expect("reopen recovered");
+        assert!(recovered.recovered_from_partial_write());
+        assert_eq!(recovered.tree_size(), 2);
+
+        let proof0_after = recovered.inclusion_proof(idx0).expect("proof after");
+        let root_after = recovered.root_hash();
+        assert!(verify_inclusion_proof_ct(
+            &leaf0,
+            idx0 as usize,
+            recovered.tree_size() as usize,
+            &proof0_after,
+            &root_after
+        ));
+
+        recovered.append(b"third").expect("append after recovery");
+        assert_eq!(recovered.tree_size(), 3);
     }
 
     #[test]
