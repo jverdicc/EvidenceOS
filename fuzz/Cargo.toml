@@ -16,6 +16,7 @@ prost = "0.13"
 tempfile = "3"
 arbitrary = { version = "1", features = ["derive"] }
 rand = "0.8"
+serde_json = "1"
 
 [[bin]]
 name = "fuzz_aspec_verify"
@@ -62,6 +63,13 @@ bench = false
 [[bin]]
 name = "fuzz_daemon_decode_limits"
 path = "fuzz_targets/fuzz_daemon_decode_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grpc_claim_capsule_kernel"
+path = "fuzz_targets/fuzz_grpc_claim_capsule_kernel.rs"
 test = false
 doc = false
 bench = false
