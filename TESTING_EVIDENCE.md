@@ -9,6 +9,7 @@
 ## Captured Example (abridged)
 
 ```text
+Coverage policy consistency check passed (threshold: 95%)
 == cargo fmt ==
 == cargo clippy ==
 == cargo test ==
@@ -26,5 +27,6 @@
 
 ## Gates
 
+- Coverage policy consistency gate enforced by `./scripts/check_coverage_policy.py`, which verifies that `scripts/test_evidence.sh` (source of truth) matches `Makefile`, `docs/TEST_EVIDENCE.md`, `README.md`, and this file.
 - Coverage threshold gate enforced by `cargo llvm-cov --fail-under-lines 95`.
 - Fuzz smoke tests run each target for 30 seconds to catch panic-level regressions.
