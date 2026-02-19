@@ -168,7 +168,7 @@ Read APIs are available for capsule retrieval, daemon public-key retrieval (`Get
 
 Signature verification is in-band: clients fetch the Ed25519 public key and `key_id` (`sha256(public_key)`) via `GetPublicKey`, then verify SignedTreeHead and revocation-feed signatures against domain-separated prehashes (`evidenceos:sth:v1` and `evidenceos:revocations:v1`).
 
-Key rotation strategy: rotation is not supported yet. The daemon persists a single signing key under `keys/etl_signing_ed25519`; replacing this key changes `key_id` and will invalidate verification for signatures produced under the previous key unless clients retain historical keys keyed by `key_id`.
+Key rotation strategy: the daemon supports keyrings under `<data-dir>/keys/` and signs new STHs with the active `key_id` while preserving historical verification via `GetPublicKey(key_id=...)` for prior keys.
 
 ## Research & Citation
 
@@ -199,3 +199,33 @@ All deployment entrypoints should pass `--data-dir` (not the removed `--etl-path
 - Legacy `ExecuteClaim` (v1) is disabled by default and can be re-enabled only with `EVIDENCEOS_ENABLE_INSECURE_V1=true`.
 - `topic_id` should now be kernel-computed from V2 metadata and topic signals.
 - CI and local validation are standardized via `./scripts/test_evidence.sh` with a 95% line-coverage gate.
+
+## What-if Scenarios Matrix
+
+| Scenario | Adversarial vector | Mechanism | Expected outcome | Evidence link | Status |
+|---|---|---|---|---|---|
+| Deterministic lifecycle succeeds | Valid claim through full lifecycle | ASPEC + lifecycle guards + ETL inclusion/consistency/signature proofs | PASS | `scenarios_produce_deterministic_public_evidence` + `artifacts/scenarios/lifecycle_pass.json` | Live |
+| Invalid claim input rejected | Malformed create request (`oracle_num_symbols=1`, empty name) | gRPC validation fail-closed | REJECT | `scenarios_produce_deterministic_public_evidence` + `artifacts/scenarios/reject_invalid_claim.json` | Live |
+| Plaintext against TLS-only daemon | Transport downgrade attempt | TLS enforcement | REJECT | `transport_hardening_system::tls_required_rejects_plaintext` | Live |
+| Missing mTLS client cert | Unauthorized client identity | mTLS authN | UNAUTHENTICATED | `transport_hardening_system::mtls_rejects_no_client_cert` | Live |
+| Missing bearer token | API call without authorization | Request interceptor authN | UNAUTHENTICATED | `transport_hardening_system::auth_rejects_missing_token` | Live |
+| Wrong bearer token | Credential guessing/replay | Request interceptor authN | UNAUTHENTICATED | `auth.rs::tests::wrong_token_rejected` | Live |
+| Oversized decode payload | Input amplification | `decode_with_max_size` guard | RESOURCE_LIMIT | `fuzz_daemon_decode_limits` + auth decode unit tests | Experimental |
+| Pre-seal execution attempt | Lifecycle bypass | claim state machine checks | REJECT | `lifecycle_v2::cannot_execute_before_seal` | Live |
+| ETL inclusion tampering | Fake inclusion path | Merkle inclusion verifier | REJECT | `etl_verification_system::verifies_inclusion_consistency_and_sth_signature` | Live |
+| ETL consistency tampering | Forked tree-history claim | Merkle consistency verifier | REJECT | `etl_verification_system::verifies_inclusion_consistency_and_sth_signature` | Live |
+| Key rotation historical verification | Trust confusion across signing-key changes | key_id-indexed keyring lookup | PASS | `etl_verification_system::key_rotation_preserves_old_head_verification` | Live |
+| Randomized rotation sequence | Repeated rotate+append stress | historical key verification + STH signature checks | PASS | `etl_verification_system::property_random_rotation_and_append_stays_verifiable` | Experimental |
+
+### How to reproduce scenario evidence
+
+```bash
+./scripts/run_scenarios.sh
+cat artifacts/scenarios/summary.json
+```
+
+For CI-equivalent outputs (coverage/fuzz logs plus scenario artifacts):
+
+```bash
+make test-evidence
+```
