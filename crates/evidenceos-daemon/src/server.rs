@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -46,7 +47,10 @@ use evidenceos_core::topicid::{
 };
 use evidenceos_protocol::pb;
 
-use pb::evidence_os_server::EvidenceOs;
+use pb::evidence_os_server::EvidenceOs as EvidenceOsV2;
+use pb::v1;
+use pb::v1::evidence_os_server::EvidenceOs as EvidenceOsV1;
+use pb::v2;
 
 const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
@@ -991,7 +995,7 @@ fn map_vault_error(err: VaultError) -> Status {
 }
 
 #[tonic::async_trait]
-impl EvidenceOs for EvidenceOsService {
+impl EvidenceOsV2 for EvidenceOsService {
     type WatchRevocationsStream = Pin<
         Box<
             dyn tokio_stream::Stream<Item = Result<pb::WatchRevocationsResponse, Status>>
@@ -1506,6 +1510,14 @@ impl EvidenceOs for EvidenceOsService {
             "metadata.output_schema_id",
             MAX_METADATA_FIELD_LEN,
         )?;
+        let canonical_output_schema_id =
+            structured_claims::canonicalize_schema_id(&metadata.output_schema_id)
+                .map_err(|_| {
+                    Status::invalid_argument(
+                "unsupported metadata.output_schema_id; canonicalize to cbrn-sc.v1 or legacy/v1",
+            )
+                })?
+                .to_string();
         let signals = req
             .signals
             .ok_or_else(|| Status::invalid_argument("signals are required"))?;
@@ -1543,7 +1555,7 @@ impl EvidenceOs for EvidenceOsService {
                 lane: metadata.lane.clone(),
                 alpha_micros: metadata.alpha_micros,
                 epoch_config_ref: metadata.epoch_config_ref,
-                output_schema_id: metadata.output_schema_id.clone(),
+                output_schema_id: canonical_output_schema_id.clone(),
             },
             &TopicSignals {
                 semantic_hash,
@@ -1593,7 +1605,7 @@ impl EvidenceOs for EvidenceOsService {
             holdout_ref: req.holdout_ref,
             metadata_locked: false,
             claim_name: req.claim_name,
-            output_schema_id: metadata.output_schema_id,
+            output_schema_id: canonical_output_schema_id,
             phys_hir_hash: phys,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
@@ -2154,6 +2166,192 @@ impl EvidenceOs for EvidenceOsService {
 }
 
 use tokio_stream::StreamExt;
+
+fn transcode_message<T, U>(value: T) -> Result<U, Status>
+where
+    T: Message,
+    U: Message + Default,
+{
+    let mut buf = Vec::new();
+    value
+        .encode(&mut buf)
+        .map_err(|_| Status::internal("protobuf transcode encode failure"))?;
+    U::decode(buf.as_slice()).map_err(|_| Status::internal("protobuf transcode decode failure"))
+}
+
+#[tonic::async_trait]
+impl EvidenceOsV1 for EvidenceOsService {
+    type WatchRevocationsStream = Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<v1::WatchRevocationsResponse, Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    async fn health(
+        &self,
+        request: Request<v1::HealthRequest>,
+    ) -> Result<Response<v1::HealthResponse>, Status> {
+        let req_v2: v2::HealthRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::health(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn create_claim(
+        &self,
+        request: Request<v1::CreateClaimRequest>,
+    ) -> Result<Response<v1::CreateClaimResponse>, Status> {
+        let req_v2: v2::CreateClaimRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::create_claim(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn create_claim_v2(
+        &self,
+        request: Request<v1::CreateClaimV2Request>,
+    ) -> Result<Response<v1::CreateClaimV2Response>, Status> {
+        let req_v2: v2::CreateClaimV2Request = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::create_claim_v2(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn commit_artifacts(
+        &self,
+        request: Request<v1::CommitArtifactsRequest>,
+    ) -> Result<Response<v1::CommitArtifactsResponse>, Status> {
+        let req_v2: v2::CommitArtifactsRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::commit_artifacts(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn freeze_gates(
+        &self,
+        request: Request<v1::FreezeGatesRequest>,
+    ) -> Result<Response<v1::FreezeGatesResponse>, Status> {
+        let req_v2: v2::FreezeGatesRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::freeze_gates(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn seal_claim(
+        &self,
+        request: Request<v1::SealClaimRequest>,
+    ) -> Result<Response<v1::SealClaimResponse>, Status> {
+        let req_v2: v2::SealClaimRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::seal_claim(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn execute_claim(
+        &self,
+        request: Request<v1::ExecuteClaimRequest>,
+    ) -> Result<Response<v1::ExecuteClaimResponse>, Status> {
+        let req_v2: v2::ExecuteClaimRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::execute_claim(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn execute_claim_v2(
+        &self,
+        request: Request<v1::ExecuteClaimV2Request>,
+    ) -> Result<Response<v1::ExecuteClaimV2Response>, Status> {
+        let req_v2: v2::ExecuteClaimV2Request = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::execute_claim_v2(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_capsule(
+        &self,
+        request: Request<v1::GetCapsuleRequest>,
+    ) -> Result<Response<v1::GetCapsuleResponse>, Status> {
+        let req_v2: v2::GetCapsuleRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::get_capsule(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_public_key(
+        &self,
+        request: Request<v1::GetPublicKeyRequest>,
+    ) -> Result<Response<v1::GetPublicKeyResponse>, Status> {
+        let req_v2: v2::GetPublicKeyRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::get_public_key(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_signed_tree_head(
+        &self,
+        request: Request<v1::GetSignedTreeHeadRequest>,
+    ) -> Result<Response<v1::GetSignedTreeHeadResponse>, Status> {
+        let req_v2: v2::GetSignedTreeHeadRequest = transcode_message(request.into_inner())?;
+        let response =
+            <Self as EvidenceOsV2>::get_signed_tree_head(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_inclusion_proof(
+        &self,
+        request: Request<v1::GetInclusionProofRequest>,
+    ) -> Result<Response<v1::GetInclusionProofResponse>, Status> {
+        let req_v2: v2::GetInclusionProofRequest = transcode_message(request.into_inner())?;
+        let response =
+            <Self as EvidenceOsV2>::get_inclusion_proof(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_consistency_proof(
+        &self,
+        request: Request<v1::GetConsistencyProofRequest>,
+    ) -> Result<Response<v1::GetConsistencyProofResponse>, Status> {
+        let req_v2: v2::GetConsistencyProofRequest = transcode_message(request.into_inner())?;
+        let response =
+            <Self as EvidenceOsV2>::get_consistency_proof(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn get_revocation_feed(
+        &self,
+        request: Request<v1::GetRevocationFeedRequest>,
+    ) -> Result<Response<v1::GetRevocationFeedResponse>, Status> {
+        let req_v2: v2::GetRevocationFeedRequest = transcode_message(request.into_inner())?;
+        let response =
+            <Self as EvidenceOsV2>::get_revocation_feed(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn fetch_capsule(
+        &self,
+        request: Request<v1::FetchCapsuleRequest>,
+    ) -> Result<Response<v1::FetchCapsuleResponse>, Status> {
+        let req_v2: v2::FetchCapsuleRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::fetch_capsule(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn revoke_claim(
+        &self,
+        request: Request<v1::RevokeClaimRequest>,
+    ) -> Result<Response<v1::RevokeClaimResponse>, Status> {
+        let req_v2: v2::RevokeClaimRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::revoke_claim(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn watch_revocations(
+        &self,
+        request: Request<v1::WatchRevocationsRequest>,
+    ) -> Result<Response<Self::WatchRevocationsStream>, Status> {
+        let req_v2: v2::WatchRevocationsRequest = transcode_message(request.into_inner())?;
+        let response =
+            <Self as EvidenceOsV2>::watch_revocations(self, Request::new(req_v2)).await?;
+        let stream = response
+            .into_inner()
+            .map(|item| item.and_then(transcode_message));
+        Ok(Response::new(
+            Box::pin(stream) as Self::WatchRevocationsStream
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

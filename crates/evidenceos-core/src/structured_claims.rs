@@ -5,6 +5,14 @@ pub const SCHEMA_ID: &str = "cbrn-sc.v1";
 pub const SCHEMA_ID_ALIAS: &str = "cbrn/v1";
 pub const LEGACY_SCHEMA_ID: &str = "legacy/v1";
 
+const SCHEMA_ALIASES: &[&str] = &[
+    SCHEMA_ID,
+    SCHEMA_ID_ALIAS,
+    "schema/v1",
+    "cbrn_sc.v1",
+    "cbrn-sc/v1",
+];
+
 const MAX_REFERENCES: usize = 16;
 const MAX_REFERENCE_BYTES: usize = 128;
 const MAX_STR_BYTES: usize = 128;
@@ -63,21 +71,27 @@ fn read_required_u64(obj: &Map<String, Value>, key: &str) -> EvidenceOSResult<u6
     n.as_u64().ok_or(EvidenceOSError::InvalidArgument)
 }
 
+pub fn canonicalize_schema_id(output_schema_id: &str) -> EvidenceOSResult<&'static str> {
+    if output_schema_id == LEGACY_SCHEMA_ID {
+        return Ok(LEGACY_SCHEMA_ID);
+    }
+    if SCHEMA_ALIASES.contains(&output_schema_id) {
+        return Ok(SCHEMA_ID);
+    }
+    Err(EvidenceOSError::InvalidArgument)
+}
 pub fn validate_and_canonicalize(
     output_schema_id: &str,
     payload: &[u8],
 ) -> EvidenceOSResult<StructuredClaimValidation> {
-    if output_schema_id == LEGACY_SCHEMA_ID {
+    let canonical_schema_id = canonicalize_schema_id(output_schema_id)?;
+    if canonical_schema_id == LEGACY_SCHEMA_ID {
         return Ok(StructuredClaimValidation {
             canonical_bytes: payload.to_vec(),
             kout_bits_upper_bound: kout_bits_upper_bound(payload),
             max_bytes_upper_bound: max_bytes_upper_bound(),
         });
     }
-    if output_schema_id != SCHEMA_ID && output_schema_id != SCHEMA_ID_ALIAS {
-        return Err(EvidenceOSError::InvalidArgument);
-    }
-
     let parsed: Value =
         serde_json::from_slice(payload).map_err(|_| EvidenceOSError::InvalidArgument)?;
     reject_floats(&parsed)?;
@@ -264,7 +278,13 @@ mod tests {
     #[test]
     fn accepts_alias_schema_id() {
         let payload = serde_json::to_vec(&valid_payload()).expect("json");
-        assert!(validate_and_canonicalize(SCHEMA_ID_ALIAS, &payload).is_ok());
+        for alias in [SCHEMA_ID_ALIAS, "schema/v1", "cbrn_sc.v1", "cbrn-sc/v1"] {
+            assert!(validate_and_canonicalize(alias, &payload).is_ok());
+            assert_eq!(
+                canonicalize_schema_id(alias).expect("canonical alias"),
+                SCHEMA_ID
+            );
+        }
     }
 
     #[test]

@@ -1,43 +1,64 @@
-# Test Evidence Harness
+# Test Evidence
 
-Evidence artifacts are generated with Makefile targets at repository root.
+This document describes how to reproduce protocol, transport, and kernel evidence locally in under 15 minutes on a typical developer machine.
 
-## Commands
+## Prerequisites
 
-- `make fmt`
-- `make lint`
-- `make test`
-- `make test-evidence`
-- `make audit`
+- Rust toolchain from `rust-toolchain.toml`.
+- No external `protoc` install needed (vendored protoc is used).
 
-### Tooling prerequisites
+## Fast reproducibility path
 
-- `cargo llvm-cov` is required for `make test-evidence`.
-  - Install with: `cargo install cargo-llvm-cov`
-- `cargo audit` is required for `make audit`.
-  - Install with: `cargo install cargo-audit`
+Run the same checks expected in CI:
 
-## Artifact outputs
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
-`make test-evidence` writes:
+For protocol/transport focused verification, run the targeted suite:
 
-- `artifacts/coverage.lcov`
-- `artifacts/test_output.txt`
-- `artifacts/clippy-report.txt`
-- `artifacts/fuzz_*.log`
+```bash
+cargo test -p evidenceos-protocol
+cargo test -p evidenceos-daemon protocol_compat_system
+cargo test -p evidenceos-daemon transport_hardening_system
+cargo test -p evidenceos-daemon schema_aliases_system
+```
 
-`make audit` writes:
+## Evidence captured by these tests
 
-- `artifacts/audit.log`
+### Protocol compatibility
 
-## Required thresholds
+- `daemon_protocol_v1_and_v2_smoke`
+  - proves daemon serves both `evidenceos.v1` and `evidenceos.v2` client paths.
+- `proto_roundtrip_backcompat_capsule`
+  - proves shared fields match when fetched through v1 and v2 clients.
 
-- Workspace line coverage: **>= 95%** (enforced by `cargo llvm-cov --fail-under-lines 95`).
-- No ignored tests unless explicitly documented with rationale.
+### Transport hardening
 
-The `make test-evidence` target delegates to `./scripts/test_evidence.sh`, which is the single source of truth for coverage gating and ignored-test enforcement.
+- `tls_required_rejects_plaintext`
+  - plaintext gRPC traffic fails against TLS-only daemon.
+- `mtls_rejects_no_client_cert`
+  - client-authenticated TLS enforcement rejects clients with no cert.
+- `auth_rejects_missing_token`
+  - interceptor rejects missing bearer tokens with `UNAUTHENTICATED`.
+- `auth_accepts_valid_token`
+  - valid bearer token succeeds.
 
+### Schema alias stability
 
-## Allowed ignored tests
+- `structured_claims_accepts_known_aliases`
+  - known DiscOS schema aliases are accepted.
+- `topic_id_stability_under_aliases`
+  - canonicalization removes alias-induced topic drift.
 
-- `crates/evidenceos-daemon/tests/aspec_rejections.rs` `#[ignore = "long-running system matrix test"]` (scheduled workflow only).
+## Artifact strategy
+
+Use existing project scripts when generating auditable CI-style logs:
+
+```bash
+make test-evidence
+```
+
+This writes logs and coverage artifacts under `artifacts/` (coverage, test output, clippy output, fuzz logs).

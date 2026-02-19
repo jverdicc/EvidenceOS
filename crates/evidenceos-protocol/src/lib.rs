@@ -22,7 +22,15 @@
 use core::fmt;
 
 pub mod pb {
-    tonic::include_proto!("evidenceos.v1");
+    pub mod v1 {
+        tonic::include_proto!("evidenceos.v1");
+    }
+
+    pub mod v2 {
+        tonic::include_proto!("evidenceos.v2");
+    }
+
+    pub use v2::*;
 }
 
 pub type ClaimId = [u8; 32];

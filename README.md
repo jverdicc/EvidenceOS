@@ -146,7 +146,10 @@ cargo fuzz run fuzz_structured_claim_validate
 
 EvidenceOS exposes gRPC/Protobuf APIs defined in:
 
-- `proto/evidenceos.proto`
+- `crates/evidenceos-protocol/proto/evidenceos.proto` (`evidenceos.v2`, canonical)
+- `crates/evidenceos-protocol/proto/evidenceos_v1.proto` (`evidenceos.v1`, compatibility)
+
+Versioning and deprecation policy are documented in `docs/PROTOCOL_VERSIONING.md`.
 
 The DiscOS repository includes:
 

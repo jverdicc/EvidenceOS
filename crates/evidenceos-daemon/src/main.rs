@@ -26,7 +26,8 @@ use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
 use evidenceos_daemon::server::EvidenceOsService;
-use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
+use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as EvidenceOsV1Server;
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-daemon")]
@@ -145,7 +146,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     builder
         .max_decoding_message_size(args.max_request_bytes)
-        .add_service(EvidenceOsServer::with_interceptor(svc, interceptor))
+        .add_service(EvidenceOsV2Server::with_interceptor(
+            svc.clone(),
+            interceptor.clone(),
+        ))
+        .add_service(EvidenceOsV1Server::with_interceptor(svc, interceptor))
         .serve(addr)
         .await?;
 

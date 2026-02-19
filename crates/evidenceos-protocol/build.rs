@@ -22,6 +22,9 @@ fn main() {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&["proto/evidenceos.proto"], &["proto"])
+        .compile_protos(
+            &["proto/evidenceos.proto", "proto/evidenceos_v1.proto"],
+            &["proto"],
+        )
         .expect("failed to compile canonical proto");
 }
