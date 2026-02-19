@@ -349,3 +349,24 @@ Sample manifest:
 ```
 
 See `docs/ORACLE_PLUGINS.md` for deployment and ABI details. UVP references: (Module B: Oracle Resolution… §10.1–10.5) and Canonical Realization §5.1.
+
+## Bring Your Own Oracle (WASM bundles)
+
+EvidenceOS supports third-party oracle plugins so specialized safety or compliance firms can ship judges without modifying kernel code.
+
+Security model:
+- Plugins are untrusted computation.
+- Identity is pinned with signed manifests + wasm hashes.
+- Execution runs in a deterministic wasm sandbox with bounded fuel/memory and no ambient network/fs/time/rng imports.
+- Kernel owns canonical realization bytes, leakage charging, and ledger settlement.
+
+Bundle layout:
+- `oracles/<oracle_id>/<version>/manifest.json`
+- `oracles/<oracle_id>/<version>/oracle.wasm`
+- optional calibration blob and README.
+
+To configure trusted signers, pass `--trusted-oracle-keys <path>` where JSON maps key ids to ed25519 public keys (hex). Set `--oracle-dir` to the bundle root. The daemon validates signature, ABI, ASPEC lane, and hash before loading.
+
+Clients reference an `oracle_id` only; external raw metric values are never surfaced as protocol outputs. The kernel emits only canonical bucket symbols.
+
+Warning: Oracle++ only makes sense under remote+attested deployment. Local plugins are still constrained by transcript and ledger controls, but host compromise assumptions differ.

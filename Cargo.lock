@@ -695,6 +695,7 @@ version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
  "crc32fast",
+ "ed25519-dalek",
  "evidenceos-protocol",
  "hex",
  "parking_lot",
@@ -708,6 +709,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "wasmparser 0.121.2",
+ "wasmtime",
  "wat",
 ]
 

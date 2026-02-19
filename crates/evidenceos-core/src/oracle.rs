@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::error::{EvidenceOSError, EvidenceOSResult};
+use crate::oracle_registry::OracleBackend;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -312,6 +313,43 @@ impl AccuracyOracleState {
 
     pub fn query(&mut self, preds: &[u8]) -> EvidenceOSResult<OracleResult> {
         let raw = self.holdout.accuracy(preds)?;
+        let bucket = self.resolution.quantize_unit_interval(raw)?;
+        let local = self
+            .last_preds
+            .as_ref()
+            .map(|last| HoldoutLabels::hamming_distance(last, preds).map(|d| d <= 1))
+            .transpose()?
+            .unwrap_or(false);
+        let hysteresis_applied = matches!((local, self.last_raw, self.last_bucket),
+            (true, Some(prev_raw), Some(_)) if (raw - prev_raw).abs() < self.resolution.delta_sigma);
+        let output_bucket = if hysteresis_applied {
+            self.last_bucket.unwrap_or(bucket)
+        } else {
+            bucket
+        };
+        self.last_preds = Some(preds.to_vec());
+        self.last_raw = Some(raw);
+        self.last_bucket = Some(output_bucket);
+        Ok(OracleResult {
+            bucket: output_bucket,
+            raw_accuracy: raw,
+            e_value: self.null_spec.compute_e_value(raw),
+            k_bits: self.resolution.bits_per_call(),
+            hysteresis_applied,
+        })
+    }
+
+    /// Query through an untrusted external oracle backend while preserving kernel-side
+    /// canonicalization and fail-closed accounting (§3.3, §5.1, §10.1, §11.2).
+    pub fn query_with_backend(
+        &mut self,
+        backend: &mut dyn OracleBackend,
+        preds: &[u8],
+    ) -> EvidenceOSResult<OracleResult> {
+        let raw = backend.query_raw_metric(preds)?;
+        if !raw.is_finite() {
+            return Err(EvidenceOSError::OracleViolation);
+        }
         let bucket = self.resolution.quantize_unit_interval(raw)?;
         let local = self
             .last_preds
