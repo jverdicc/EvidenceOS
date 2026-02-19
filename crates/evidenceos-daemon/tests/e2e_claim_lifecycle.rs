@@ -392,7 +392,7 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
 
     // RPCs without parameters still called for coverage and behavior checks.
     c.health(pb::HealthRequest {}).await.expect("health ok");
-    c.get_public_key(pb::GetPublicKeyRequest {})
+    c.get_public_key(pb::GetPublicKeyRequest { key_id: vec![] })
         .await
         .expect("pubkey ok");
     c.get_signed_tree_head(pb::GetSignedTreeHeadRequest {})

@@ -279,8 +279,8 @@ struct KernelState {
     data_path: PathBuf,
     revocations: Mutex<Vec<([u8; 32], u64, String)>>,
     lock_file: File,
-    signing_key: SigningKey,
-    verifying_key: VerifyingKey,
+    active_key_id: [u8; 32],
+    keyring: HashMap<[u8; 32], SigningKey>,
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
 }
 
@@ -324,8 +324,7 @@ impl EvidenceOsService {
             PersistedState::default()
         };
 
-        let signing_key = load_or_create_signing_key(&root)?;
-        let verifying_key = signing_key.verifying_key();
+        let (active_key_id, keyring) = load_or_create_keyring(&root)?;
         let etl_path = root.join("etl.log");
         let etl = Etl::open_or_create_with_options(&etl_path, durable_etl)
             .map_err(|_| Status::internal("etl init failed"))?;
@@ -347,8 +346,8 @@ impl EvidenceOsService {
             data_path: root,
             revocations: Mutex::new(persisted.revocations),
             lock_file,
-            signing_key,
-            verifying_key,
+            active_key_id,
+            keyring,
             revocation_subscribers: Mutex::new(Vec::new()),
         });
         persist_all(&state)?;
@@ -371,8 +370,11 @@ impl EvidenceOsService {
         })
     }
 
-    fn etl_verifying_key_bytes(&self) -> [u8; 32] {
-        self.state.verifying_key.to_bytes()
+    fn active_signing_key(&self) -> Result<&SigningKey, Status> {
+        self.state
+            .keyring
+            .get(&self.state.active_key_id)
+            .ok_or_else(|| Status::internal("active signing key missing"))
     }
 
     fn transition_claim(claim: &mut Claim, to: ClaimState) -> Result<(), Status> {
@@ -564,28 +566,10 @@ fn decode_hex_hash32(value: &str, field: &str) -> Result<[u8; 32], Status> {
 }
 
 const ETL_SIGNING_KEY_REL_PATH: &str = "keys/etl_signing_ed25519";
+const KEYRING_DIR_REL_PATH: &str = "keys";
+const ACTIVE_KEY_ID_FILE: &str = "active_key_id";
 
-fn load_or_create_signing_key(data_dir: &Path) -> Result<SigningKey, Status> {
-    let key_path = data_dir.join(ETL_SIGNING_KEY_REL_PATH);
-    if key_path.exists() {
-        let bytes =
-            std::fs::read(&key_path).map_err(|_| Status::internal("read signing key failed"))?;
-        if bytes.len() != 32 {
-            return Err(Status::internal("invalid signing key length"));
-        }
-        let mut sk = [0u8; 32];
-        sk.copy_from_slice(&bytes);
-        return Ok(SigningKey::from_bytes(&sk));
-    }
-
-    if let Some(parent) = key_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| Status::internal("mkdir keys failed"))?;
-    }
-
-    let mut secret = [0u8; 32];
-    getrandom::getrandom(&mut secret).map_err(|_| Status::internal("random keygen failed"))?;
-    let key = SigningKey::from_bytes(&secret);
-
+fn write_secret_key(key_path: &Path, secret: &[u8; 32]) -> Result<(), Status> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -593,20 +577,120 @@ fn load_or_create_signing_key(data_dir: &Path) -> Result<SigningKey, Status> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&key_path)
+            .open(key_path)
             .map_err(|_| Status::internal("create signing key failed"))?;
-        f.write_all(&secret)
+        f.write_all(secret)
             .and_then(|_| f.flush())
             .map_err(|_| Status::internal("write signing key failed"))?;
     }
 
     #[cfg(not(unix))]
     {
-        std::fs::write(&key_path, &secret)
+        std::fs::write(key_path, secret)
             .map_err(|_| Status::internal("write signing key failed"))?;
     }
 
-    Ok(key)
+    Ok(())
+}
+
+fn load_or_create_keyring(
+    data_dir: &Path,
+) -> Result<([u8; 32], HashMap<[u8; 32], SigningKey>), Status> {
+    let keys_dir = data_dir.join(KEYRING_DIR_REL_PATH);
+    std::fs::create_dir_all(&keys_dir).map_err(|_| Status::internal("mkdir keys failed"))?;
+
+    let mut keyring = HashMap::new();
+    for entry in
+        std::fs::read_dir(&keys_dir).map_err(|_| Status::internal("read keyring failed"))?
+    {
+        let entry = entry.map_err(|_| Status::internal("read keyring failed"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.file_name().and_then(|n| n.to_str()) == Some(ACTIVE_KEY_ID_FILE) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let bytes = match hex::decode(stem) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let key_id = parse_hash32(&bytes, "key_id")?;
+        let secret =
+            std::fs::read(&path).map_err(|_| Status::internal("read signing key failed"))?;
+        if secret.len() != 32 {
+            return Err(Status::internal("invalid signing key length"));
+        }
+        let mut sk = [0u8; 32];
+        sk.copy_from_slice(&secret);
+        let signing_key = SigningKey::from_bytes(&sk);
+        let actual_key_id = key_id_from_verifying_key(&signing_key.verifying_key());
+        if actual_key_id != key_id {
+            return Err(Status::internal("key_id does not match signing key"));
+        }
+        keyring.insert(key_id, signing_key);
+    }
+
+    let legacy_key_path = data_dir.join(ETL_SIGNING_KEY_REL_PATH);
+    if legacy_key_path.exists() {
+        let bytes = std::fs::read(&legacy_key_path)
+            .map_err(|_| Status::internal("read signing key failed"))?;
+        if bytes.len() != 32 {
+            return Err(Status::internal("invalid signing key length"));
+        }
+        let mut sk = [0u8; 32];
+        sk.copy_from_slice(&bytes);
+        let signing_key = SigningKey::from_bytes(&sk);
+        let key_id = key_id_from_verifying_key(&signing_key.verifying_key());
+        let key_path = keys_dir.join(format!("{}.key", hex::encode(key_id)));
+        if !key_path.exists() {
+            write_secret_key(&key_path, &sk)?;
+        }
+        keyring.insert(key_id, signing_key);
+    }
+
+    if keyring.is_empty() {
+        let mut secret = [0u8; 32];
+        getrandom::getrandom(&mut secret).map_err(|_| Status::internal("random keygen failed"))?;
+        let signing_key = SigningKey::from_bytes(&secret);
+        let key_id = key_id_from_verifying_key(&signing_key.verifying_key());
+        let key_path = keys_dir.join(format!("{}.key", hex::encode(key_id)));
+        write_secret_key(&key_path, &secret)?;
+        keyring.insert(key_id, signing_key);
+    }
+
+    let active_path = keys_dir.join(ACTIVE_KEY_ID_FILE);
+    let active_key_id = if active_path.exists() {
+        let raw = std::fs::read_to_string(&active_path)
+            .map_err(|_| Status::internal("read active key id failed"))?;
+        let trimmed = raw.trim();
+        let bytes = hex::decode(trimmed).map_err(|_| Status::internal("invalid active key id"))?;
+        parse_hash32(&bytes, "active key id")?
+    } else {
+        *keyring
+            .keys()
+            .next()
+            .ok_or_else(|| Status::internal("keyring is empty"))?
+    };
+
+    if !keyring.contains_key(&active_key_id) {
+        return Err(Status::internal("active key id not found in keyring"));
+    }
+
+    std::fs::write(
+        &active_path,
+        format!(
+            "{}
+",
+            hex::encode(active_key_id)
+        ),
+    )
+    .map_err(|_| Status::internal("write active key id failed"))?;
+
+    Ok((active_key_id, keyring))
 }
 
 fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
@@ -713,7 +797,11 @@ fn sign_payload(signing_key: &SigningKey, payload: &[u8]) -> [u8; 64] {
     sig.to_bytes()
 }
 
-fn build_signed_tree_head(etl: &Etl, signing_key: &SigningKey) -> pb::SignedTreeHead {
+fn build_signed_tree_head(
+    etl: &Etl,
+    signing_key: &SigningKey,
+    key_id: [u8; 32],
+) -> pb::SignedTreeHead {
     let tree_size = etl.tree_size();
     let root_hash = etl.root_hash();
     let payload = sth_signature_payload(tree_size, &root_hash);
@@ -722,11 +810,13 @@ fn build_signed_tree_head(etl: &Etl, signing_key: &SigningKey) -> pb::SignedTree
         tree_size,
         root_hash: root_hash.to_vec(),
         signature: signature.to_vec(),
+        key_id: key_id.to_vec(),
     }
 }
 
 fn build_revocations_snapshot(
     signing_key: &SigningKey,
+    key_id: [u8; 32],
     revocations: Vec<([u8; 32], u64, String)>,
     signed_tree_head: pb::SignedTreeHead,
 ) -> pb::WatchRevocationsResponse {
@@ -744,6 +834,7 @@ fn build_revocations_snapshot(
         entries,
         signature: signature.to_vec(),
         signed_tree_head: Some(signed_tree_head),
+        key_id: key_id.to_vec(),
     }
 }
 
@@ -1781,13 +1872,22 @@ impl EvidenceOs for EvidenceOsService {
 
     async fn get_public_key(
         &self,
-        _request: Request<pb::GetPublicKeyRequest>,
+        request: Request<pb::GetPublicKeyRequest>,
     ) -> Result<Response<pb::GetPublicKeyResponse>, Status> {
-        let verifying_key = self.etl_verifying_key_bytes();
-        let key_id = key_id_from_verifying_key(&self.state.verifying_key);
+        let req = request.into_inner();
+        let requested_key_id = if req.key_id.is_empty() {
+            self.state.active_key_id
+        } else {
+            parse_hash32(&req.key_id, "key_id")?
+        };
+        let signing_key = self
+            .state
+            .keyring
+            .get(&requested_key_id)
+            .ok_or_else(|| Status::not_found("key not found"))?;
         Ok(Response::new(pb::GetPublicKeyResponse {
-            ed25519_public_key: verifying_key.to_vec(),
-            key_id: key_id.to_vec(),
+            ed25519_public_key: signing_key.verifying_key().to_bytes().to_vec(),
+            key_id: requested_key_id.to_vec(),
         }))
     }
 
@@ -1796,11 +1896,13 @@ impl EvidenceOs for EvidenceOsService {
         _request: Request<pb::GetSignedTreeHeadRequest>,
     ) -> Result<Response<pb::GetSignedTreeHeadResponse>, Status> {
         let etl = self.state.etl.lock();
-        let sth = build_signed_tree_head(&etl, &self.state.signing_key);
+        let signing_key = self.active_signing_key()?;
+        let sth = build_signed_tree_head(&etl, signing_key, self.state.active_key_id);
         Ok(Response::new(pb::GetSignedTreeHeadResponse {
             tree_size: sth.tree_size,
             root_hash: sth.root_hash,
             signature: sth.signature,
+            key_id: sth.key_id,
         }))
     }
 
@@ -1873,6 +1975,7 @@ impl EvidenceOs for EvidenceOsService {
         Ok(Response::new(pb::GetRevocationFeedResponse {
             entries: item.entries,
             signature: item.signature,
+            key_id: item.key_id,
         }))
     }
 
@@ -1917,7 +2020,11 @@ impl EvidenceOs for EvidenceOsService {
             capsule_bytes,
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
-            signed_tree_head: Some(build_signed_tree_head(&etl, &self.state.signing_key)),
+            signed_tree_head: Some(build_signed_tree_head(
+                &etl,
+                self.active_signing_key()?,
+                self.state.active_key_id,
+            )),
             inclusion_proof: Some(pb::MerkleInclusionProof {
                 leaf_hash: leaf_hash.to_vec(),
                 leaf_index: etl_index,
@@ -1991,9 +2098,10 @@ impl EvidenceOs for EvidenceOsService {
         let message = {
             let etl = self.state.etl.lock();
             build_revocations_snapshot(
-                &self.state.signing_key,
+                self.active_signing_key()?,
+                self.state.active_key_id,
                 vec![(capsule_hash, timestamp_unix, req.reason)],
-                build_signed_tree_head(&etl, &self.state.signing_key),
+                build_signed_tree_head(&etl, self.active_signing_key()?, self.state.active_key_id),
             )
         };
 
@@ -2018,9 +2126,10 @@ impl EvidenceOs for EvidenceOsService {
         let entries_raw = self.state.revocations.lock().clone();
         let etl = self.state.etl.lock();
         let snapshot = build_revocations_snapshot(
-            &self.state.signing_key,
+            self.active_signing_key()?,
+            self.state.active_key_id,
             entries_raw,
-            build_signed_tree_head(&etl, &self.state.signing_key),
+            build_signed_tree_head(&etl, self.active_signing_key()?, self.state.active_key_id),
         );
         let _ = tx.try_send(snapshot);
 
