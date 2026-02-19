@@ -17,6 +17,20 @@ This repository contains:
 - `evidenceos-core`: Conservation Ledger primitives, deterministic logical clock, ETL Merkle log, and an ASPEC-like Wasm verifier.
 - `evidenceos-daemon`: a gRPC service exposing the kernel API.
 
+## Technical Summary
+
+EvidenceOS + DiscOS are intended to be read as one protocol split across trust boundaries. EvidenceOS is the verification kernel: a small, stateful service that owns conserved accounting, append-only transparency state, and policy-verification primitives. DiscOS is userland: orchestration, retrieval, ranking, and UX logic that can evolve rapidly without inheriting kernel trust. In practice, DiscOS gathers candidate evidence and prepares claims, while EvidenceOS decides what can be certified, under explicit metering and deterministic state transitions.
+
+At execution time, claims flow through a lifecycle (`CreateClaim -> CommitArtifacts -> FreezeGates -> SealClaim -> ExecuteClaim`) so inputs are fixed before certification decisions are made. Structured claims are represented as capsules: immutable bundles containing canonicalized claim content, metadata, and artifact commitments. Canonicalization is designed to produce deterministic bytes for semantically identical structured claims (e.g., stable ordering and normalized encodings), so signatures, hashes, and inclusion proofs are reproducible across independent verifiers.
+
+The ASPEC verifier in `evidenceos-core` is the policy-checking surface. It runs a constrained verification program (Wasm) against the sealed claim context and returns typed verifier outcomes rather than arbitrary side effects. This gives userland flexibility in policy expression while keeping kernel enforcement narrow: userland proposes, the kernel verifies and records. The verifier result is therefore one input to certification, not a bypass around conserved accounting.
+
+Oracle interaction is quantized: instead of unconstrained confidence accumulation, the kernel meters epistemic contribution as discrete e-value-relevant units under fixed rules. The key idea is that evidence can increase support only through accounted steps; it cannot be minted ad hoc by orchestration code. This is where the Conservation Ledger matters: every certified outcome must clear a certification barrier backed by tracked state transitions and bounded contributions. If the required conservation conditions are not satisfied, the claim can be processed but not certified.
+
+Transparency is provided by the ETL (Evidence Transparency Log), an append-only Merkle log maintained by the daemon. Clients can obtain Signed Tree Heads, request inclusion proofs for specific leaves, and perform consistency checks between tree sizes to detect equivocation or history rewrites. Revocations are published as signed feed entries, so prior certified material can be marked invalid without deleting historical log data. Operationally, this supports “append + disclose + prove” rather than mutable audit records.
+
+Certification therefore has a precise meaning: a claim passed kernel policy checks, satisfied conservation constraints, and was committed into auditable transparency state with verifiable proofs. Certification does **not** mean legal adjudication, factual omniscience, or regulatory endorsement by itself; downstream legal or institutional interpretation remains external. For citation, use the project DOI for software artifacts (Zenodo concept DOI) and separately cite the paper as **Under review at FORC 2026** until proceedings metadata is finalized. Avoid language implying acceptance, legal finality, or guarantees beyond the protocol’s cryptographic and accounting scope.
+
 ## Quickstart
 
 ### 1) Build
@@ -49,6 +63,8 @@ The DiscOS repository includes:
 
 - a Rust client
 - a Python client example
+
+If you are following older DiscOS docs/examples that reference `--etl-path`, update those invocations to EvidenceOS's current `--data-dir` flag.
 
 ## Claim lifecycle API
 
