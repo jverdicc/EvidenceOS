@@ -407,6 +407,17 @@ impl ConservationLedger {
         Ok(())
     }
 
+    pub fn charge_kout_bits(&mut self, kout_bits: f64) -> EvidenceOSResult<()> {
+        self.charge_all(
+            kout_bits,
+            0.0,
+            0.0,
+            kout_bits,
+            "structured_output_kout",
+            json!({"kout_bits": kout_bits}),
+        )
+    }
+
     pub fn settle_e_value(
         &mut self,
         e_value: f64,
@@ -416,14 +427,14 @@ impl ConservationLedger {
         if self.frozen {
             return Err(EvidenceOSError::Frozen);
         }
-        if e_value <= 0.0 || !e_value.is_finite() {
+        if e_value < 0.0 || !e_value.is_finite() {
             return Err(EvidenceOSError::InvalidArgument);
         }
-        if self.wealth > f64::MAX / e_value.max(1.0) {
+        if e_value > 0.0 && self.wealth > f64::MAX / e_value {
             return Err(EvidenceOSError::InvalidArgument);
         }
         self.wealth *= e_value;
-        if !self.wealth.is_finite() {
+        if self.wealth.is_nan() || self.wealth.is_infinite() {
             return Err(EvidenceOSError::InvalidArgument);
         }
         self.w_max = self.w_max.max(self.wealth);

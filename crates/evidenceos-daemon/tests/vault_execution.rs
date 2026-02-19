@@ -15,6 +15,7 @@ fn context() -> VaultExecutionContext {
         oracle_num_buckets: 4,
         oracle_delta_sigma: 0.01,
         oracle_null_accuracy: 0.5,
+        output_schema_id: "legacy/v1".to_string(),
     }
 }
 
