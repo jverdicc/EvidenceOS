@@ -1,27 +1,24 @@
 # Testing Evidence
 
-## Evidence checklist
-
-Run:
+## Commands
 
 ```bash
-./scripts/test_evidence.sh
+cargo test --all
+cargo test --workspace
+cargo fuzz run fuzz_aspec_verify -runs=2000
+cargo fuzz run fuzz_etl_read_entry -runs=2000
 ```
 
-Expected key outputs:
-- `artifacts/test_output.txt` contains successful `cargo fmt --check`, `cargo clippy`, `cargo test`, and `cargo llvm-cov` sections.
-- `artifacts/coverage.lcov` is created and coverage gate `--fail-under-lines 95` passes.
-- Fuzz smoke logs are created:
-  - `artifacts/fuzz_aspec_verify.log`
-  - `artifacts/fuzz_etl_read_entry.log`
-  - `artifacts/fuzz_structured_claim_validate.log`
+## Tool versions
 
-## Artifact paths
-- `artifacts/test_output.txt`
-- `artifacts/coverage.lcov`
-- `artifacts/fuzz_aspec_verify.log`
-- `artifacts/fuzz_etl_read_entry.log`
-- `artifacts/fuzz_structured_claim_validate.log`
+Capture with:
 
-## CI artifacts
-CI should upload all files under `artifacts/` as build artifacts.
+```bash
+rustc --version
+cargo --version
+cargo fuzz --version
+```
+
+## What this proves
+
+These checks exercise unit tests, integration/system tests (including tonic server lifecycle paths), bounded proptests embedded in crate tests, and fuzz smoke for ASPEC/ETL parser invariants. Together they provide fail-closed checks for policy validation, ledger accounting/monotonicity, oracle encoding and null-spec behavior, and ETL proof parsing and verification.

@@ -625,3 +625,106 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn rejects_invalid_alpha() {
+        assert!(ConservationLedger::new(0.0).is_err());
+        assert!(ConservationLedger::new(1.0).is_err());
+    }
+    #[test]
+    fn rejects_invalid_budgets() {
+        let mut l = ConservationLedger::new(0.5)
+            .expect("l")
+            .with_budget(Some(-1.0));
+        assert!(matches!(
+            l.charge(0.0, "x", Value::Null),
+            Err(EvidenceOSError::Frozen)
+        ));
+    }
+    #[test]
+    fn charge_all_rejects_negative_or_nonfinite() {
+        let mut l = ConservationLedger::new(0.1).expect("l");
+        assert!(l.charge_all(-1.0, 0.0, 0.0, 0.0, "x", Value::Null).is_err());
+        assert!(l
+            .charge_all(f64::INFINITY, 0.0, 0.0, 0.0, "x", Value::Null)
+            .is_err());
+    }
+    #[test]
+    fn settle_rejects_nonpositive_or_nonfinite() {
+        let mut l = ConservationLedger::new(0.1).expect("l");
+        assert!(l.settle_e_value(-1.0, "x", Value::Null).is_err());
+        assert!(l.settle_e_value(f64::NAN, "x", Value::Null).is_err());
+    }
+    #[test]
+    fn events_record_kind_and_meta() {
+        let mut l = ConservationLedger::new(0.1).expect("l");
+        l.charge(1.0, "kind", json!({"k":1})).expect("charge");
+        assert!(l.events.last().expect("event").kind.contains("kind"));
+    }
+    #[test]
+    fn epsilon_delta_accounting() {
+        let mut l = ConservationLedger::new(0.1).expect("l");
+        l.charge_all(1.0, 0.5, 0.25, 1.0, "x", Value::Null)
+            .expect("charge");
+        assert!((l.epsilon_total - 0.5).abs() < 1e-12);
+        assert!((l.delta_total - 0.25).abs() < 1e-12);
+    }
+    #[test]
+    fn access_credit_is_monotone() {
+        let mut l = ConservationLedger::new(0.1).expect("l");
+        l.charge_all(0.1, 0.0, 0.0, 0.1, "x", Value::Null)
+            .expect("c");
+        let a = l.access_credit_spent;
+        l.charge_all(0.1, 0.0, 0.0, 0.2, "x", Value::Null)
+            .expect("c");
+        assert!(l.access_credit_spent >= a);
+    }
+    #[test]
+    fn freeze_after_budget_exhaustion() {
+        let mut l = ConservationLedger::new(0.1)
+            .expect("l")
+            .with_budget(Some(1.0));
+        l.charge(1.0, "x", Value::Null).expect("c");
+        assert!(matches!(
+            l.charge(0.1, "x", Value::Null),
+            Err(EvidenceOSError::Frozen)
+        ));
+    }
+    #[test]
+    fn joint_pool_rejects_invalid_budget() {
+        assert!(JointLeakagePool::new("a".into(), -1.0).is_err());
+    }
+    #[test]
+    fn topic_pool_rejects_invalid_budget() {
+        assert!(TopicBudgetPool::new("a".into(), -1.0, 1.0).is_err());
+    }
+    #[test]
+    fn e_merge_rejects_invalid_inputs() {
+        assert!(e_merge(&[1.0], &[0.0]).is_err());
+    }
+    #[test]
+    fn e_merge_equal_rejects_empty() {
+        assert!(e_merge_equal(&[]).is_err());
+    }
+    #[test]
+    fn e_product_rejects_invalid_or_empty() {
+        assert!(e_product(&[]).is_err());
+        assert!(e_product(&[-1.0]).is_err());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test] fn events_never_decrease_under_random_ops(ops in prop::collection::vec(0.0f64..3.0f64,1..64)) { let mut l=ConservationLedger::new(0.1).expect("l"); let mut prev=0usize; for v in ops { let _=l.charge(v,"x",Value::Null); prop_assert!(l.events.len()>=prev); prev=l.events.len(); } }
+        #[test] fn random_meta_does_not_panic(v in any::<u64>()) { let mut l=ConservationLedger::new(0.1).expect("l"); let _=l.charge(0.1,"x",json!({"v":v})); prop_assert!(true); }
+        #[test] fn canary_pulse_proptest_freezes_at_threshold(alpha in 0.01f64..0.9f64) { let mut c=CanaryPulse::new(alpha).expect("c"); let b=certification_barrier(alpha,0.0); let r=c.update(b+1.0); prop_assert!(matches!(r,Err(EvidenceOSError::Frozen))); }
+        #[test] fn joint_pool_invariants_proptest(a in 0.1f64..10.0f64, x in 0.0f64..5.0f64) { let mut p=JointLeakagePool::new("h".into(), a).expect("p"); let _=p.charge(x); prop_assert!(p.k_bits_remaining() <= a + 1e-12); }
+        #[test] fn topic_pool_invariants_proptest(a in 0.1f64..10.0f64, b in 0.1f64..10.0f64, x in 0.0f64..5.0f64) { let mut p=TopicBudgetPool::new("t".into(), a,b).expect("p"); let _=p.charge(x,x,0.0); prop_assert!(p.k_bits_spent() >= 0.0); }
+        #[test] fn e_merge_proptest_invariants(xs in prop::collection::vec(0.1f64..10.0f64,1..8)) { let w=vec![1.0/xs.len() as f64; xs.len()]; let v=e_merge(&xs,&w).expect("m"); prop_assert!(v.is_finite() && v>=0.0); }
+        #[test] fn e_product_proptest_invariants(xs in prop::collection::vec(0.1f64..10.0f64,1..8)) { let v=e_product(&xs).expect("m"); prop_assert!(v.is_finite() && v>=0.0); }
+    }
+}

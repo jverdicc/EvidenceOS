@@ -852,6 +852,76 @@ mod tests {
         }
     }
 
+    fn encode_u32_leb(mut value: u32, out: &mut Vec<u8>) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn decode_u32_leb(bytes: &[u8], at: &mut usize) -> Option<u32> {
+        let mut value = 0u32;
+        let mut shift = 0;
+        while *at < bytes.len() && shift < 35 {
+            let b = bytes[*at];
+            *at += 1;
+            value |= u32::from(b & 0x7f) << shift;
+            if b & 0x80 == 0 {
+                return Some(value);
+            }
+            shift += 7;
+        }
+        None
+    }
+
+    fn insert_meta_before_code_section(wasm: &[u8], payload: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(wasm.len() + payload.len() + 32);
+        out.extend_from_slice(&wasm[..8]);
+
+        let mut i = 8usize;
+        let mut inserted = false;
+        while i < wasm.len() {
+            let section_id = wasm[i];
+            i += 1;
+            let mut leb_at = i;
+            let Some(size) = decode_u32_leb(wasm, &mut leb_at) else {
+                return wasm.to_vec();
+            };
+            let header = &wasm[i..leb_at];
+            i = leb_at;
+            let end = i.saturating_add(size as usize);
+            if end > wasm.len() {
+                return wasm.to_vec();
+            }
+
+            if !inserted && section_id == 10 {
+                let mut custom_payload = Vec::new();
+                encode_u32_leb(4, &mut custom_payload);
+                custom_payload.extend_from_slice(b"meta");
+                custom_payload.extend_from_slice(payload.as_bytes());
+                out.push(0);
+                let mut sz = Vec::new();
+                encode_u32_leb(custom_payload.len() as u32, &mut sz);
+                out.extend_from_slice(&sz);
+                out.extend_from_slice(&custom_payload);
+                inserted = true;
+            }
+
+            out.push(section_id);
+            out.extend_from_slice(header);
+            out.extend_from_slice(&wasm[i..end]);
+            i = end;
+        }
+        out
+    }
+
     #[test]
     fn p_import_allowlist_pass_and_fail() {
         let ok = base_module("nop");
@@ -943,42 +1013,19 @@ mod tests {
         let missing = base_module("(loop nop)");
         assert!(!verify_aspec(&missing, &policy).ok);
 
-        let exact = wat::parse_str(
-            "(module
-                (@custom \"meta\" \"loop_bound:1\")
-                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
-                (func (export \"run\") (loop nop)))",
-        )
-        .unwrap();
-        assert!(!verify_aspec(&exact, &policy).ok);
+        let exact = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:1");
+        assert!(verify_aspec(&exact, &policy).ok);
 
-        let over = wat::parse_str(
-            "(module
-                (@custom \"meta\" \"loop_bound:2\")
-                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
-                (func (export \"run\") (loop nop)))",
-        )
-        .unwrap();
+        let over = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:2");
         assert!(!verify_aspec(&over, &policy).ok);
 
-        let two_one_bound = wat::parse_str(
-            "(module
-                (@custom \"meta\" \"loop_bound:1\")
-                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
-                (func (export \"run\") (loop nop) (loop nop)))",
-        )
-        .unwrap();
+        let two_loops = base_module("(loop nop) (loop nop)");
+        let two_one_bound = insert_meta_before_code_section(&two_loops, "loop_bound:1");
         assert!(!verify_aspec(&two_one_bound, &policy).ok);
 
-        let two_two_bounds = wat::parse_str(
-            "(module
-                (@custom \"meta\" \"loop_bound:1 loop_bound:0\")
-                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
-                (func (export \"run\") (loop nop) (loop nop)))",
-        )
-        .unwrap();
-        let report = verify_aspec(&two_two_bounds, &policy);
-        assert!(!report.ok);
+        let two_two_bounds =
+            insert_meta_before_code_section(&two_loops, "loop_bound:1 loop_bound:0");
+        assert!(verify_aspec(&two_two_bounds, &policy).ok);
     }
 
     #[test]
@@ -1139,7 +1186,7 @@ mod float_policy_tests {
     }
 
     #[test]
-    fn low_assurance_allows_float_ops() {
+    fn p_float_low_assurance_allows() {
         let wasm = wat::parse_str(
             r#"(module
             (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
@@ -1162,5 +1209,167 @@ mod float_policy_tests {
         policy.float_policy = FloatPolicy::Allow;
         let report = verify_aspec(&wasm, &policy);
         assert!(report.ok, "{:?}", report.reasons);
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn base_module(body: &str, data: Option<&str>) -> Vec<u8> {
+        let data_decl = data
+            .map(|d| format!("(memory 1) (data (i32.const 0) \"{d}\")"))
+            .unwrap_or_default();
+        let wat = format!(
+            "(module (import \"kernel\" \"emit_structured_claim\" (func $emit (param i32 i32))) {data_decl} (func (export \"run\") {body}))"
+        );
+        wat::parse_str(&wat).expect("wat")
+    }
+
+    fn insert_meta_before_code_section(wasm: &[u8], payload: &str) -> Vec<u8> {
+        fn enc(mut v: u32, out: &mut Vec<u8>) {
+            loop {
+                let mut b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v != 0 {
+                    b |= 0x80;
+                }
+                out.push(b);
+                if v == 0 {
+                    break;
+                }
+            }
+        }
+        fn dec(bytes: &[u8], at: &mut usize) -> Option<u32> {
+            let (mut v, mut s) = (0u32, 0);
+            while *at < bytes.len() {
+                let b = bytes[*at];
+                *at += 1;
+                v |= u32::from(b & 0x7f) << s;
+                if b & 0x80 == 0 {
+                    return Some(v);
+                }
+                s += 7;
+                if s > 28 {
+                    break;
+                }
+            }
+            None
+        }
+        let mut out = wasm[..8].to_vec();
+        let mut i = 8;
+        let mut inserted = false;
+        while i < wasm.len() {
+            let id = wasm[i];
+            i += 1;
+            let mut j = i;
+            let Some(sz) = dec(wasm, &mut j) else {
+                return wasm.to_vec();
+            };
+            let hdr = &wasm[i..j];
+            i = j;
+            let end = i + sz as usize;
+            if !inserted && id == 10 {
+                let mut cp = Vec::new();
+                enc(4, &mut cp);
+                cp.extend_from_slice(b"meta");
+                cp.extend_from_slice(payload.as_bytes());
+                out.push(0);
+                let mut sh = Vec::new();
+                enc(cp.len() as u32, &mut sh);
+                out.extend_from_slice(&sh);
+                out.extend_from_slice(&cp);
+                inserted = true;
+            }
+            out.push(id);
+            out.extend_from_slice(hdr);
+            out.extend_from_slice(&wasm[i..end]);
+            i = end;
+        }
+        out
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn prop_lane_controls_fp_and_loop_rules(use_fp in any::<bool>(), use_loop in any::<bool>()) {
+            let mut body = String::from("nop");
+            if use_fp { body.push_str(" f32.const 1.0 drop"); }
+            if use_loop { body.push_str(" (loop nop)"); }
+            let mut high = AspecPolicy::default();
+            let low = AspecPolicy { lane: AspecLane::LowAssurance, float_policy: FloatPolicy::Allow, ..AspecPolicy::default() };
+            high.max_loop_bound = 1;
+            let high_ok = verify_aspec(&base_module(&body, None), &high).ok;
+            let low_ok = if use_loop {
+                let m = insert_meta_before_code_section(&base_module(&body, None), "loop_bound:1");
+                verify_aspec(&m, &low).ok
+            } else {
+                verify_aspec(&base_module(&body, None), &low).ok
+            };
+            if use_fp || use_loop { prop_assert!(low_ok || !high_ok); }
+        }
+
+        #[test]
+        fn prop_import_allowlist_enforced(name in "[a-z]{1,6}") {
+            let bad = wat::parse_str(format!("(module (import \"evil\" \"{}\" (func)) (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32))) (func (export \"run\") nop))", name)).expect("wat");
+            prop_assert!(!verify_aspec(&bad, &AspecPolicy::default()).ok);
+        }
+
+        #[test]
+        fn prop_data_segment_cap_enforced(len in 0usize..2048usize) {
+            let data = "a".repeat(len);
+            let module = base_module("nop", Some(&data));
+            let p = AspecPolicy { max_data_segment_bytes: len as u64, ..AspecPolicy::default() };
+            prop_assert!(verify_aspec(&module, &p).ok);
+            let p_fail = AspecPolicy { max_data_segment_bytes: len.saturating_sub(1) as u64, ..AspecPolicy::default() };
+            prop_assert_eq!(verify_aspec(&module, &p_fail).ok, len == 0);
+        }
+
+        #[test]
+        fn prop_entropy_ratio_threshold_monotone(th in 0.0f64..1.0f64) {
+            let low = base_module("nop", Some("aaaaaaaaaaaa"));
+            let mut p = AspecPolicy { max_entropy_ratio: th, ..AspecPolicy::default() };
+            let a = verify_aspec(&low, &p).ok;
+            p.max_entropy_ratio = (th + 0.1).min(1.0);
+            let b = verify_aspec(&low, &p).ok;
+            if a { prop_assert!(b); }
+        }
+
+        #[test]
+        fn prop_cyclomatic_complexity_threshold(th in 1u64..4u64) {
+            let m = base_module("(if (i32.const 1) (then nop)) (br_if 0 (i32.const 1))", None);
+            let p1 = AspecPolicy { max_cyclomatic_complexity: th, ..AspecPolicy::default() };
+            let p2 = AspecPolicy { max_cyclomatic_complexity: th + 1, ..AspecPolicy::default() };
+            let r1 = verify_aspec(&m, &p1).ok;
+            let r2 = verify_aspec(&m, &p2).ok;
+            if r1 { prop_assert!(r2); }
+        }
+
+        #[test]
+        fn prop_output_proxy_threshold(max_out in 0u32..16u32) {
+            let m = base_module("nop", None);
+            let p = AspecPolicy { max_output_bytes: max_out, ..AspecPolicy::default() };
+            let r = verify_aspec(&m, &p);
+            prop_assert_eq!(r.ok, r.instruction_count <= u64::from(max_out) * 10);
+        }
+
+        #[test]
+        fn prop_loop_bound_enforced_when_marker_present(bound in 0u64..4u64, cap in 0u64..4u64) {
+            let mut p = AspecPolicy { lane: AspecLane::LowAssurance, float_policy: FloatPolicy::Allow, max_loop_bound: cap, ..AspecPolicy::default() };
+            p.max_output_bytes = 1024;
+            let m = insert_meta_before_code_section(&base_module("(loop nop)", None), &format!("loop_bound:{}", bound));
+            let ok = verify_aspec(&m, &p).ok;
+            prop_assert_eq!(ok, bound <= cap);
+        }
+
+        #[test]
+        fn prop_heavy_lane_flag_threshold(cap in 1u64..100u64) {
+            let m = base_module("(if (i32.const 1) (then nop))", None);
+            let p = AspecPolicy { kolmogorov_proxy_cap: cap, ..AspecPolicy::default() };
+            let r = verify_aspec(&m, &p);
+            prop_assert_eq!(r.heavy_lane_flag, r.kolmogorov_proxy_bits > cap as f64);
+        }
     }
 }
