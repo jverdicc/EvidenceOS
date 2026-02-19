@@ -21,11 +21,13 @@
 
 use clap::Parser;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
 use evidenceos_daemon::server::EvidenceOsService;
+use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
 use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as EvidenceOsV1Server;
 
@@ -70,6 +72,9 @@ struct Args {
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
     max_request_bytes: usize,
 
+    #[arg(long, default_value = "127.0.0.1:9464")]
+    metrics_listen: String,
+
     #[arg(long)]
     rpc_timeout_ms: Option<u64>,
 }
@@ -95,7 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
 
     let addr: SocketAddr = args.listen.parse()?;
-    let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl)?;
+    let metrics_addr: SocketAddr = args.metrics_listen.parse()?;
+    let telemetry = Arc::new(Telemetry::new()?);
+    let _metrics_handle = telemetry.clone().spawn_metrics_server(metrics_addr).await?;
+    let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry)?;
 
     if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
         return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());
@@ -123,6 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mtls_required=%args.require_client_cert,
         max_request_bytes=%args.max_request_bytes,
         auth_enabled=%(args.auth_token.is_some() || args.auth_hmac_key.is_some()),
+        metrics_addr=%metrics_addr,
         "starting EvidenceOS gRPC server"
     );
 

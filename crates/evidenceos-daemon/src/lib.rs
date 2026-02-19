@@ -18,4 +18,5 @@
 
 pub mod auth;
 pub mod server;
+pub mod telemetry;
 pub mod vault;

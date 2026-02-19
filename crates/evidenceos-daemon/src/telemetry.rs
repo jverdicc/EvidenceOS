@@ -1,0 +1,248 @@
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
+use std::io::ErrorKind;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[derive(Debug, Error)]
+pub enum TelemetryError {
+    #[error("metrics server failed: {0}")]
+    Server(std::io::Error),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LifecycleEvent<'a> {
+    pub claim_id: &'a str,
+    pub topic_id: &'a str,
+    pub operation_id: &'a str,
+    pub lane: &'a str,
+    pub delta_k_bits: f64,
+    pub delta_w: f64,
+    pub decision: Option<i32>,
+    pub epoch: u64,
+    pub from: &'a str,
+    pub to: &'a str,
+}
+
+#[derive(Default)]
+struct TelemetryState {
+    oracle_calls_total: HashMap<(String, String), u64>,
+    lane_escalations_total: HashMap<(String, String), u64>,
+    rejects_total: HashMap<String, u64>,
+    k_bits_remaining: HashMap<String, f64>,
+    w_current: HashMap<String, f64>,
+    frozen: HashMap<String, i64>,
+}
+
+#[derive(Clone, Default)]
+pub struct Telemetry {
+    state: Arc<Mutex<TelemetryState>>,
+}
+
+impl Telemetry {
+    pub fn new() -> Result<Self, TelemetryError> {
+        Ok(Self::default())
+    }
+
+    pub fn lifecycle_event(&self, event: &LifecycleEvent<'_>) {
+        tracing::info!(target: "evidenceos.lifecycle", event = ?event, "claim lifecycle transition");
+    }
+
+    pub fn record_oracle_calls(&self, lane: &str, oracle: &str, calls: u64) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .oracle_calls_total
+            .entry((lane.to_string(), oracle.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(calls);
+    }
+
+    pub fn record_lane_escalation(&self, from: &str, to: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .lane_escalations_total
+            .entry((from.to_string(), to.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_reject(&self, reason: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard.rejects_total.entry(reason.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn update_operation_gauges(
+        &self,
+        operation_id: &str,
+        k_bits_remaining: f64,
+        w_current: f64,
+        frozen: bool,
+    ) {
+        let mut guard = self.state.lock();
+        guard
+            .k_bits_remaining
+            .insert(operation_id.to_string(), k_bits_remaining);
+        guard.w_current.insert(operation_id.to_string(), w_current);
+        guard
+            .frozen
+            .insert(operation_id.to_string(), if frozen { 1 } else { 0 });
+    }
+
+    pub fn render(&self) -> String {
+        let guard = self.state.lock();
+        let mut out = String::new();
+        out.push_str("# TYPE oracle_calls_total counter\n");
+        for ((lane, oracle), value) in &guard.oracle_calls_total {
+            let _ = writeln!(
+                out,
+                "oracle_calls_total{{lane=\"{}\",oracle=\"{}\"}} {}",
+                lane, oracle, value
+            );
+        }
+        out.push_str("# TYPE lane_escalations_total counter\n");
+        for ((from, to), value) in &guard.lane_escalations_total {
+            let _ = writeln!(
+                out,
+                "lane_escalations_total{{from=\"{}\",to=\"{}\"}} {}",
+                from, to, value
+            );
+        }
+        out.push_str("# TYPE rejects_total counter\n");
+        for (reason, value) in &guard.rejects_total {
+            let _ = writeln!(out, "rejects_total{{reason=\"{}\"}} {}", reason, value);
+        }
+        out.push_str("# TYPE k_bits_remaining gauge\n");
+        for (operation_id, value) in &guard.k_bits_remaining {
+            let _ = writeln!(
+                out,
+                "k_bits_remaining{{operation_id=\"{}\"}} {}",
+                operation_id, value
+            );
+        }
+        out.push_str("# TYPE w_current gauge\n");
+        for (operation_id, value) in &guard.w_current {
+            let _ = writeln!(
+                out,
+                "w_current{{operation_id=\"{}\"}} {}",
+                operation_id, value
+            );
+        }
+        out.push_str("# TYPE frozen gauge\n");
+        for (operation_id, value) in &guard.frozen {
+            let _ = writeln!(out, "frozen{{operation_id=\"{}\"}} {}", operation_id, value);
+        }
+        out
+    }
+
+    pub async fn spawn_metrics_server(
+        self: Arc<Self>,
+        addr: SocketAddr,
+    ) -> Result<tokio::task::JoinHandle<()>, TelemetryError> {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(TelemetryError::Server)?;
+        Ok(tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((mut socket, _)) => {
+                        let telemetry = self.clone();
+                        tokio::spawn(async move {
+                            let mut buf = vec![0_u8; 2048];
+                            match socket.read(&mut buf).await {
+                                Ok(n) if n > 0 => {
+                                    let req = String::from_utf8_lossy(&buf[..n]);
+                                    let (status, body) = if req.starts_with("GET /metrics ") {
+                                        ("200 OK", telemetry.render())
+                                    } else {
+                                        ("404 Not Found", "not found".to_string())
+                                    };
+                                    let response = format!(
+                                        "HTTP/1.1 {status}\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                        body.len(), body
+                                    );
+                                    let _ = socket.write_all(response.as_bytes()).await;
+                                }
+                                Ok(_) => {}
+                                Err(err) => {
+                                    tracing::warn!(error=%err, "metrics socket read failed");
+                                }
+                            }
+                        });
+                    }
+                    Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        tracing::error!(error=%err, "metrics server accept failed");
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+}
+
+pub fn derive_operation_id<I, K, V>(pairs: I) -> String
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    let canonical: BTreeMap<String, String> = pairs
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+    let mut hasher = Sha256::new();
+    for (key, value) in canonical {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.len().to_be_bytes());
+        hasher.update(value.as_bytes());
+        hasher.update(b";");
+    }
+    hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_operation_id;
+
+    #[test]
+    fn operation_id_deterministic_across_input_order() {
+        let a = derive_operation_id(vec![
+            ("topic_id", "aa"),
+            ("lineage_root", "bb"),
+            ("action_class", "execute_claim_v2"),
+            ("phys_signature_hash", "cc"),
+        ]);
+        let b = derive_operation_id(vec![
+            ("phys_signature_hash", "cc"),
+            ("action_class", "execute_claim_v2"),
+            ("lineage_root", "bb"),
+            ("topic_id", "aa"),
+        ]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn operation_id_changes_when_any_component_changes() {
+        let base = derive_operation_id(vec![
+            ("topic_id", "aa"),
+            ("lineage_root", "bb"),
+            ("action_class", "execute_claim_v2"),
+            ("phys_signature_hash", "cc"),
+        ]);
+        let changed = derive_operation_id(vec![
+            ("topic_id", "aa"),
+            ("lineage_root", "bc"),
+            ("action_class", "execute_claim_v2"),
+            ("phys_signature_hash", "cc"),
+        ]);
+        assert_ne!(base, changed);
+    }
+}
