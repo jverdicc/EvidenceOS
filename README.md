@@ -44,6 +44,23 @@ For the highest-risk profiles (e.g., CBRN), UVP recommends restricting outputs t
 
 EvidenceOS is best understood as a verification kernel inside a larger secure system: host compromise, key theft, and hardware side-channels require standard isolation and deployment controls in addition to the protocol.
 
+## Operation-Level Security (Swarms)
+
+In swarm settings, per-prompt or per-agent monitoring breaks down because each individual exchange can look harmless while the aggregate sequence still extracts sensitive holdout structure (Paper: §2 Threat Model; Paper: §3 Adaptive Leakage). A swarm can distribute probing across many identities, tools, and time windows, so controls that only score one request at a time miss the operation-level trajectory (Paper: §12 Multi-Identity Adaptation). UVP therefore treats an **operation** as a first-class accounting object rather than assuming agent boundaries are meaningful security boundaries (Paper: §14 Cross-Claim Budgeting). In EvidenceOS, operation identity is represented by shared topic keys (`TopicHash`/`MultiSignalTopicID`) plus lineage context and tool/action metadata, so correlated activity is charged to a common budget even when the source account rotates (Paper: §14 Cross-Claim Budgeting; Paper: §11 Topic Coupling). This makes extraction cost cumulative across the whole operation, not reset per prompt, per session, or per worker process. Lineage DAG links and ETL commitments preserve the history required to enforce these shared budgets deterministically and to prove decisions after the fact (Paper: §7 Lineage and Revocation; Paper: §9 Transparency Log). UVP then applies lane routing to operational risk, moving traffic through PASS, CANARY, HEAVY, REJECT, and FROZEN states as evidence budgets deplete or anomaly signals increase (Paper: §10 Lanes and Interventions). These lanes implement graded interventions: low-friction allow in PASS, higher scrutiny and throttling in CANARY/HEAVY, hard denial in REJECT, and containment with taint propagation in FROZEN. Safe example: if multiple benign-looking requests collectively show temporal staircase probing across channels, the system escalates lanes and may freeze descendants rather than emitting high-bandwidth feedback. The result is defensive operation-level control that constrains swarm adaptivity without publishing offensive playbooks.
+
+### Operation signals → UVP enforcement surface
+
+| Operation signal | UVP primitive | Expected system response |
+|---|---|---|
+| Temporal staircase probing across many small requests | `TopicHash` / `MultiSignalTopicID` cross-claim budget | Lane escalation (PASS → CANARY/HEAVY) and tighter response resolution |
+| Cross-channel differential probing (same objective via multiple tools/oracles) | Joint ledger accounting + shared topic pool | Throttling plus shared-budget debits to prevent channel arbitrage |
+| Identity rotation against one operational objective | Topic-coupled accounting + lineage-aware attribution | Escalation or reject despite account churn |
+| Rapid descendant branching after risky parent claim | Lineage DAG + ETL-backed revocation propagation | Taint descendants and optionally freeze branch (`FROZEN`) |
+| Burst activity near settlement boundaries | DLC epochs + deterministic settlement windows | Delay/queue into HEAVY lane; restrict timing side-channel value |
+| Suspicious validation canary failures | Canary pulse checks + revocation feed | Immediate lane raise, possible REJECT/FROZEN, publish revocation signal |
+
+See [`docs/OPERATION_LEVEL_SECURITY.md`](docs/OPERATION_LEVEL_SECURITY.md) for a deeper operational model and enterprise integration guidance.
+
 ## Architecture at a glance
 
 ```text
