@@ -18,10 +18,10 @@
 use std::time::Duration;
 
 use prost::Message;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tonic::metadata::MetadataMap;
 use tonic::service::Interceptor;
-use tonic::{Request, Status};
+use tonic::{GrpcMethod, Request, Status};
 
 #[derive(Debug, Clone)]
 pub enum AuthConfig {
@@ -95,11 +95,16 @@ impl RequestGuard {
 impl Interceptor for RequestGuard {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
         self.validate_auth(request.metadata())?;
+        let method = request
+            .extensions()
+            .get::<GrpcMethod<'static>>()
+            .map(|m| format!("/{}/{}", m.service(), m.method()))
+            .unwrap_or_else(|| "unknown".to_string());
         let req_id = read_request_id(request.metadata());
         if let Some(req_id) = req_id {
-            tracing::info!(request_id = %req_id, path = %request.uri().path(), "accepted rpc request");
+            tracing::info!(request_id = %req_id, path = %method, "accepted rpc request");
         } else {
-            tracing::info!(path = %request.uri().path(), "accepted rpc request");
+            tracing::info!(path = %method, "accepted rpc request");
         }
         self.set_timeout(&mut request);
         Ok(request)
