@@ -3,12 +3,6 @@ description: Report a reproducible defect in EvidenceOS
 labels:
   - bug
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for reporting. Please provide reproducible details.
-        Review `AGENTS.md`, `TESTING_EVIDENCE.md`, `docs/TEST_EVIDENCE.md`, and `docs/TEST_COVERAGE_MATRIX.md` before submitting protocol-impacting changes.
-
   - type: input
     id: version
     attributes:
@@ -18,21 +12,14 @@ body:
       required: true
 
   - type: textarea
-    id: env
-    attributes:
-      label: Environment
-      description: OS, rustc/cargo versions, and runtime details
-      placeholder: |
-        rustc --version
-        cargo --version
-    validations:
-      required: true
-
-  - type: textarea
     id: repro
     attributes:
       label: Reproduction steps
-      description: Exact commands and inputs
+      description: Exact commands, inputs, and expected result
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
     validations:
       required: true
 
@@ -50,26 +37,20 @@ body:
     validations:
       required: true
 
-  - type: checkboxes
-    id: quality
-    attributes:
-      label: Validation checklist
-      options:
-        - label: I can reproduce this via public APIs / externally visible behavior (black-box), not internal helper calls.
-          required: true
-        - label: My tests do not copy/paste production logic into test assertions.
-          required: true
-        - label: I covered boundary numeric cases (limits, 0, negatives, NaN/Inf where relevant).
-          required: true
-        - label: I added determinism assertions for deterministic functions/flows.
-          required: true
-        - label: I ran `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
-          required: true
-        - label: I did not introduce new `unsafe` code.
-          required: true
-
   - type: textarea
-    id: logs
+    id: tests
     attributes:
-      label: Sanitized logs / artifacts
-      description: Do not include secrets or raw sensitive payloads.
+      label: Test additions or gaps
+      description: Describe what test should be added or updated to prevent regressions.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I provided reproducible steps.
+          required: true
+        - label: I identified a test addition/update needed for this bug.
+          required: true
