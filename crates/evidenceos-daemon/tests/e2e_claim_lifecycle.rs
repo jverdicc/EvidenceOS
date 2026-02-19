@@ -301,6 +301,52 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
         .expect_err("empty claim_name rejected");
     assert_eq!(err.code(), Code::InvalidArgument);
 
+    let err = c
+        .create_claim_v2(pb::CreateClaimV2Request {
+            claim_name: "bad-metadata".to_string(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".to_string(),
+                alpha_micros: 50_000,
+                epoch_config_ref: String::new(),
+                output_schema_id: "legacy/v1".to_string(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![0; 32],
+                phys_hir_signature_hash: vec![0; 32],
+                dependency_merkle_root: vec![0; 32],
+            }),
+            holdout_ref: "h".to_string(),
+            epoch_size: 1,
+            oracle_num_symbols: 2,
+            access_credit: 1,
+        })
+        .await
+        .expect_err("empty metadata.epoch_config_ref rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    let err = c
+        .create_claim_v2(pb::CreateClaimV2Request {
+            claim_name: "bad-schema".to_string(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".to_string(),
+                alpha_micros: 50_000,
+                epoch_config_ref: "epoch".to_string(),
+                output_schema_id: String::new(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![0; 32],
+                phys_hir_signature_hash: vec![0; 32],
+                dependency_merkle_root: vec![0; 32],
+            }),
+            holdout_ref: "h".to_string(),
+            epoch_size: 1,
+            oracle_num_symbols: 2,
+            access_credit: 1,
+        })
+        .await
+        .expect_err("empty metadata.output_schema_id rejected");
+    assert_eq!(err.code(), Code::InvalidArgument);
+
     let valid_claim = create_claim_v2(&mut c, 2).await;
 
     // CommitArtifacts boundaries
