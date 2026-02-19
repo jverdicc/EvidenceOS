@@ -1,0 +1,34 @@
+{
+  "scenario_id": "reject_invalid_claim",
+  "category": "transport",
+  "expected_outcome": "REJECT",
+  "deterministic_seed": 11,
+  "steps": [
+    {
+      "rpc": "create_claim_v2",
+      "params": {
+        "claim_name": "",
+        "holdout_ref": "holdout-reject",
+        "epoch_size": 16,
+        "oracle_num_symbols": 1,
+        "access_credit": 0,
+        "metadata": {
+          "lane": "fast",
+          "alpha_micros": 50000,
+          "epoch_config_ref": "epoch/default",
+          "output_schema_id": "legacy/v1"
+        },
+        "signals": {
+          "semantic_hash_hex": "01",
+          "phys_hir_signature_hash_hex": "02",
+          "dependency_merkle_root_hex": "03"
+        }
+      }
+    }
+  ],
+  "expected_evidence": {
+    "verify_inclusion_proof": false,
+    "verify_consistency_proof": false,
+    "verify_sth_signature": false
+  }
+}

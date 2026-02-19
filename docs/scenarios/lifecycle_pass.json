@@ -1,0 +1,44 @@
+{
+  "scenario_id": "lifecycle_pass",
+  "category": "lifecycle",
+  "expected_outcome": "PASS",
+  "deterministic_seed": 7,
+  "steps": [
+    {
+      "rpc": "create_claim_v2",
+      "params": {
+        "claim_name": "scenario-pass",
+        "holdout_ref": "holdout-pass",
+        "epoch_size": 16,
+        "oracle_num_symbols": 4,
+        "access_credit": 256,
+        "metadata": {
+          "lane": "fast",
+          "alpha_micros": 50000,
+          "epoch_config_ref": "epoch/default",
+          "output_schema_id": "legacy/v1"
+        },
+        "signals": {
+          "semantic_hash_hex": "01",
+          "phys_hir_signature_hash_hex": "02",
+          "dependency_merkle_root_hex": "03"
+        }
+      }
+    },
+    {
+      "rpc": "commit_artifacts",
+      "params": {
+        "wasm_wat": "(module (import \"env\" \"emit_structured_claim\" (func $emit (param i32 i32) (result i32))) (memory (export \"memory\") 1) (data (i32.const 0) \"\\01\") (func (export \"run\") i32.const 0 i32.const 1 call $emit drop))"
+      }
+    },
+    { "rpc": "freeze_gates", "params": {} },
+    { "rpc": "seal_claim", "params": {} },
+    { "rpc": "execute_claim_v2", "params": {} },
+    { "rpc": "fetch_capsule", "params": {} }
+  ],
+  "expected_evidence": {
+    "verify_inclusion_proof": true,
+    "verify_consistency_proof": true,
+    "verify_sth_signature": true
+  }
+}

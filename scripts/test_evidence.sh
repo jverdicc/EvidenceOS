@@ -42,6 +42,15 @@ fi
     echo "skipped (dependency resolution unavailable)"
   fi
 
+
+  echo "== adversarial scenario suite =="
+  if [[ "$can_resolve_workspace_deps" == "true" ]]; then
+    ./scripts/run_scenarios.sh
+  else
+    mkdir -p artifacts/scenarios
+    echo '{"scenario_count":0,"status":"skipped (dependency resolution unavailable)"}' > artifacts/scenarios/summary.json
+  fi
+
   echo "== cargo llvm-cov (with integration/system tests) =="
   if [[ "$can_resolve_workspace_deps" == "true" ]]; then
     cargo llvm-cov --workspace --all-features --all-targets --lcov --output-path artifacts/coverage.lcov --fail-under-lines 95
@@ -79,6 +88,6 @@ if [[ -n "$ignored" ]]; then
   fi
 fi
 
-for f in artifacts/test_output.txt artifacts/coverage.lcov artifacts/clippy-report.txt artifacts/fuzz_aspec_verify.log artifacts/fuzz_etl_read_entry.log artifacts/fuzz_structured_claim_validate.log artifacts/fuzz_ledger_ops.log artifacts/fuzz_oracle_roundtrip.log artifacts/fuzz_etl_ops.log; do
+for f in artifacts/test_output.txt artifacts/coverage.lcov artifacts/clippy-report.txt artifacts/fuzz_aspec_verify.log artifacts/fuzz_etl_read_entry.log artifacts/fuzz_structured_claim_validate.log artifacts/fuzz_ledger_ops.log artifacts/fuzz_oracle_roundtrip.log artifacts/fuzz_etl_ops.log artifacts/scenarios/summary.json; do
   [[ -s "$f" ]] || { echo "missing required artifact: $f"; exit 1; }
 done

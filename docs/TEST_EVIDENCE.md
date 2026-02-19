@@ -62,3 +62,27 @@ make test-evidence
 ```
 
 This writes logs and coverage artifacts under `artifacts/` (coverage, test output, clippy output, fuzz logs).
+
+## Adversarial Scenario Suite Evidence
+
+The adversarial scenario suite executes deterministic scenario specs from `docs/scenarios/` against a live daemon using only public gRPC APIs and returned evidence artifacts.
+
+Run locally:
+
+```bash
+./scripts/run_scenarios.sh
+```
+
+Or via CI-equivalent evidence generation:
+
+```bash
+make test-evidence
+```
+
+Expected artifacts:
+
+- `artifacts/scenarios/summary.json`
+- `artifacts/scenarios/lifecycle_pass.json`
+- `artifacts/scenarios/reject_invalid_claim.json`
+
+Each artifact contains: scenario metadata, request/response summaries, expected vs observed verdict, and ETL proof verification results.

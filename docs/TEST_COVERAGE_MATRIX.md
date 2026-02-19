@@ -32,3 +32,11 @@ This matrix links key kernel/daemon behaviors to unit tests, property/fuzz tests
 |---|---|---|---|
 | ETL inclusion & consistency verification | `crates/evidenceos-core/src/etl.rs::tests::inclusion_proof_full_space_and_tamper_resistance` | `fuzz/fuzz_targets/fuzz_etl_ops.rs::fuzz_target` | `crates/evidenceos-daemon/tests/etl_verification_system.rs::verifies_inclusion_consistency_and_sth_signature` |
 | Claim lifecycle guards | `crates/evidenceos-daemon/src/server.rs::tests::lane_config_mapping_is_deterministic` | `fuzz/fuzz_targets/fuzz_daemon_decode_limits.rs::fuzz_target` | `crates/evidenceos-daemon/tests/lifecycle_v2.rs::cannot_execute_before_seal` |
+
+## Adversarial scenario evidence
+
+| Behavior | Unit tests | Property/Fuzz | System/Integration |
+|---|---|---|---|
+| Scenario spec parsing and deterministic ordering (`scenario_id`, `category`, `deterministic_seed`) | N/A | N/A | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
+| Scenario expected outcome enforcement (`PASS`, `REJECT`) | N/A | N/A | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
+| Public ETL evidence verification in scenario runner | `crates/evidenceos-core/src/etl.rs::tests::inclusion_proof_full_space_and_tamper_resistance` | `fuzz/fuzz_targets/fuzz_etl_ops.rs::fuzz_target` | `crates/evidenceos-daemon/tests/scenarios_system.rs::scenarios_produce_deterministic_public_evidence` |
