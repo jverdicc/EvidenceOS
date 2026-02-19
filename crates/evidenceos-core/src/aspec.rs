@@ -50,6 +50,12 @@ pub enum AspecLane {
     LowAssurance,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FloatPolicy {
+    RejectAll,
+    Allow,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AspecReport {
     pub lane: AspecLane,
@@ -86,6 +92,8 @@ pub struct AspecPolicy {
     pub max_loop_bound: u64,
     /// §A.1 six-sigma Kolmogorov proxy cap.
     pub kolmogorov_proxy_cap: u64,
+    /// Appendix A.3 float determinism policy.
+    pub float_policy: FloatPolicy,
 }
 
 impl Default for AspecPolicy {
@@ -104,6 +112,7 @@ impl Default for AspecPolicy {
             max_output_bytes: 4096,
             max_loop_bound: 1_000,
             kolmogorov_proxy_cap: 50_000,
+            float_policy: FloatPolicy::RejectAll,
         }
     }
 }
@@ -649,7 +658,9 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                         | Operator::I64ReinterpretF64
                         | Operator::F32Const { .. }
                         | Operator::F64Const { .. } => {
-                            if matches!(policy.lane, AspecLane::HighAssurance) {
+                            if matches!(policy.lane, AspecLane::HighAssurance)
+                                && matches!(policy.float_policy, FloatPolicy::RejectAll)
+                            {
                                 reasons.push(
                                     "floating point is banned in HighAssurance lane".to_string(),
                                 );
@@ -836,6 +847,7 @@ mod tests {
     fn low_policy() -> AspecPolicy {
         AspecPolicy {
             lane: AspecLane::LowAssurance,
+            float_policy: FloatPolicy::Allow,
             ..AspecPolicy::default()
         }
     }
@@ -1102,5 +1114,53 @@ mod tests {
         };
         let report = verify_aspec(&wasm, &k_policy_clear);
         assert!(!report.heavy_lane_flag);
+    }
+}
+
+#[cfg(test)]
+mod float_policy_tests {
+    use super::*;
+
+    #[test]
+    fn high_assurance_rejects_float_when_policy_rejects() {
+        let wasm = wat::parse_str(
+            r#"(module
+            (import "kernel" "emit_structured_claim" (func (param i32 i32)))
+            (memory (export "memory") 1)
+            (func (export "run")
+                f32.const 1.0
+                drop
+            )
+        )"#,
+        )
+        .expect("wat");
+        let report = verify_aspec(&wasm, &AspecPolicy::default());
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn low_assurance_allows_float_ops() {
+        let wasm = wat::parse_str(
+            r#"(module
+            (import "kernel" "emit_structured_claim" (func $emit (param i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "x")
+            (func (export "run")
+                f32.const 1.0
+                drop
+                i32.const 0
+                i32.const 1
+                call $emit
+            )
+        )"#,
+        )
+        .expect("wat");
+        let mut policy = AspecPolicy {
+            lane: AspecLane::LowAssurance,
+            ..AspecPolicy::default()
+        };
+        policy.float_policy = FloatPolicy::Allow;
+        let report = verify_aspec(&wasm, &policy);
+        assert!(report.ok, "{:?}", report.reasons);
     }
 }

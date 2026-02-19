@@ -273,6 +273,47 @@ pub struct RevocationEntry {
     pub revoked_at_index: u64,
 }
 
+fn rebuild_revocation_closure(entries: &[Vec<u8>]) -> HashSet<String> {
+    let mut revoked_roots = Vec::new();
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+
+    for data in entries {
+        if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(data) {
+            if !revocation.capsule_hash_hex.is_empty() {
+                revoked_roots.push(revocation.capsule_hash_hex);
+            }
+            continue;
+        }
+        if let Ok(capsule) = serde_json::from_slice::<ClaimCapsule>(data) {
+            if let Ok(capsule_hash) = capsule.capsule_hash_hex() {
+                for parent_hash in capsule.dependency_capsule_hashes {
+                    adjacency
+                        .entry(parent_hash)
+                        .or_default()
+                        .push(capsule_hash.clone());
+                }
+            }
+        }
+    }
+
+    let mut revoked = HashSet::new();
+    let mut queue = VecDeque::new();
+    for root in revoked_roots {
+        queue.push_back(root);
+    }
+    while let Some(cur) = queue.pop_front() {
+        if !revoked.insert(cur.clone()) {
+            continue;
+        }
+        if let Some(children) = adjacency.get(&cur) {
+            for child in children {
+                queue.push_back(child.clone());
+            }
+        }
+    }
+    revoked
+}
+
 #[derive(Debug)]
 pub struct Etl {
     path: PathBuf,
@@ -294,7 +335,7 @@ impl Etl {
         let mut leaves = Vec::new();
         let mut offsets = Vec::new();
         let mut pos = 0u64;
-        let mut revoked = HashSet::new();
+        let mut all_entries = Vec::new();
         let mut reader = BufReader::new(
             OpenOptions::new()
                 .read(true)
@@ -318,13 +359,10 @@ impl Etl {
                 .read_exact(&mut data)
                 .map_err(|_| EvidenceOSError::Internal)?;
             leaves.push(leaf_hash(&data));
-            if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(&data) {
-                if !revocation.capsule_hash_hex.is_empty() {
-                    revoked.insert(revocation.capsule_hash_hex);
-                }
-            }
+            all_entries.push(data);
             pos = pos.saturating_add(4 + len as u64);
         }
+        let revoked = rebuild_revocation_closure(&all_entries);
         Ok(Self {
             path,
             file,
@@ -371,6 +409,9 @@ impl Etl {
         let bytes = serde_json::to_vec(&entry).map_err(|_| EvidenceOSError::Internal)?;
         let appended = self.append(&bytes)?;
         self.revoked.insert(capsule_hash_hex.to_string());
+        for descendant in self.taint_descendants(capsule_hash_hex) {
+            self.revoked.insert(descendant);
+        }
         Ok(appended)
     }
 
@@ -836,5 +877,124 @@ mod tests {
         assert!(etl.is_revoked(&root_hash));
         assert!(etl.is_revoked(&mid_hash));
         assert!(etl.is_revoked(&leaf_hash));
+    }
+    #[test]
+    fn revocation_closure_rebuilds_after_restart_and_taints_new_descendant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl.log");
+        let ledger = ConservationLedger::new(0.05).expect("ledger");
+
+        let root = ClaimCapsule::new(
+            "claim-a".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![],
+            b"a",
+            b"w",
+            b"h",
+            &ledger,
+            1.1,
+            false,
+            1,
+            vec![1],
+            b"t",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            1.0,
+        );
+        let a_hash = root.capsule_hash_hex().expect("a hash");
+        let b = ClaimCapsule::new(
+            "claim-b".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![a_hash.clone()],
+            b"b",
+            b"w",
+            b"h",
+            &ledger,
+            1.1,
+            false,
+            1,
+            vec![1],
+            b"t",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            1.0,
+        );
+        let b_hash = b.capsule_hash_hex().expect("b hash");
+        let c = ClaimCapsule::new(
+            "claim-c".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![b_hash.clone()],
+            b"c",
+            b"w",
+            b"h",
+            &ledger,
+            1.1,
+            false,
+            1,
+            vec![1],
+            b"t",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            1.0,
+        );
+        let c_hash = c.capsule_hash_hex().expect("c hash");
+
+        {
+            let mut etl = Etl::open_or_create(&path).expect("etl");
+            etl.append(&root.to_json_bytes().expect("a bytes"))
+                .expect("append a");
+            etl.append(&b.to_json_bytes().expect("b bytes"))
+                .expect("append b");
+            etl.append(&c.to_json_bytes().expect("c bytes"))
+                .expect("append c");
+            etl.revoke(&a_hash, "revoke a").expect("revoke a");
+            assert!(etl.is_revoked(&b_hash));
+            assert!(etl.is_revoked(&c_hash));
+        }
+
+        let mut etl = Etl::open_or_create(&path).expect("reopen etl");
+        assert!(etl.is_revoked(&a_hash));
+        assert!(etl.is_revoked(&b_hash));
+        assert!(etl.is_revoked(&c_hash));
+
+        let d = ClaimCapsule::new(
+            "claim-d".into(),
+            "topic".into(),
+            "schema".into(),
+            vec![],
+            vec![b_hash.clone()],
+            b"d",
+            b"w",
+            b"h",
+            &ledger,
+            1.1,
+            false,
+            1,
+            vec![1],
+            b"t",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            1.0,
+        );
+        let d_hash = d.capsule_hash_hex().expect("d hash");
+        etl.append(&d.to_json_bytes().expect("d bytes"))
+            .expect("append d");
+        let tainted = etl.taint_descendants(&b_hash);
+        assert!(tainted.contains(&d_hash));
+        assert!(etl.is_revoked(&d_hash));
     }
 }

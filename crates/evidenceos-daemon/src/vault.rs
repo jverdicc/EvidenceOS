@@ -10,6 +10,7 @@ use wasmtime::{
 use evidenceos_core::oracle::{
     AccuracyOracleState, EValueFn, HoldoutLabels, NullSpec, OracleResolution,
 };
+use evidenceos_core::structured_claims;
 
 const TRACE_DOMAIN: &[u8] = b"evidenceos:judge_trace:v2";
 const TRACE_INPUT_CAP_BYTES: usize = 64;
@@ -29,6 +30,7 @@ pub struct VaultExecutionContext {
     pub oracle_num_buckets: u32,
     pub oracle_delta_sigma: f64,
     pub oracle_null_accuracy: f64,
+    pub output_schema_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +42,7 @@ pub struct VaultExecutionResult {
     pub output_bytes: u32,
     pub e_value_total: f64,
     pub leakage_bits_total: f64,
+    pub kout_bits_total: f64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -66,12 +69,14 @@ pub enum VaultError {
     InvalidOracleInput,
     #[error("missing required export: run")]
     MissingRunExport,
+    #[error("invalid structured claim: {0}")]
+    InvalidStructuredClaim(String),
 }
 
 #[derive(Debug, Clone)]
 enum HostCallRecord {
     OracleBucket {
-        input_preview: Vec<u8>,
+        input_digest: [u8; 32],
         bucket: u32,
     },
     EmitStructuredClaim {
@@ -90,7 +95,10 @@ struct VaultHostState {
     output: Option<Vec<u8>>,
     host_error: Option<VaultError>,
     leakage_bits: f64,
-    accumulated_e_value: f64,
+    accumulated_log_e_value: f64,
+    has_zero_e_value: bool,
+    output_schema_id: String,
+    kout_bits: f64,
     call_trace: Vec<HostCallRecord>,
 }
 
@@ -158,7 +166,10 @@ impl VaultEngine {
                 output: None,
                 host_error: None,
                 leakage_bits: 0.0,
-                accumulated_e_value: 1.0,
+                accumulated_log_e_value: 0.0,
+                has_zero_e_value: false,
+                output_schema_id: context.output_schema_id.clone(),
+                kout_bits: 0.0,
                 call_trace: Vec::new(),
             },
         );
@@ -200,14 +211,21 @@ impl VaultEngine {
             host.oracle_calls,
         );
 
+        let e_value_total = if host.has_zero_e_value {
+            0.0
+        } else {
+            host.accumulated_log_e_value.exp()
+        };
+
         Ok(VaultExecutionResult {
             canonical_output: output,
             judge_trace_hash,
             fuel_used,
             oracle_calls: host.oracle_calls,
             output_bytes,
-            e_value_total: host.accumulated_e_value,
+            e_value_total,
             leakage_bits_total: host.leakage_bits,
+            kout_bits_total: host.kout_bits,
         })
     }
 
@@ -238,9 +256,21 @@ impl VaultEngine {
                             anyhow::anyhow!("oracle query failed")
                         })?;
                         host.leakage_bits += oracle_result.k_bits;
-                        host.accumulated_e_value *= oracle_result.e_value.max(1e-12);
+                        if oracle_result.e_value == 0.0 {
+                            host.has_zero_e_value = true;
+                            host.accumulated_log_e_value = f64::NEG_INFINITY;
+                        } else if oracle_result.e_value.is_finite() && oracle_result.e_value > 0.0 {
+                            if !host.has_zero_e_value {
+                                host.accumulated_log_e_value += oracle_result.e_value.ln();
+                            }
+                        } else {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            return Err(anyhow::anyhow!("invalid oracle e-value"));
+                        }
+                        let mut input_digest = [0_u8; 32];
+                        input_digest.copy_from_slice(&Sha256::digest(&preds));
                         host.call_trace.push(HostCallRecord::OracleBucket {
-                            input_preview: preds.into_iter().take(TRACE_INPUT_CAP_BYTES).collect(),
+                            input_digest,
                             bucket: oracle_result.bucket,
                         });
                         Ok(oracle_result.bucket as i32)
@@ -268,15 +298,31 @@ impl VaultEngine {
                             host.host_error = Some(VaultError::OutputTooLarge);
                             return Err(anyhow::anyhow!("structured output too large"));
                         }
+                        let validated = structured_claims::validate_and_canonicalize(
+                            &host.output_schema_id,
+                            &output,
+                        )
+                        .map_err(|_| {
+                            host.host_error = Some(VaultError::InvalidStructuredClaim(
+                                "schema validation failed".to_string(),
+                            ));
+                            anyhow::anyhow!("structured claim validation failed")
+                        })?;
+                        if validated.canonical_bytes.len() > host.config.max_output_bytes as usize {
+                            host.host_error = Some(VaultError::OutputTooLarge);
+                            return Err(anyhow::anyhow!("structured output too large"));
+                        }
+                        host.kout_bits = validated.kout_bits_upper_bound as f64;
                         host.call_trace.push(HostCallRecord::EmitStructuredClaim {
-                            output_preview: output
+                            output_preview: validated
+                                .canonical_bytes
                                 .iter()
                                 .copied()
                                 .take(TRACE_INPUT_CAP_BYTES)
                                 .collect(),
-                            output_len: output.len() as u32,
+                            output_len: validated.canonical_bytes.len() as u32,
                         });
-                        host.output = Some(output);
+                        host.output = Some(validated.canonical_bytes);
                         Ok(0)
                     },
                 )
@@ -379,12 +425,11 @@ fn compute_judge_trace_hash(
     for call in calls {
         match call {
             HostCallRecord::OracleBucket {
-                input_preview,
+                input_digest,
                 bucket,
             } => {
                 trace.push(0x01);
-                trace.extend_from_slice(&(input_preview.len() as u32).to_be_bytes());
-                trace.extend_from_slice(input_preview);
+                trace.extend_from_slice(input_digest);
                 trace.extend_from_slice(&bucket.to_be_bytes());
             }
             HostCallRecord::EmitStructuredClaim {

@@ -767,6 +767,7 @@ fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
         oracle_num_buckets: claim.oracle_num_symbols,
         oracle_delta_sigma: claim.oracle_resolution.delta_sigma,
         oracle_null_accuracy: 0.5,
+        output_schema_id: claim.output_schema_id.clone(),
     })
 }
 
@@ -787,6 +788,9 @@ fn map_vault_error(err: VaultError) -> Status {
         }
         VaultError::InvalidOracleInput => Status::invalid_argument("invalid oracle input"),
         VaultError::MissingRunExport => Status::failed_precondition("missing run export"),
+        VaultError::InvalidStructuredClaim(reason) => {
+            Status::failed_precondition(format!("invalid structured claim: {reason}"))
+        }
     }
 }
 
@@ -1144,6 +1148,13 @@ impl EvidenceOs for EvidenceOsService {
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
+            claim
+                .ledger
+                .charge_kout_bits(vault_result.kout_bits_total)
+                .map_err(|_| {
+                    let _ = self.record_incident(claim, "ledger_kout_overrun");
+                    Status::failed_precondition("ledger kout budget exhausted")
+                })?;
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
                 persist_all(&self.state)?;

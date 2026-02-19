@@ -25,3 +25,10 @@ path = "fuzz_targets/fuzz_etl_read_entry.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_structured_claim_validate"
+path = "fuzz_targets/fuzz_structured_claim_validate.rs"
+test = false
+doc = false
+bench = false
