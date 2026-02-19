@@ -518,3 +518,111 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn tie_breaker_halfway_boundary() {
+        let mut r = OracleResolution::new(3, 0.0).expect("r");
+        r.tie_breaker = TieBreaker::NearestEven;
+        assert_eq!(r.quantize_unit_interval(0.25).expect("q"), 0);
+    }
+    #[test]
+    fn quantize_clamps_out_of_range() {
+        let r = OracleResolution::new(8, 0.0).expect("r");
+        assert_eq!(r.quantize_unit_interval(-10.0).expect("q"), 0);
+        assert_eq!(r.quantize_unit_interval(10.0).expect("q"), 7);
+    }
+    #[test]
+    fn holdout_labels_rejects_non_binary() {
+        assert!(HoldoutLabels::new(vec![0, 2]).is_err());
+    }
+    #[test]
+    fn accuracy_oracle_state_rejects_len_mismatch() {
+        let hold = HoldoutLabels::new(vec![1, 0]).expect("h");
+        let mut s = AccuracyOracleState::new(
+            hold,
+            OracleResolution::new(8, 0.1).expect("r"),
+            NullSpec {
+                domain: "d".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("s");
+        assert!(s.query(&[1]).is_err());
+    }
+    #[test]
+    fn codec_hash_is_stable() {
+        let a = OracleResolution::new(8, 0.0).expect("r").codec_hash;
+        let b = OracleResolution::new(16, 0.0).expect("r").codec_hash;
+        assert_eq!(a, b);
+    }
+    #[test]
+    fn calibration_fields_roundtrip() {
+        let h = [7u8; 32];
+        let r = OracleResolution::new(8, 0.0)
+            .expect("r")
+            .with_calibration(h, 42);
+        assert_eq!(r.calibration_manifest_hash, h);
+        assert_eq!(r.calibrated_at_epoch, 42);
+    }
+    #[test]
+    fn null_accuracy_validation() {
+        let n = NullSpec {
+            domain: "d".into(),
+            null_accuracy: 0.0,
+            e_value_fn: EValueFn::LikelihoodRatio { n_observations: 1 },
+        };
+        assert_eq!(n.compute_e_value(0.5), 0.0);
+    }
+    #[test]
+    fn fixed_e_value_validation() {
+        let n = NullSpec {
+            domain: "d".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::Fixed(2.0),
+        };
+        assert_eq!(n.compute_e_value(0.1), 2.0);
+    }
+    #[test]
+    fn compute_e_value_rejects_nan() {
+        let n = NullSpec {
+            domain: "d".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::LikelihoodRatio { n_observations: 1 },
+        };
+        assert_eq!(n.compute_e_value(f64::NAN), 0.0);
+    }
+    #[test]
+    fn null_spec_domain_is_non_semantic() {
+        let a = NullSpec {
+            domain: "a".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::Fixed(1.1),
+        };
+        let b = NullSpec {
+            domain: "b".into(),
+            null_accuracy: 0.5,
+            e_value_fn: EValueFn::Fixed(1.1),
+        };
+        assert_eq!(a.compute_e_value(0.7), b.compute_e_value(0.7));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test] fn oracle_roundtrip_varlen_symbols_proptest(num in 2u32..4096u32, b in 0u32..4095u32) { prop_assume!(b<num); let r=OracleResolution::new(num,0.0).expect("r"); let enc=r.encode_bucket(b).expect("e"); let dec=r.decode_bucket(&enc).expect("d"); prop_assert_eq!(dec,b); }
+        #[test] fn tie_breaker_proptest(v in 0.0f64..1.0f64) { let r=OracleResolution::new(16,0.0).expect("r"); let b=r.quantize_unit_interval(v).expect("q"); prop_assert!(b<16); }
+        #[test] fn ttl_expiry_proptest(base in 0u64..1000u64, ttl in 1u64..100u64) { let mut r=OracleResolution::new(8,0.0).expect("r"); r.calibrated_at_epoch=base; r.ttl_epochs=Some(ttl); prop_assert!(!r.ttl_expired(base+ttl-1)); prop_assert!(r.ttl_expired(base+ttl)); }
+        #[test] fn quantize_proptest(v in -10.0f64..10.0f64) { let r=OracleResolution::new(8,0.0).expect("r"); let b=r.quantize_unit_interval(v); prop_assert!(b.is_ok() || v.is_nan()); }
+        #[test] fn holdout_labels_proptest(xs in prop::collection::vec(0u8..2u8,1..128)) { let h=HoldoutLabels::new(xs.clone()).expect("h"); prop_assert_eq!(h.len(), xs.len()); }
+        #[test] fn oracle_query_proptest(xs in prop::collection::vec(0u8..2u8,2..64)) { let hold=HoldoutLabels::new(xs.clone()).expect("h"); let mut s=AccuracyOracleState::new(hold, OracleResolution::new(8,0.1).expect("r"), NullSpec{domain:"d".into(),null_accuracy:0.5,e_value_fn:EValueFn::Fixed(1.0)}).expect("s"); let r=s.query(&xs).expect("q"); prop_assert!(r.k_bits.is_finite()); }
+        #[test] fn null_accuracy_proptest(a in 0.0f64..1.0f64, o in 0.0f64..1.0f64) { let n=NullSpec{domain:"d".into(),null_accuracy:a,e_value_fn:EValueFn::LikelihoodRatio{n_observations:2}}; let e=n.compute_e_value(o); prop_assert!(e.is_finite() || e.is_nan()); }
+        #[test] fn fixed_e_value_proptest(v in 0.0f64..10.0f64) { let n=NullSpec{domain:"d".into(),null_accuracy:0.5,e_value_fn:EValueFn::Fixed(v)}; prop_assert_eq!(n.compute_e_value(0.2),v); }
+        #[test] fn compute_e_value_proptest(a in 0.1f64..1.0f64, o in 0.0f64..1.0f64, nobs in 1usize..8usize) { let n=NullSpec{domain:"d".into(),null_accuracy:a,e_value_fn:EValueFn::LikelihoodRatio{n_observations:nobs}}; let e=n.compute_e_value(o); prop_assert!(e>=0.0 || e.is_nan()); }
+        #[test] fn null_spec_domain_proptest(name in "[a-z]{1,8}") { let n=NullSpec{domain:name,null_accuracy:0.5,e_value_fn:EValueFn::Fixed(1.0)}; prop_assert_eq!(n.compute_e_value(0.9),1.0); }
+    }
+}
