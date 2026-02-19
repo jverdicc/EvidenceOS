@@ -44,6 +44,25 @@ For the highest-risk profiles (e.g., CBRN), UVP recommends restricting outputs t
 
 EvidenceOS is best understood as a verification kernel inside a larger secure system: host compromise, key theft, and hardware side-channels require standard isolation and deployment controls in addition to the protocol.
 
+
+## Architecture: The Language Trade-off Matrix
+
+For the EvidenceOS kernel, language choice is a security and determinism decision, not a developer preference. The Universal Verification Protocol (UVP) requires a strict **Trifecta**:
+
+1. **Memory safety by construction** (to preserve the kernel threat boundary and prevent memory-corruption escapes).
+2. **Deterministic low-latency execution** (to avoid runtime jitter that can distort settlement and verification behavior).
+3. **Modern systems ecosystem fit** (to integrate directly with gRPC/Protobuf and contemporary AI-agent orchestration stacks).
+
+No mainstream language besides Rust provides all three simultaneously.
+
+| Language | What it does well | Why it fails the UVP kernel requirement |
+|---|---|---|
+| **C++** | Exceptional performance; dominant in MFT/HFT infrastructure where latency is critical. | In our threat model, manual memory management leaves room for buffer overflows and memory-corruption classes that can become “Sealed Vault” boundary escapes. That risk is incompatible with kernel-grade verification. |
+| **Go / Java** | Strong memory safety and mature production tooling. | Their GC runtime introduces non-deterministic pause behavior and tail-latency spikes. For algorithmic trading-class timing and hard-real-time verification constraints, that execution jitter is unacceptable. |
+| **Ada / SPARK** | Strong safety and formal assurance posture. | It does not currently offer the same modern ecosystem ergonomics we need (especially frictionless gRPC/Protobuf integration) to interface with current AI agent workflows at velocity. |
+
+**Why Rust is the viable kernel language:** Rust’s **Ownership and Borrowing** model enforces memory safety and data-race freedom at compile time, while preserving predictable performance with zero garbage-collector runtime overhead. That is exactly the UVP Trifecta: safety, determinism, and practical integration in one systems language.
+
 ## Operation-Level Security (Swarms)
 
 In swarm settings, per-prompt or per-agent monitoring breaks down because each individual exchange can look harmless while the aggregate sequence still extracts sensitive holdout structure (Paper: §2 Threat Model; Paper: §3 Adaptive Leakage). A swarm can distribute probing across many identities, tools, and time windows, so controls that only score one request at a time miss the operation-level trajectory (Paper: §12 Multi-Identity Adaptation). UVP therefore treats an **operation** as a first-class accounting object rather than assuming agent boundaries are meaningful security boundaries (Paper: §14 Cross-Claim Budgeting). In EvidenceOS, operation identity is represented by shared topic keys (`TopicHash`/`MultiSignalTopicID`) plus lineage context and tool/action metadata, so correlated activity is charged to a common budget even when the source account rotates (Paper: §14 Cross-Claim Budgeting; Paper: §11 Topic Coupling). This makes extraction cost cumulative across the whole operation, not reset per prompt, per session, or per worker process. Lineage DAG links and ETL commitments preserve the history required to enforce these shared budgets deterministically and to prove decisions after the fact (Paper: §7 Lineage and Revocation; Paper: §9 Transparency Log). UVP then applies lane routing to operational risk, moving traffic through PASS, CANARY, HEAVY, REJECT, and FROZEN states as evidence budgets deplete or anomaly signals increase (Paper: §10 Lanes and Interventions). These lanes implement graded interventions: low-friction allow in PASS, higher scrutiny and throttling in CANARY/HEAVY, hard denial in REJECT, and containment with taint propagation in FROZEN. Safe example: if multiple benign-looking requests collectively show temporal staircase probing across channels, the system escalates lanes and may freeze descendants rather than emitting high-bandwidth feedback. The result is defensive operation-level control that constrains swarm adaptivity without publishing offensive playbooks.
