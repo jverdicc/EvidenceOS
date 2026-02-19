@@ -181,7 +181,10 @@ message GetCapsuleResponse {
   uint64 etl_index = 3;
 }
 
-message GetPublicKeyRequest {}
+message GetPublicKeyRequest {
+  // Optional key identifier; when empty, returns the active key.
+  bytes key_id = 1;
+}
 
 message GetPublicKeyResponse {
   bytes ed25519_public_key = 1;
@@ -195,6 +198,7 @@ message GetSignedTreeHeadResponse {
   uint64 tree_size = 1;
   bytes root_hash = 2;
   bytes signature = 3;
+  bytes key_id = 4;
 }
 
 message GetInclusionProofRequest {
@@ -223,12 +227,14 @@ message GetRevocationFeedRequest {}
 message GetRevocationFeedResponse {
   repeated RevocationEntry entries = 1;
   bytes signature = 2;
+  bytes key_id = 3;
 }
 
 message SignedTreeHead {
   uint64 tree_size = 1;
   bytes root_hash = 2;
   bytes signature = 3;
+  bytes key_id = 4;
 }
 
 message MerkleInclusionProof {
@@ -281,4 +287,5 @@ message WatchRevocationsResponse {
   repeated RevocationEntry entries = 1;
   bytes signature = 2;
   SignedTreeHead signed_tree_head = 3;
+  bytes key_id = 4;
 }
