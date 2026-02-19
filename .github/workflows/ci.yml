@@ -26,6 +26,12 @@ jobs:
           cargo install cargo-llvm-cov --locked
           cargo install cargo-fuzz --locked
 
+      - name: Check coverage policy consistency
+        run: ./scripts/check_coverage_policy.py
+
+      - name: Unit test coverage policy checker
+        run: python -m unittest scripts.tests.test_check_coverage_policy
+
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 

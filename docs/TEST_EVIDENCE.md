@@ -22,7 +22,6 @@ Evidence artifacts are generated with Makefile targets at repository root.
 `make test-evidence` writes:
 
 - `artifacts/coverage.lcov`
-- `artifacts/coverage-html/`
 - `artifacts/test_output.txt`
 - `artifacts/clippy-report.txt`
 - `artifacts/fuzz_*.log`
@@ -33,11 +32,10 @@ Evidence artifacts are generated with Makefile targets at repository root.
 
 ## Required thresholds
 
-- `evidenceos-core` line coverage: **>= 90%**
-- `evidenceos-daemon` line coverage: **>= 80%**
+- Workspace line coverage: **>= 95%** (enforced by `cargo llvm-cov --fail-under-lines 95`).
 - No ignored tests unless explicitly documented with rationale.
 
-The `make test-evidence` target enforces both coverage minimums and rejects ignored tests in crate sources.
+The `make test-evidence` target delegates to `./scripts/test_evidence.sh`, which is the single source of truth for coverage gating and ignored-test enforcement.
 
 
 ## Allowed ignored tests
