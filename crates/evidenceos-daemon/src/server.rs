@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
@@ -308,6 +309,7 @@ pub struct EvidenceOsService {
     dependence_tax_multiplier: f64,
     telemetry: Arc<Telemetry>,
     probe_detector: Arc<Mutex<ProbeDetector>>,
+    policy_oracles: Arc<Vec<PolicyOracleEngine>>,
 }
 
 impl EvidenceOsService {
@@ -350,6 +352,8 @@ impl EvidenceOsService {
             tracing::warn!(path=%etl_path.display(), "etl recovered from partial trailing write");
         }
 
+        let policy_oracles = load_policy_oracles(&root)?;
+
         let state = Arc::new(KernelState {
             claims: Mutex::new(
                 persisted
@@ -387,6 +391,7 @@ impl EvidenceOsService {
             dependence_tax_multiplier,
             telemetry,
             probe_detector: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig::from_env()))),
+            policy_oracles: Arc::new(policy_oracles),
         })
     }
 
@@ -1104,6 +1109,52 @@ fn kernel_structured_output(
     serde_json::to_vec(&value).map_err(|_| Status::internal("failed to encode structured output"))
 }
 
+fn policy_oracle_input_json(
+    claim: &Claim,
+    vault_result: &crate::vault::VaultExecutionResult,
+    ledger: &ConservationLedger,
+    canonical_output: &[u8],
+    reason_codes: &[u32],
+) -> Result<Vec<u8>, Status> {
+    let payload = serde_json::json!({
+        "alpha_micros": (ledger.alpha * 1_000_000.0).round() as u32,
+        "canonical_output_len": canonical_output.len() as u32,
+        "canonical_output_sha256": hex::encode(sha256_bytes(canonical_output)),
+        "claim_id": hex::encode(claim.claim_id),
+        "epoch": claim.epoch_counter,
+        "fuel_used": vault_result.fuel_used,
+        "k_bits_total": ledger.k_bits_total,
+        "lane": EvidenceOsService::lane_name(claim.lane),
+        "oracle_calls": vault_result.oracle_calls,
+        "reason_codes": reason_codes,
+        "topic_id": hex::encode(claim.topic_id),
+        "w": ledger.wealth,
+    });
+    evidenceos_core::capsule::canonical_json(&payload)
+        .map_err(|_| Status::internal("policy oracle input encode failed"))
+}
+
+fn load_policy_oracles(root: &Path) -> Result<Vec<PolicyOracleEngine>, Status> {
+    let oracle_dir = root.join("policy-oracles");
+    if !oracle_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let allow_failure = std::env::var("EVIDENCEOS_ALLOW_ORACLE_LOAD_FAILURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    match PolicyOracleEngine::load_from_dir(&oracle_dir) {
+        Ok(oracles) => Ok(oracles),
+        Err(err) if allow_failure => {
+            tracing::warn!(error=%err, "policy oracle load failed; continuing due to override");
+            Ok(Vec::new())
+        }
+        Err(err) => {
+            tracing::error!(error=%err, "policy oracle load failed");
+            Err(err)
+        }
+    }
+}
+
 fn derive_holdout_labels(
     holdout_handle_id: [u8; 32],
     holdout_len: usize,
@@ -1645,6 +1696,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 req.decision,
                 req.reason_codes.clone(),
+                Vec::new(),
                 &trace_hash,
                 claim.holdout_ref.clone(),
                 format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
@@ -1979,7 +2031,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "vault_oracle_bucket",
                 u64::from(vault_result.oracle_calls),
             );
-            let canonical_output = vault_result.canonical_output;
+            let canonical_output = vault_result.canonical_output.clone();
             let fuel_used = vault_result.fuel_used;
             let trace_hash = vault_result.judge_trace_hash;
             if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
@@ -2064,17 +2116,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                 None,
             )?;
             let can_certify = claim.ledger.can_certify();
-            let decision = if claim.ledger.frozen || claim.lane == Lane::Heavy {
-                self.transition_claim(claim, ClaimState::Frozen, 0.0, 0.0, None)?;
+            let mut decision = if claim.ledger.frozen || claim.lane == Lane::Heavy {
                 pb::Decision::Defer as i32
             } else if can_certify {
-                self.transition_claim(claim, ClaimState::Certified, 0.0, 0.0, None)?;
                 pb::Decision::Approve as i32
             } else {
-                self.transition_claim(claim, ClaimState::Revoked, 0.0, 0.0, None)?;
                 pb::Decision::Reject as i32
             };
-            let reason_codes = match decision {
+            let mut reason_codes = match decision {
                 x if x == pb::Decision::Approve as i32 => vec![1],
                 x if x == pb::Decision::Defer as i32 => {
                     self.telemetry.record_reject("defer");
@@ -2084,6 +2133,63 @@ impl EvidenceOsV2 for EvidenceOsService {
                     self.telemetry.record_reject("reject");
                     vec![2]
                 }
+            };
+            let oracle_input = policy_oracle_input_json(
+                claim,
+                &vault_result,
+                &claim.ledger,
+                &canonical_output,
+                &reason_codes,
+            )?;
+            let mut policy_receipts: Vec<PolicyOracleReceipt> = Vec::new();
+            let mut oracle_decision = PolicyOracleDecision::Pass;
+            for oracle in self.policy_oracles.iter() {
+                match oracle.evaluate(&oracle_input) {
+                    Ok((d, receipt)) => {
+                        if d != PolicyOracleDecision::Pass {
+                            reason_codes.push(receipt.reason_code);
+                        }
+                        if d == PolicyOracleDecision::Reject {
+                            oracle_decision = PolicyOracleDecision::Reject;
+                        } else if d == PolicyOracleDecision::DeferToHeavy
+                            && oracle_decision != PolicyOracleDecision::Reject
+                        {
+                            oracle_decision = PolicyOracleDecision::DeferToHeavy;
+                        }
+                        policy_receipts.push(receipt);
+                    }
+                    Err(_) => {
+                        oracle_decision = PolicyOracleDecision::DeferToHeavy;
+                        let receipt = oracle.fail_closed_receipt();
+                        reason_codes.push(receipt.reason_code);
+                        policy_receipts.push(receipt);
+                    }
+                }
+            }
+            if oracle_decision == PolicyOracleDecision::Reject {
+                decision = pb::Decision::Reject as i32;
+            } else if oracle_decision == PolicyOracleDecision::DeferToHeavy {
+                decision = pb::Decision::Defer as i32;
+            }
+            if decision != pb::Decision::Approve as i32 {
+                let clamped = e_value.min(1.0);
+                if clamped < e_value {
+                    claim.ledger.wealth *= clamped / e_value;
+                }
+            }
+            if decision == pb::Decision::Defer as i32 {
+                self.transition_claim(claim, ClaimState::Frozen, 0.0, 0.0, None)?;
+            } else if decision == pb::Decision::Approve as i32 {
+                self.transition_claim(claim, ClaimState::Certified, 0.0, 0.0, None)?;
+            } else {
+                self.transition_claim(claim, ClaimState::Revoked, 0.0, 0.0, None)?;
+            }
+            reason_codes.sort_unstable();
+            reason_codes.dedup();
+            let e_value = if decision == pb::Decision::Approve as i32 {
+                e_value
+            } else {
+                e_value.min(1.0)
             };
             let canonical_output = kernel_structured_output(
                 &claim.output_schema_id,
@@ -2113,6 +2219,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 decision,
                 reason_codes.clone(),
+                policy_receipts.into_iter().map(Into::into).collect(),
                 &trace_hash,
                 claim.holdout_ref.clone(),
                 format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
