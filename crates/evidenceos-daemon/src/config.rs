@@ -1,4 +1,5 @@
 use evidenceos_core::oracle_bundle::TrustedOracleAuthorities;
+use evidenceos_core::oracle_plusplus::OraclePlusPlusConfig;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct DaemonOracleConfig {
     pub oracle_dir: PathBuf,
     pub trusted_authorities: TrustedOracleAuthorities,
+    pub oracle_plusplus_backends: Vec<OraclePlusPlusConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +37,7 @@ impl DaemonOracleConfig {
         Ok(Self {
             oracle_dir: oracle_dir.as_ref().to_path_buf(),
             trusted_authorities,
+            oracle_plusplus_backends: Vec::new(),
         })
     }
 }
