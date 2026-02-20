@@ -7,8 +7,15 @@ use evidenceos_core::nullspec::{
 use evidenceos_core::nullspec_store::NullSpecStore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const ORACLE_OPERATOR_PATH: &str = "oracle_operator_config.json";
+const EPOCH_CONTROL_PATH: &str = "epoch_control.json";
+const GOVERNANCE_LOG_PATH: &str = "etl_governance_events.log";
 
 #[derive(Parser)]
 struct Cli {
@@ -25,6 +32,18 @@ enum Command {
     Canary {
         #[command(subcommand)]
         cmd: CanaryCmd,
+    },
+    Oracle {
+        #[command(subcommand)]
+        cmd: OracleCmd,
+    },
+    Epoch {
+        #[command(subcommand)]
+        cmd: EpochCmd,
+    },
+    Governance {
+        #[command(subcommand)]
+        cmd: GovernanceCmd,
     },
 }
 
@@ -98,6 +117,80 @@ enum CanaryCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum OracleCmd {
+    List {
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+    Show {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        oracle_id: String,
+    },
+    SetTtl {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        oracle_id: String,
+        #[arg(long)]
+        ttl_epochs: u64,
+        #[arg(long)]
+        signing_key: PathBuf,
+        #[arg(long)]
+        key_id: String,
+    },
+    RotateCalibration {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        oracle_id: String,
+        #[arg(long)]
+        calib_hash: String,
+        #[arg(long)]
+        signing_key: PathBuf,
+        #[arg(long)]
+        key_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EpochCmd {
+    Advance {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        to: u64,
+        #[arg(long)]
+        signing_key: PathBuf,
+        #[arg(long)]
+        key_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GovernanceCmd {
+    Events {
+        #[command(subcommand)]
+        cmd: GovernanceEventsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GovernanceEventsCmd {
+    List {
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+    Show {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        event_id: String,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 struct CalibrationBuckets {
     counts: Vec<u64>,
@@ -105,15 +198,37 @@ struct CalibrationBuckets {
     epoch_created: u64,
 }
 
-#[derive(Debug, Serialize)]
-struct GovernanceEvent<'a> {
-    event_type: &'a str,
-    nullspec_id: String,
-    oracle_id: String,
-    resolution_hash: String,
-    epoch: u64,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OracleOperatorRecord {
+    ttl_epochs: u64,
+    calibration_hash: Option<String>,
+    calibration_epoch: Option<u64>,
+    updated_at_epoch: u64,
     key_id: String,
     signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OracleOperatorConfig {
+    oracles: BTreeMap<String, OracleOperatorRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedGovernanceEvent {
+    event_id: String,
+    event_type: String,
+    epoch: u64,
+    key_id: String,
+    payload: serde_json::Value,
+    signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GovernanceEventPayload<'a> {
+    event_type: &'a str,
+    epoch: u64,
+    key_id: &'a str,
+    payload: serde_json::Value,
 }
 
 fn main() {
@@ -121,6 +236,9 @@ fn main() {
     let out = match cli.cmd {
         Command::Nullspec { cmd } => run_nullspec(cmd),
         Command::Canary { cmd } => run_canary(cmd),
+        Command::Oracle { cmd } => run_oracle(cmd),
+        Command::Epoch { cmd } => run_epoch(cmd),
+        Command::Governance { cmd } => run_governance(cmd),
     };
     match out {
         Ok(v) => println!("{}", v),
@@ -128,6 +246,151 @@ fn main() {
             println!("{}", json!({"error": msg}));
             std::process::exit(1);
         }
+    }
+}
+
+fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
+    match cmd {
+        OracleCmd::List { data_dir } => {
+            let cfg = read_oracle_config(&data_dir)?;
+            Ok(json!(cfg.oracles))
+        }
+        OracleCmd::Show {
+            data_dir,
+            oracle_id,
+        } => {
+            let cfg = read_oracle_config(&data_dir)?;
+            let record = cfg
+                .oracles
+                .get(&oracle_id)
+                .ok_or_else(|| "oracle not found".to_string())?;
+            Ok(json!(record))
+        }
+        OracleCmd::SetTtl {
+            data_dir,
+            oracle_id,
+            ttl_epochs,
+            signing_key,
+            key_id,
+        } => {
+            if ttl_epochs == 0 {
+                return Err("ttl_epochs must be > 0".to_string());
+            }
+            let mut cfg = read_oracle_config(&data_dir)?;
+            let epoch = unix_epoch_now()?;
+            let payload = json!({"oracle_id": oracle_id, "ttl_epochs": ttl_epochs});
+            let event = sign_governance_event(
+                "oracle_ttl_set",
+                epoch,
+                &key_id,
+                payload.clone(),
+                &signing_key,
+            )?;
+
+            let entry = cfg.oracles.entry(oracle_id.clone()).or_default();
+            entry.ttl_epochs = ttl_epochs;
+            entry.updated_at_epoch = epoch;
+            entry.key_id = key_id;
+            entry.signature_ed25519 = event.signature_ed25519.clone();
+
+            write_json_atomic(
+                data_dir.join(ORACLE_OPERATOR_PATH),
+                &cfg,
+                "write oracle config failed",
+            )?;
+            append_governance_event(&data_dir, &event)?;
+            Ok(json!({"status":"ok", "event_id": event.event_id}))
+        }
+        OracleCmd::RotateCalibration {
+            data_dir,
+            oracle_id,
+            calib_hash,
+            signing_key,
+            key_id,
+        } => {
+            let _ = parse_hex32(&calib_hash)?;
+            let mut cfg = read_oracle_config(&data_dir)?;
+            let epoch = unix_epoch_now()?;
+            let payload = json!({"oracle_id": oracle_id, "calibration_hash": calib_hash});
+            let event = sign_governance_event(
+                "oracle_calibration_rotated",
+                epoch,
+                &key_id,
+                payload.clone(),
+                &signing_key,
+            )?;
+
+            let entry = cfg.oracles.entry(oracle_id.clone()).or_default();
+            if entry.ttl_epochs == 0 {
+                entry.ttl_epochs = 1;
+            }
+            entry.calibration_hash = payload
+                .get("calibration_hash")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            entry.calibration_epoch = Some(epoch);
+            entry.updated_at_epoch = epoch;
+            entry.key_id = key_id;
+            entry.signature_ed25519 = event.signature_ed25519.clone();
+
+            write_json_atomic(
+                data_dir.join(ORACLE_OPERATOR_PATH),
+                &cfg,
+                "write oracle config failed",
+            )?;
+            append_governance_event(&data_dir, &event)?;
+            Ok(json!({"status":"ok", "event_id": event.event_id}))
+        }
+    }
+}
+
+fn run_epoch(cmd: EpochCmd) -> Result<serde_json::Value, String> {
+    match cmd {
+        EpochCmd::Advance {
+            data_dir,
+            to,
+            signing_key,
+            key_id,
+        } => {
+            let epoch = unix_epoch_now()?;
+            let event = sign_governance_event(
+                "epoch_advanced",
+                epoch,
+                &key_id,
+                json!({"to": to}),
+                &signing_key,
+            )?;
+            let control = json!({
+                "forced_epoch": to,
+                "updated_at_epoch": epoch,
+                "key_id": key_id,
+                "signature_ed25519": event.signature_ed25519,
+                "event_id": event.event_id,
+            });
+            write_json_atomic(
+                data_dir.join(EPOCH_CONTROL_PATH),
+                &control,
+                "write epoch control failed",
+            )?;
+            append_governance_event(&data_dir, &event)?;
+            Ok(json!({"status":"ok"}))
+        }
+    }
+}
+
+fn run_governance(cmd: GovernanceCmd) -> Result<serde_json::Value, String> {
+    match cmd {
+        GovernanceCmd::Events { cmd } => match cmd {
+            GovernanceEventsCmd::List { data_dir } => Ok(json!(read_governance_events(&data_dir)?)),
+            GovernanceEventsCmd::Show { data_dir, event_id } => {
+                let events = read_governance_events(&data_dir)?;
+                let event = events
+                    .into_iter()
+                    .find(|ev| ev.event_id == event_id)
+                    .ok_or_else(|| "governance event not found".to_string())?;
+                Ok(json!(event))
+            }
+        },
     }
 }
 
@@ -218,17 +481,20 @@ fn run_canary(cmd: CanaryCmd) -> Result<serde_json::Value, String> {
                     .map_err(|e| e.to_string())?;
                     append_governance_event(
                         &data_dir,
-                        GovernanceEvent {
-                            event_type: "canary_reset",
-                            nullspec_id: String::new(),
-                            oracle_id: claim_name,
-                            resolution_hash: holdout,
+                        &SignedGovernanceEvent {
+                            event_id: sha256_hex(
+                                serde_json::to_string(&gov)
+                                    .map_err(|e| e.to_string())?
+                                    .as_bytes(),
+                            ),
+                            event_type: "canary_reset".to_string(),
                             epoch: 0,
                             key_id: gov
                                 .get("key_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string(),
+                            payload: json!({"claim_name": claim_name, "holdout": holdout}),
                             signature_ed25519: gov
                                 .get("signature_ed25519")
                                 .and_then(|v| v.as_str())
@@ -289,12 +555,7 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
                 created_by,
                 signature_ed25519: Vec::new(),
             };
-            let key_bytes = fs::read(signing_key).map_err(|e| e.to_string())?;
-            let sk_arr: [u8; 32] = key_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| "signing key must be raw 32-byte seed".to_string())?;
-            let sk = SigningKey::from_bytes(&sk_arr);
+            let sk = read_signing_key(&signing_key)?;
             let payload = contract
                 .signing_payload_bytes()
                 .map_err(|_| "signing payload encode failed".to_string())?;
@@ -313,13 +574,16 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
                 .map_err(|_| "install failed".to_string())?;
             append_governance_event(
                 &data_dir,
-                GovernanceEvent {
-                    event_type: "nullspec_install",
-                    nullspec_id: hex::encode(contract.nullspec_id),
-                    oracle_id: contract.oracle_id,
-                    resolution_hash: hex::encode(contract.oracle_resolution_hash),
+                &SignedGovernanceEvent {
+                    event_id: sha256_hex(&contract.nullspec_id),
+                    event_type: "nullspec_install".to_string(),
                     epoch: contract.epoch_created,
                     key_id: contract.created_by,
+                    payload: json!({
+                        "nullspec_id": hex::encode(contract.nullspec_id),
+                        "oracle_id": contract.oracle_id,
+                        "resolution_hash": hex::encode(contract.oracle_resolution_hash),
+                    }),
                     signature_ed25519: hex::encode(contract.signature_ed25519),
                 },
             )?;
@@ -342,13 +606,17 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
                 .map_err(|_| "activate failed".to_string())?;
             append_governance_event(
                 &data_dir,
-                GovernanceEvent {
-                    event_type: "nullspec_activate",
-                    nullspec_id,
-                    oracle_id,
-                    resolution_hash: hex::encode(contract.oracle_resolution_hash),
+                &SignedGovernanceEvent {
+                    event_id: sha256_hex(&id),
+                    event_type: "nullspec_activate".to_string(),
                     epoch: contract.epoch_created,
                     key_id: contract.created_by,
+                    payload: json!({
+                        "nullspec_id": nullspec_id,
+                        "oracle_id": oracle_id,
+                        "holdout": holdout,
+                        "resolution_hash": hex::encode(contract.oracle_resolution_hash),
+                    }),
                     signature_ed25519: hex::encode(contract.signature_ed25519),
                 },
             )?;
@@ -373,14 +641,73 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
     }
 }
 
+fn sign_governance_event(
+    event_type: &str,
+    epoch: u64,
+    key_id: &str,
+    payload: serde_json::Value,
+    signing_key: &Path,
+) -> Result<SignedGovernanceEvent, String> {
+    let signing = read_signing_key(signing_key)?;
+    let to_sign = GovernanceEventPayload {
+        event_type,
+        epoch,
+        key_id,
+        payload: payload.clone(),
+    };
+    let signing_payload = serde_json::to_vec(&to_sign).map_err(|e| e.to_string())?;
+    let sig = signing.sign(&signing_payload).to_bytes();
+    Ok(SignedGovernanceEvent {
+        event_id: sha256_hex(&signing_payload),
+        event_type: event_type.to_string(),
+        epoch,
+        key_id: key_id.to_string(),
+        payload,
+        signature_ed25519: hex::encode(sig),
+    })
+}
+
+fn read_signing_key(path: &Path) -> Result<SigningKey, String> {
+    let key_bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let sk_arr: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "signing key must be raw 32-byte seed".to_string())?;
+    Ok(SigningKey::from_bytes(&sk_arr))
+}
+
+fn read_oracle_config(data_dir: &Path) -> Result<OracleOperatorConfig, String> {
+    let path = data_dir.join(ORACLE_OPERATOR_PATH);
+    if !path.exists() {
+        return Ok(OracleOperatorConfig::default());
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+fn read_governance_events(data_dir: &Path) -> Result<Vec<SignedGovernanceEvent>, String> {
+    let path = data_dir.join(GOVERNANCE_LOG_PATH);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push(serde_json::from_str::<SignedGovernanceEvent>(line).map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
 fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
     let b = hex::decode(s).map_err(|e| e.to_string())?;
     b.try_into().map_err(|_| "expected 32-byte hex".to_string())
 }
 
-fn append_governance_event(data_dir: &Path, event: GovernanceEvent<'_>) -> Result<(), String> {
-    let path = data_dir.join("etl_governance_events.log");
-    let payload = serde_json::to_vec(&event).map_err(|e| e.to_string())?;
+fn append_governance_event(data_dir: &Path, event: &SignedGovernanceEvent) -> Result<(), String> {
+    let path = data_dir.join(GOVERNANCE_LOG_PATH);
+    let payload = serde_json::to_vec(event).map_err(|e| e.to_string())?;
     let mut line = payload;
     line.push(b'\n');
     use std::io::Write;
@@ -391,4 +718,32 @@ fn append_governance_event(data_dir: &Path, event: GovernanceEvent<'_>) -> Resul
         .map_err(|e| e.to_string())?;
     f.write_all(&line).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn write_json_atomic(
+    path: PathBuf,
+    value: &impl Serialize,
+    err_prefix: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{err_prefix}: {e}"))?;
+    }
+    let tmp = path.with_extension("tmp");
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| format!("{err_prefix}: {e}"))?;
+    fs::write(&tmp, bytes).map_err(|e| format!("{err_prefix}: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("{err_prefix}: {e}"))?;
+    Ok(())
+}
+
+fn unix_epoch_now() -> Result<u64, String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
