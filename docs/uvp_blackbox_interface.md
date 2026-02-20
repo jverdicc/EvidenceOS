@@ -11,14 +11,14 @@ For an end-to-end walkthrough, see the worked example in [Threat Model Walkthrou
 
 ```mermaid
 flowchart LR
-    subgraph U[DiscOS / Userland (Untrusted)]
+    subgraph U["DiscOS / Userland (Untrusted)"]
         A[Create claim metadata]
         B[Prepare manifests + wasm hash + holdout ref]
         C[Request oracle execution]
         D[Verify returned proofs/receipts]
     end
 
-    subgraph T[EvidenceOS Kernel (Trusted)]
+    subgraph T["EvidenceOS Kernel (Trusted)"]
         E[Validate + canonicalize inputs]
         F[Freeze immutable evaluation envelope]
         G[Execute deterministic policy\nwith leak charging]
