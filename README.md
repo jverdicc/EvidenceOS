@@ -44,6 +44,67 @@ For the highest-risk profiles (e.g., CBRN), UVP recommends restricting outputs t
 
 EvidenceOS is best understood as a verification kernel inside a larger secure system: host compromise, key theft, and hardware side-channels require standard isolation and deployment controls in addition to the protocol.
 
+## Threat Model by Example (blackbox walkthrough)
+
+The goal of this section is to explain the failure mode and defense without needing Rust, gRPC, Merkle-tree, or blockchain background.
+
+### Baseline failure: adaptive probing breaks an oracle-only setup
+
+1. Imagine a model-evaluation service that returns a score each time an agent submits a candidate.
+2. The service owner believes each score is “safe enough” because each one looks low detail on its own.
+3. An adaptive agent does not care about any single response; it cares about the sequence.
+4. It makes tiny targeted edits, reads the next score, and updates its next query strategy.
+5. Over many rounds, this creates a feedback loop from hidden holdout data back to the agent.
+6. No one response is catastrophic, but the transcript as a whole can reveal too much.
+7. This is the conceptual lesson from the paper’s Experiment 0: oracle-only controls collapse under adaptive probing.
+8. “Rate limit more” helps only weakly if outputs are still precise and composable.
+9. “Use multiple oracles” can make leakage worse when they share the same hidden holdout.
+10. A baseline system may look stable in one-shot tests but fail once an optimizer is allowed to iterate.
+11. The result is silent overfitting to protected data while confidence appears to rise.
+12. In short: without transcript-level controls, adaptive interaction converts harmless-looking answers into extractable signal.
+
+### EvidenceOS success path: bounded outputs, shared budgets, and automatic halts
+
+1. EvidenceOS treats each evaluation as a governed interaction, not a free-form score API.
+2. Incoming claims and artifacts are canonicalized so semantically equivalent requests map to one normalized form.
+3. Oracle replies are quantized into a finite alphabet (coarse buckets, not arbitrary precision numbers).
+4. Hysteresis adds a stall region: tiny local changes return the previous bucket instead of fresh detail.
+5. This removes high-resolution “gradient-like” feedback from repetitive near-threshold probing.
+6. Each emitted symbol consumes leakage budget `k`, charged from the finite output alphabet.
+7. The system also tracks evidence budget `W` and composes `k/W` across time, not just per request.
+8. If two oracles share a holdout, EvidenceOS meters them jointly so cross-oracle subtraction cannot bypass limits.
+9. As budgets tighten or invariants fail, lanes are frozen or escalated (for example into heavier review paths).
+10. Settlement and log publication continue with auditable receipts, but unsafe interaction bandwidth is reduced.
+11. When limits are exceeded, progress can stall by design instead of leaking incremental holdout information.
+12. In short: EvidenceOS converts adaptive probing from an unbounded extraction game into a metered process that can halt safely.
+
+### Worked blackbox I/O example
+
+| Stage | Input to EvidenceOS (type-level) | Output from EvidenceOS (type-level) | Security effect |
+| --- | --- | --- | --- |
+| `CreateClaim` | Claim statement, claimant identity, declared policy/topic | Claim ID + initial lane/budget state | Starts auditable lineage and shared budgeting context |
+| `FreezeGates` | Finalized claim metadata + artifact references | Immutable gate/freeze receipt | Prevents mid-flight mutation of what will be evaluated |
+| `ExecuteClaim` | Sealed claim + oracle binding + holdout policy | Quantized oracle symbol(s), updated `k/W`, lane decision (`PASS/CANARY/HEAVY/REJECT`) | Emits bounded information and charges transcript leakage |
+| `Capsule + ETL inclusion` | Settlement-ready claim state | Signed capsule + ETL inclusion/consistency-verifiable record | Produces portable proof that can be audited later |
+
+### What this is NOT
+
+- Not a general sandbox for arbitrary internet-connected agents.
+- Not a promise that one query is always harmless; safety is enforced over the transcript.
+- Not a replacement for host hardening, key management, or side-channel defenses.
+- Not a loophole-free guarantee against every real-world deployment mistake.
+
+### Threats out of scope
+
+- Compromised host/VM or runtime that can tamper with process memory/execution.
+- Stolen or misused signing/service keys.
+- Hardware/microarchitectural side channels and physical exfiltration paths.
+- Any path that bypasses the kernel and directly exposes raw holdout data.
+
+### Not a blockchain
+
+EvidenceOS uses ETL as an append-only transparency log with signed checkpoints plus inclusion/consistency proofs. A blockchain, mining, and global consensus are **not** required for EvidenceOS to operate.
+
 ## Architecture diagrams
 
 For high-level visual references of the vault/oracle internals and end-to-end UVP flow, see [`docs/ARCHITECTURE_DIAGRAMS.md`](docs/ARCHITECTURE_DIAGRAMS.md).
