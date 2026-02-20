@@ -80,3 +80,17 @@ path = "fuzz_targets/fuzz_probe_detector.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_structured_claims_validator"
+path = "fuzz_targets/fuzz_structured_claims_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_unit_parser"
+path = "fuzz_targets/fuzz_unit_parser.rs"
+test = false
+doc = false
+bench = false

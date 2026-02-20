@@ -148,6 +148,8 @@ struct Claim {
     claim_name: String,
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
+    #[serde(default)]
+    semantic_hash: Option<[u8; 32]>,
     epoch_size: u64,
     #[serde(default)]
     epoch_counter: u64,
@@ -1394,6 +1396,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim_name: "legacy-v1".to_string(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
+            semantic_hash: None,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
@@ -1986,6 +1989,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim_name: req.claim_name,
             output_schema_id: canonical_output_schema_id,
             phys_hir_hash: phys,
+            semantic_hash,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
@@ -2142,6 +2146,30 @@ impl EvidenceOsV2 for EvidenceOsService {
             if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
                 let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             }
+            let mut physhir_mismatch = false;
+            if claim.output_schema_id != structured_claims::LEGACY_SCHEMA_ID {
+                if let Ok(validated) = structured_claims::validate_and_canonicalize(
+                    &claim.output_schema_id,
+                    &canonical_output,
+                ) {
+                    let computed_phys =
+                        evidenceos_core::physhir::physhir_signature_hash(&validated.claim);
+                    let topic_check = compute_topic_id(
+                        &CoreClaimMetadataV2 {
+                            lane: Self::lane_name(claim.lane).to_string(),
+                            alpha_micros: (claim.ledger.alpha * 1_000_000.0).round() as u32,
+                            epoch_config_ref: "execute".to_string(),
+                            output_schema_id: claim.output_schema_id.clone(),
+                        },
+                        &TopicSignals {
+                            semantic_hash: claim.semantic_hash,
+                            phys_hir_signature_hash: computed_phys,
+                            dependency_merkle_root: claim.dependency_merkle_root,
+                        },
+                    );
+                    physhir_mismatch = topic_check.escalate_to_heavy;
+                }
+            }
             let charge_bits = claim.oracle_resolution.bits_per_call()
                 * f64::from(vault_result.oracle_calls.max(1));
             let dependence_multiplier = self.dependence_tax_multiplier;
@@ -2222,13 +2250,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                 None,
             )?;
             let can_certify = claim.ledger.can_certify();
-            let mut decision = if claim.ledger.frozen || claim.lane == Lane::Heavy {
-                pb::Decision::Defer as i32
-            } else if can_certify {
-                pb::Decision::Approve as i32
-            } else {
-                pb::Decision::Reject as i32
-            };
+            let mut decision =
+                if claim.ledger.frozen || claim.lane == Lane::Heavy || physhir_mismatch {
+                    pb::Decision::Defer as i32
+                } else if can_certify {
+                    pb::Decision::Approve as i32
+                } else {
+                    pb::Decision::Reject as i32
+                };
             let mut reason_codes = match decision {
                 x if x == pb::Decision::Approve as i32 => vec![1],
                 x if x == pb::Decision::Defer as i32 => {
@@ -2240,6 +2269,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     vec![2]
                 }
             };
+            if physhir_mismatch {
+                reason_codes.push(9104);
+            }
             let oracle_input = policy_oracle_input_json(
                 claim,
                 &vault_result,

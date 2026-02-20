@@ -254,7 +254,7 @@ fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
 
 #[test]
 fn structured_schema_output_near_bound_succeeds_and_plus_one_fails() {
-    let payload = br#"{"schema_version":"1","claim_id":"c1","event_time_unix":1,"substance":"chlorine","unit":"ppm","value":1,"confidence_bps":9000,"reason_code":"ALERT","reason_codes":["ALERT"],"references":[],"location_id":"l","sensor_id":"s"}"#;
+    let payload = br#"{"schema_id":"cbrn-sc.v1","claim_id":"c1","event_time_unix":1,"sensor_id":"s","location_id":"l","measurement":"1 mmol/L","confidence_bps":9000,"reason_code":"ALERT"}"#;
 
     let wasm_ok = wat::parse_str(format!(
         r#"(module (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32))) (memory (export "memory") 1) (data (i32.const 0) "{}") (func (export "run") i32.const 0 i32.const {} call $emit drop))"#,

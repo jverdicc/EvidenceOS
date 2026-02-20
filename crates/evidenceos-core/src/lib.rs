@@ -44,6 +44,7 @@ pub mod oracle_bundle;
 pub mod oracle_plusplus;
 pub mod oracle_registry;
 pub mod oracle_wasm;
+pub mod physhir;
 pub mod structured_claims;
 pub mod topicid;
 
