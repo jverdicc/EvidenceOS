@@ -1,9 +1,9 @@
 use evidenceos_core::crypto_transcripts::verify_sth_signature;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
-use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::{pb, sha256_domain, DOMAIN_STH_SIGNATURE_V1};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;

@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+use std::path::PathBuf;
+use std::process::Command;
+
 use sha2::{Digest, Sha256};
 
 #[test]
@@ -23,5 +26,32 @@ fn canonical_proto_checksum_matches_snapshot() {
     assert_eq!(
         actual, expected,
         "canonical proto changed; update snapshot intentionally"
+    );
+}
+
+#[test]
+fn descriptor_set_checksum_matches_snapshot() {
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("protoc path");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let descriptor = temp.path().join("evidenceos.protoset");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let status = Command::new(protoc)
+        .current_dir(&manifest_dir)
+        .arg("--proto_path=proto")
+        .arg("--include_imports")
+        .arg(format!("--descriptor_set_out={}", descriptor.display()))
+        .arg("proto/evidenceos.proto")
+        .arg("proto/evidenceos_v1.proto")
+        .status()
+        .expect("run protoc");
+    assert!(status.success(), "protoc descriptor generation failed");
+
+    let bytes = std::fs::read(&descriptor).expect("read descriptor set");
+    let actual = hex::encode(Sha256::digest(&bytes));
+    let expected = "efe32d04e5d2281d7b9c9c83deabcf349b163859c6f17deb2163c1a7604e02e1";
+    assert_eq!(
+        actual, expected,
+        "descriptor set changed; update snapshot intentionally"
     );
 }

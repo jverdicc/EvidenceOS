@@ -59,7 +59,9 @@ use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::pb;
+use evidenceos_protocol::{
+    pb, sha256_domain, DOMAIN_CLAIM_ID, DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
+};
 
 use pb::evidence_os_server::EvidenceOs as EvidenceOsV2;
 use pb::v1;
