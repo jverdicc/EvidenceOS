@@ -59,7 +59,9 @@ use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::{pb, DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1};
+use evidenceos_protocol::{
+    pb, sha256_domain, DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1,
+};
 
 use pb::evidence_os_server::EvidenceOs as EvidenceOsV2;
 use pb::v1;
@@ -1202,16 +1204,6 @@ fn oracle_pins_hash(pins: &OraclePins) -> [u8; 32] {
     payload.extend_from_slice(&pins.ttl_epochs.to_be_bytes());
     payload.extend_from_slice(&pins.pinned_epoch.to_be_bytes());
     sha256_bytes(&payload)
-}
-
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(domain);
-    h.update(payload);
-    let out = h.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&out);
-    hash
 }
 
 fn key_id_from_verifying_key(verifying_key: &VerifyingKey) -> [u8; 32] {
