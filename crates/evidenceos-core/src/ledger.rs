@@ -296,6 +296,8 @@ pub struct ConservationLedger {
     pub events: Vec<LedgerEvent>,
     pub k_bits_budget: Option<f64>,
     pub access_credit_budget: Option<f64>,
+    pub dp_epsilon_budget: Option<f64>,
+    pub dp_delta_budget: Option<f64>,
     pub frozen: bool,
 }
 
@@ -315,6 +317,8 @@ impl ConservationLedger {
             events: Vec::new(),
             k_bits_budget: None,
             access_credit_budget: None,
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
             frozen: false,
         })
     }
@@ -333,6 +337,22 @@ impl ConservationLedger {
     ) -> Self {
         self.k_bits_budget = k_bits_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self.access_credit_budget = access_credit_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.dp_epsilon_budget = None;
+        self.dp_delta_budget = None;
+        self
+    }
+
+    pub fn with_all_budgets(
+        mut self,
+        k_bits_budget: Option<f64>,
+        access_credit_budget: Option<f64>,
+        dp_epsilon_budget: Option<f64>,
+        dp_delta_budget: Option<f64>,
+    ) -> Self {
+        self.k_bits_budget = k_bits_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.access_credit_budget = access_credit_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.dp_epsilon_budget = dp_epsilon_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.dp_delta_budget = dp_delta_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self
     }
     pub fn alpha_prime(&self) -> f64 {
@@ -413,6 +433,30 @@ impl ConservationLedger {
             }
         }
 
+        if let Some(b) = self.dp_epsilon_budget {
+            if epsilon_next > b + f64::EPSILON {
+                self.frozen = true;
+                self.events.push(LedgerEvent::leak(
+                    "freeze_dp_epsilon_exhausted",
+                    0.0,
+                    json!({"overrun_epsilon": epsilon_next - b}),
+                ));
+                return Err(EvidenceOSError::Frozen);
+            }
+        }
+
+        if let Some(b) = self.dp_delta_budget {
+            if delta_next > b + f64::EPSILON {
+                self.frozen = true;
+                self.events.push(LedgerEvent::leak(
+                    "freeze_dp_delta_exhausted",
+                    0.0,
+                    json!({"overrun_delta": delta_next - b}),
+                ));
+                return Err(EvidenceOSError::Frozen);
+            }
+        }
+
         self.k_bits_total = new_total;
         self.epsilon_total = epsilon_next;
         self.delta_total = delta_next;
@@ -420,6 +464,16 @@ impl ConservationLedger {
         self.events
             .push(LedgerEvent::leak(kind.to_string(), k_bits, meta));
         Ok(())
+    }
+
+    pub fn charge_dp(
+        &mut self,
+        epsilon: f64,
+        delta: f64,
+        reason: &str,
+        details: Value,
+    ) -> EvidenceOSResult<()> {
+        self.charge_all(0.0, epsilon, delta, 0.0, reason, details)
     }
 
     pub fn charge_kout_bits(&mut self, kout_bits: f64) -> EvidenceOSResult<()> {
@@ -700,6 +754,28 @@ mod matrix_tests {
         l.charge_all(0.1, 0.0, 0.0, 0.2, "x", Value::Null)
             .expect("c");
         assert!(l.access_credit_spent >= a);
+    }
+
+    #[test]
+    fn charge_dp_tracks_totals_and_budget() {
+        let mut l = ConservationLedger::new(0.1).expect("l").with_all_budgets(
+            Some(5.0),
+            Some(5.0),
+            Some(0.3),
+            Some(1e-6),
+        );
+        l.charge_dp(0.1, 2e-7, "dp_laplace_i64", json!({"kind":"laplace"}))
+            .expect("first dp charge");
+        l.charge_dp(0.2, 8e-7, "dp_gaussian_f64", json!({"kind":"gaussian"}))
+            .expect("second dp charge");
+        assert!((l.epsilon_total - 0.3).abs() < 1e-12);
+        assert!((l.delta_total - 1e-6).abs() < 1e-12);
+        assert!(matches!(
+            l.charge_dp(0.01, 0.0, "dp_laplace_i64", Value::Null),
+            Err(EvidenceOSError::Frozen)
+        ));
+        let freeze_event = l.events.last().expect("freeze event");
+        assert_eq!(freeze_event.kind, "freeze_dp_epsilon_exhausted");
     }
     #[test]
     fn freeze_after_budget_exhaustion() {

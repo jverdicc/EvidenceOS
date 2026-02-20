@@ -1954,6 +1954,8 @@ fn vault_context(
         oracle_delta_sigma: claim.oracle_resolution.delta_sigma,
         null_spec,
         output_schema_id: claim.output_schema_id.clone(),
+        dp_epsilon_budget: claim.ledger.dp_epsilon_budget.unwrap_or(0.0),
+        dp_delta_budget: claim.ledger.dp_delta_budget.unwrap_or(0.0),
     })
 }
 
@@ -2048,6 +2050,13 @@ fn map_vault_error(err: VaultError) -> Status {
         VaultError::InvalidStructuredClaim(reason) => {
             Status::failed_precondition(format!("invalid structured claim: {reason}"))
         }
+        VaultError::InvalidDpInput => {
+            Status::invalid_argument("invalid differential privacy input")
+        }
+        VaultError::DpBudgetExceeded => {
+            Status::failed_precondition("differential privacy budget exhausted")
+        }
+        VaultError::RngFailure => Status::internal("secure random generator failure"),
     }
 }
 
@@ -2088,7 +2097,14 @@ impl EvidenceOsV2 for EvidenceOsService {
             .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
         let ledger = ConservationLedger::new(req.alpha)
             .map_err(|_| Status::invalid_argument("alpha must be in (0,1)"))
-            .map(|l| l.with_budgets(Some(access_credit), Some(access_credit)))?;
+            .map(|l| {
+                l.with_all_budgets(
+                    Some(access_credit),
+                    Some(access_credit),
+                    Some(0.0),
+                    Some(0.0),
+                )
+            })?;
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic_id);
@@ -2415,14 +2431,16 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .ledger
                 .charge_all(
                     taxed_bits,
-                    0.0,
-                    0.0,
+                    vault_result.dp_epsilon_total,
+                    vault_result.dp_delta_total,
                     taxed_bits,
                     "structured_output",
                     json!({
                         "post_canonical_bits": charge_bits,
                         "dependence_multiplier": dependence_multiplier,
                         "taxed_k_bits": taxed_bits,
+                        "dp_epsilon": vault_result.dp_epsilon_total,
+                        "dp_delta": vault_result.dp_delta_total,
                     }),
                 )
                 .map_err(|_| {
@@ -2708,9 +2726,11 @@ impl EvidenceOsV2 for EvidenceOsService {
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
             .map(|l| {
-                l.with_budgets(
+                l.with_all_budgets(
                     Some(lane_cfg.k_bits_budget),
                     Some(lane_cfg.access_credit_budget),
+                    Some(lane_cfg.dp_epsilon_budget),
+                    Some(lane_cfg.dp_delta_budget),
                 )
             })?;
 
@@ -3009,27 +3029,20 @@ impl EvidenceOsV2 for EvidenceOsService {
             };
             let taxed_bits = charge_bits * dependence_multiplier;
             let covariance_charge = taxed_bits - charge_bits;
-            let lane_cfg = LaneConfig::for_lane(
-                claim.lane,
-                claim.oracle_num_symbols,
-                claim.ledger.access_credit_budget.unwrap_or(0.0),
-            )?;
-            let dp_epsilon = lane_cfg.dp_epsilon_budget * 0.0;
-            let dp_delta = lane_cfg.dp_delta_budget * 0.0;
             claim
                 .ledger
                 .charge_all(
                     taxed_bits,
-                    dp_epsilon,
-                    dp_delta,
+                    vault_result.dp_epsilon_total,
+                    vault_result.dp_delta_total,
                     taxed_bits,
                     "structured_output",
                     json!({
                         "post_canonical_bits": charge_bits,
                         "dependence_multiplier": dependence_multiplier,
                         "taxed_k_bits": taxed_bits,
-                        "dp_epsilon": dp_epsilon,
-                        "dp_delta": dp_delta,
+                        "dp_epsilon": vault_result.dp_epsilon_total,
+                        "dp_delta": vault_result.dp_delta_total,
                     }),
                 )
                 .map_err(|_| Status::failed_precondition("ledger budget exhausted"))?;
