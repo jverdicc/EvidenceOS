@@ -484,6 +484,10 @@ impl Etl {
         self.recovered_from_partial_write
     }
 
+    pub fn sync_data(&self) -> EvidenceOSResult<()> {
+        self.file.sync_data().map_err(|_| EvidenceOSError::Internal)
+    }
+
     pub fn revoke(
         &mut self,
         capsule_hash_hex: &str,

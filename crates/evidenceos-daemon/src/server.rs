@@ -81,6 +81,15 @@ const BURN_WASM_MODULE: &[u8] = &[
     0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
 ];
 
+#[cfg(feature = "crash-test-failpoints")]
+fn maybe_abort_failpoint(name: &str) {
+    if std::env::var("EVIDENCEOS_CRASH_FAILPOINT").ok().as_deref() == Some(name) {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(feature = "crash-test-failpoints"))]
+fn maybe_abort_failpoint(_name: &str) {}
 #[derive(Debug, Clone)]
 struct HoldoutDescriptor {
     holdout_ref: String,
@@ -509,6 +518,27 @@ struct PersistedState {
     canary_states: Vec<(String, CanaryState)>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+enum PendingMutation {
+    Execute {
+        claim_id: [u8; 32],
+        state: ClaimState,
+        decision: i32,
+        capsule_hash: [u8; 32],
+        capsule_bytes: Vec<u8>,
+        etl_index: Option<u64>,
+    },
+    Revoke {
+        claim_id: [u8; 32],
+        capsule_hash: [u8; 32],
+        reason: String,
+        timestamp_unix: u64,
+        tainted_claim_ids: Vec<[u8; 32]>,
+        etl_applied: bool,
+    },
+}
+
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 
 const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
@@ -575,7 +605,7 @@ impl EvidenceOsService {
             .open(&lock_path)
             .map_err(|_| Status::failed_precondition("another writer already holds kernel lock"))?;
 
-        let state_file = root.join("state.json");
+        let state_file = root.join(STATE_FILE_NAME);
         let persisted = if state_file.exists() {
             let bytes =
                 std::fs::read(&state_file).map_err(|_| Status::internal("read state failed"))?;
@@ -642,6 +672,7 @@ impl EvidenceOsService {
             revocation_subscribers: Mutex::new(Vec::new()),
             operator_config: Mutex::new(operator_config),
         });
+        recover_pending_mutation(&state)?;
         persist_all(&state)?;
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1172,6 +1203,51 @@ impl EvidenceOsService {
     }
 }
 
+const STATE_FILE_NAME: &str = "state.json";
+const PENDING_MUTATION_FILE_NAME: &str = "pending_mutation.json";
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), Status> {
+    let dir = File::open(path).map_err(|_| Status::internal("open directory failed"))?;
+    dir.sync_all()
+        .map_err(|_| Status::internal("sync directory failed"))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), Status> {
+    Ok(())
+}
+
+fn write_file_atomic_durable(
+    path: &Path,
+    bytes: &[u8],
+    write_err: &'static str,
+) -> Result<(), Status> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Status::internal("path parent missing"))?;
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp).map_err(|_| Status::internal(write_err))?;
+    f.write_all(bytes)
+        .map_err(|_| Status::internal(write_err))?;
+    f.sync_all().map_err(|_| Status::internal(write_err))?;
+    std::fs::rename(&tmp, path).map_err(|_| Status::internal(write_err))?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn remove_file_durable(path: &Path) -> Result<(), Status> {
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|_| Status::internal("remove pending mutation failed"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| Status::internal("path parent missing"))?;
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
 fn persist_all(state: &KernelState) -> Result<(), Status> {
     let persisted = PersistedState {
         claims: state.claims.lock().values().cloned().collect(),
@@ -1197,10 +1273,90 @@ fn persist_all(state: &KernelState) -> Result<(), Status> {
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|_| Status::internal("serialize state failed"))?;
-    let tmp_path = state.data_path.join("state.json.tmp");
-    let final_path = state.data_path.join("state.json");
-    std::fs::write(&tmp_path, bytes).map_err(|_| Status::internal("write state failed"))?;
-    std::fs::rename(&tmp_path, &final_path).map_err(|_| Status::internal("rename state failed"))?;
+    write_file_atomic_durable(
+        &state.data_path.join(STATE_FILE_NAME),
+        &bytes,
+        "write state failed",
+    )
+}
+
+fn persist_pending_mutation(state: &KernelState, pending: &PendingMutation) -> Result<(), Status> {
+    let bytes = serde_json::to_vec_pretty(pending)
+        .map_err(|_| Status::internal("serialize pending mutation failed"))?;
+    write_file_atomic_durable(
+        &state.data_path.join(PENDING_MUTATION_FILE_NAME),
+        &bytes,
+        "write pending mutation failed",
+    )
+}
+
+fn clear_pending_mutation(state: &KernelState) -> Result<(), Status> {
+    remove_file_durable(&state.data_path.join(PENDING_MUTATION_FILE_NAME))
+}
+
+fn recover_pending_mutation(state: &KernelState) -> Result<(), Status> {
+    let path = state.data_path.join(PENDING_MUTATION_FILE_NAME);
+    if !path.exists() {
+        return Ok(());
+    }
+    let bytes =
+        std::fs::read(&path).map_err(|_| Status::internal("read pending mutation failed"))?;
+    let pending: PendingMutation = serde_json::from_slice(&bytes)
+        .map_err(|_| Status::internal("decode pending mutation failed"))?;
+
+    match pending {
+        PendingMutation::Execute {
+            claim_id,
+            state: next_state,
+            decision,
+            capsule_hash,
+            capsule_bytes,
+            etl_index,
+        } => {
+            let mut claims = state.claims.lock();
+            if let Some(claim) = claims.get_mut(&claim_id) {
+                claim.state = next_state;
+                claim.last_decision = Some(decision);
+                claim.last_capsule_hash = Some(capsule_hash);
+                claim.capsule_bytes = Some(capsule_bytes);
+                claim.etl_index = etl_index;
+            }
+        }
+        PendingMutation::Revoke {
+            claim_id,
+            capsule_hash,
+            reason,
+            timestamp_unix,
+            tainted_claim_ids,
+            etl_applied,
+        } => {
+            if !etl_applied {
+                return Err(Status::internal(
+                    "pending revoke missing durable etl append",
+                ));
+            }
+            {
+                let mut claims = state.claims.lock();
+                if let Some(claim) = claims.get_mut(&claim_id) {
+                    claim.state = ClaimState::Revoked;
+                }
+                for tainted in tainted_claim_ids {
+                    if let Some(claim) = claims.get_mut(&tainted) {
+                        claim.state = ClaimState::Tainted;
+                    }
+                }
+            }
+            let mut revocations = state.revocations.lock();
+            if !revocations.iter().any(|(hash, ts, existing_reason)| {
+                *hash == capsule_hash && *ts == timestamp_unix && existing_reason == &reason
+            }) {
+                revocations.push((capsule_hash, timestamp_unix, reason));
+            }
+        }
+    }
+
+    persist_all(state)?;
+    clear_pending_mutation(state)?;
     Ok(())
 }
 
@@ -2364,7 +2520,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             return Err(Status::invalid_argument("decision must not be UNSPECIFIED"));
         }
 
-        let (capsule_hash, etl_index, state) = {
+        let (capsule_hash, etl_index, state, decision, claim_id, capsule_bytes) = {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
@@ -2570,6 +2726,8 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let (idx, _) = etl
                     .append(&capsule_bytes)
                     .map_err(|_| Status::internal("etl append failed"))?;
+                etl.sync_data()
+                    .map_err(|_| Status::internal("etl sync failed"))?;
                 let root = etl.root_hash();
                 let inc = etl
                     .inclusion_proof(idx)
@@ -2607,12 +2765,31 @@ impl EvidenceOsV2 for EvidenceOsService {
             };
             claim.last_decision = Some(req.decision);
             claim.last_capsule_hash = Some(capsule_hash);
-            claim.capsule_bytes = Some(capsule_bytes);
+            claim.capsule_bytes = Some(capsule_bytes.clone());
             claim.etl_index = Some(etl_index);
-            (capsule_hash, etl_index, claim.state)
+            (
+                capsule_hash,
+                etl_index,
+                claim.state,
+                req.decision,
+                claim.claim_id,
+                capsule_bytes,
+            )
         };
 
+        let pending = PendingMutation::Execute {
+            claim_id,
+            state,
+            decision,
+            capsule_hash,
+            capsule_bytes,
+            etl_index: Some(etl_index),
+        };
+        persist_pending_mutation(&self.state, &pending)?;
+        maybe_abort_failpoint("after_etl_append_execute_claim");
         persist_all(&self.state)?;
+        clear_pending_mutation(&self.state)?;
+
         Ok(Response::new(pb::ExecuteClaimResponse {
             state: state.to_proto(),
             capsule_hash: capsule_hash.to_vec(),
@@ -2845,6 +3022,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             certified,
             capsule_hash,
             etl_index,
+            claim_id,
+            capsule_bytes,
+            stored_etl_index,
         ) = {
             let mut claims = self.state.claims.lock();
             let claim = claims
@@ -3310,11 +3490,13 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let (idx, _) = etl
                     .append(&capsule_bytes)
                     .map_err(|_| Status::internal("etl append failed"))?;
+                etl.sync_data()
+                    .map_err(|_| Status::internal("etl sync failed"))?;
                 idx
             };
             claim.last_decision = Some(decision);
             claim.last_capsule_hash = Some(capsule_hash);
-            claim.capsule_bytes = Some(capsule_bytes);
+            claim.capsule_bytes = Some(capsule_bytes.clone());
             claim.etl_index = if self.offline_settlement_ingest {
                 None
             } else {
@@ -3329,9 +3511,24 @@ impl EvidenceOsV2 for EvidenceOsService {
                 claim.state == ClaimState::Certified,
                 capsule_hash,
                 etl_index,
+                claim.claim_id,
+                capsule_bytes,
+                claim.etl_index,
             )
         };
+        let pending = PendingMutation::Execute {
+            claim_id,
+            state,
+            decision,
+            capsule_hash,
+            capsule_bytes,
+            etl_index: stored_etl_index,
+        };
+        persist_pending_mutation(&self.state, &pending)?;
+        maybe_abort_failpoint("after_etl_append_execute_claim_v2");
         persist_all(&self.state)?;
+        clear_pending_mutation(&self.state)?;
+
         Ok(Response::new(pb::ExecuteClaimV2Response {
             state: state.to_proto(),
             decision,
@@ -3565,10 +3762,13 @@ impl EvidenceOsV2 for EvidenceOsService {
             .map_err(|_| Status::internal("system clock before unix epoch"))?
             .as_secs();
 
+        let mut tainted_claim_ids = Vec::new();
         {
             let mut etl = self.state.etl.lock();
             etl.revoke(&hex::encode(capsule_hash), &req.reason)
                 .map_err(|_| Status::internal("etl revoke failed"))?;
+            etl.sync_data()
+                .map_err(|_| Status::internal("etl sync failed"))?;
             let tainted = etl.taint_descendants(&hex::encode(capsule_hash));
             if !tainted.is_empty() {
                 let mut claims = self.state.claims.lock();
@@ -3577,6 +3777,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                         let hash_hex = hex::encode(hash);
                         if tainted.iter().any(|t| t == &hash_hex) {
                             claim.state = ClaimState::Tainted;
+                            tainted_claim_ids.push(claim.claim_id);
                         }
                     }
                 }
@@ -3587,7 +3788,19 @@ impl EvidenceOsV2 for EvidenceOsService {
             .revocations
             .lock()
             .push((capsule_hash, timestamp_unix, req.reason.clone()));
+
+        let pending = PendingMutation::Revoke {
+            claim_id,
+            capsule_hash,
+            reason: req.reason.clone(),
+            timestamp_unix,
+            tainted_claim_ids,
+            etl_applied: true,
+        };
+        persist_pending_mutation(&self.state, &pending)?;
+        maybe_abort_failpoint("after_etl_append_revoke_claim");
         persist_all(&self.state)?;
+        clear_pending_mutation(&self.state)?;
 
         let message = {
             let etl = self.state.etl.lock();
@@ -4042,6 +4255,151 @@ mod tests {
         .expect_err("hash mismatch should fail");
         assert_eq!(err.code(), Code::FailedPrecondition);
         assert_eq!(err.message(), "holdout label hash mismatch");
+    }
+
+    fn dummy_claim(claim_id: [u8; 32], capsule_hash: Option<[u8; 32]>) -> Claim {
+        Claim {
+            claim_id,
+            topic_id: [0; 32],
+            holdout_handle_id: [0; 32],
+            holdout_ref: "holdout".to_string(),
+            epoch_config_ref: "epoch-a".to_string(),
+            holdout_len: 4,
+            metadata_locked: false,
+            claim_name: "c".to_string(),
+            output_schema_id: "legacy/v1".to_string(),
+            phys_hir_hash: [0; 32],
+            semantic_hash: [0; 32],
+            output_schema_id_hash: [0; 32],
+            holdout_handle_hash: [0; 32],
+            lineage_root_hash: [0; 32],
+            disagreement_score: 0,
+            semantic_physhir_distance_bits: 0,
+            escalate_to_heavy: false,
+            epoch_size: 10,
+            epoch_counter: 0,
+            dlc_fuel_accumulated: 0,
+            oracle_num_symbols: 4,
+            oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
+            state: ClaimState::Uncommitted,
+            artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
+            wasm_module: Vec::new(),
+            aspec_rejection: None,
+            aspec_report_summary: None,
+            lane: Lane::Fast,
+            heavy_lane_diversion_recorded: false,
+            ledger: ConservationLedger::new(0.1).expect("ledger"),
+            last_decision: None,
+            last_capsule_hash: capsule_hash,
+            capsule_bytes: None,
+            etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
+            operation_id: "op".to_string(),
+        }
+    }
+
+    #[test]
+    fn recover_pending_execute_mutation_replays_claim_state() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            true,
+            telemetry,
+        )
+        .expect("service");
+
+        let claim_id = [7u8; 32];
+        svc.state
+            .claims
+            .lock()
+            .insert(claim_id, dummy_claim(claim_id, None));
+
+        let capsule_hash = [9u8; 32];
+        let pending = PendingMutation::Execute {
+            claim_id,
+            state: ClaimState::Certified,
+            decision: pb::Decision::Approve as i32,
+            capsule_hash,
+            capsule_bytes: b"capsule".to_vec(),
+            etl_index: Some(3),
+        };
+        persist_pending_mutation(&svc.state, &pending).expect("persist pending");
+
+        recover_pending_mutation(&svc.state).expect("recover pending");
+
+        let claims = svc.state.claims.lock();
+        let claim = claims.get(&claim_id).expect("claim present");
+        assert_eq!(claim.state, ClaimState::Certified);
+        assert_eq!(claim.last_capsule_hash, Some(capsule_hash));
+        assert_eq!(claim.etl_index, Some(3));
+        assert_eq!(claim.last_decision, Some(pb::Decision::Approve as i32));
+        assert!(!svc
+            .state
+            .data_path
+            .join(PENDING_MUTATION_FILE_NAME)
+            .exists());
+    }
+
+    #[test]
+    fn recover_pending_revoke_mutation_replays_revocation_state() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            true,
+            telemetry,
+        )
+        .expect("service");
+
+        let claim_id = [1u8; 32];
+        let tainted_id = [2u8; 32];
+        let capsule_hash = [4u8; 32];
+        svc.state
+            .claims
+            .lock()
+            .insert(claim_id, dummy_claim(claim_id, Some(capsule_hash)));
+        svc.state
+            .claims
+            .lock()
+            .insert(tainted_id, dummy_claim(tainted_id, Some([5u8; 32])));
+
+        let pending = PendingMutation::Revoke {
+            claim_id,
+            capsule_hash,
+            reason: "incident".to_string(),
+            timestamp_unix: 42,
+            tainted_claim_ids: vec![tainted_id],
+            etl_applied: true,
+        };
+        persist_pending_mutation(&svc.state, &pending).expect("persist pending");
+
+        recover_pending_mutation(&svc.state).expect("recover pending");
+
+        let claims = svc.state.claims.lock();
+        assert_eq!(
+            claims.get(&claim_id).expect("claim").state,
+            ClaimState::Revoked
+        );
+        assert_eq!(
+            claims.get(&tainted_id).expect("tainted").state,
+            ClaimState::Tainted
+        );
+        drop(claims);
+
+        let revocations = svc.state.revocations.lock();
+        assert!(revocations
+            .iter()
+            .any(|(hash, ts, reason)| *hash == capsule_hash && *ts == 42 && reason == "incident"));
+        assert!(!svc
+            .state
+            .data_path
+            .join(PENDING_MUTATION_FILE_NAME)
+            .exists());
     }
 
     #[allow(clippy::await_holding_lock)]
