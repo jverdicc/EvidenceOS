@@ -49,6 +49,21 @@ struct TrustedKeysFile {
     pub keys: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleTtlPolicy {
+    RejectExpired,
+    EscalateToHeavy,
+}
+
+impl OracleTtlPolicy {
+    pub fn from_env() -> Self {
+        match std::env::var("EVIDENCEOS_ORACLE_TTL_POLICY") {
+            Ok(v) if v.eq_ignore_ascii_case("escalate_to_heavy") => Self::EscalateToHeavy,
+            _ => Self::RejectExpired,
+        }
+    }
+}
+
 impl DaemonOracleConfig {
     pub fn load(
         oracle_dir: impl AsRef<Path>,

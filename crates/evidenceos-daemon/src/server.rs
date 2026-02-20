@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::config::OracleTtlPolicy;
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
@@ -340,6 +341,9 @@ struct PersistedState {
 
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 
+const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
+const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
+
 #[derive(Debug)]
 struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
@@ -368,6 +372,8 @@ pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
     dependence_tax_multiplier: f64,
+    oracle_ttl_policy: OracleTtlPolicy,
+    oracle_ttl_escalation_tax_multiplier: f64,
     telemetry: Arc<Telemetry>,
     probe_detector: Arc<Mutex<ProbeDetector>>,
     policy_oracles: Arc<Vec<PolicyOracleEngine>>,
@@ -469,10 +475,26 @@ impl EvidenceOsService {
                 "dependence_tax_multiplier must be finite and >= 2.0",
             ));
         }
+        let oracle_ttl_policy = OracleTtlPolicy::from_env();
+        let oracle_ttl_escalation_tax_multiplier =
+            std::env::var("EVIDENCEOS_ORACLE_TTL_ESCALATION_TAX_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1.5);
+        if !oracle_ttl_escalation_tax_multiplier.is_finite()
+            || oracle_ttl_escalation_tax_multiplier < 1.0
+        {
+            return Err(Status::invalid_argument(
+                "oracle_ttl_escalation_tax_multiplier must be finite and >= 1.0",
+            ));
+        }
+
         Ok(Self {
             state,
             insecure_v1_enabled,
             dependence_tax_multiplier,
+            oracle_ttl_policy,
+            oracle_ttl_escalation_tax_multiplier,
             telemetry,
             probe_detector: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig::from_env()))),
             policy_oracles: Arc::new(policy_oracles),
@@ -598,6 +620,10 @@ impl EvidenceOsService {
         }
         if claim.state == ClaimState::Uncommitted && to == ClaimState::Committed {
             claim.state = ClaimState::Committed;
+            return Ok(());
+        }
+        if claim.state == ClaimState::Settled && to == ClaimState::Frozen {
+            claim.state = ClaimState::Frozen;
             return Ok(());
         }
         if to == ClaimState::Committed {
@@ -2448,6 +2474,26 @@ impl EvidenceOsV2 for EvidenceOsService {
                 ));
             }
 
+            let oracle_ttl_expired = claim.oracle_resolution.ttl_expired(current_epoch);
+            let oracle_ttl_escalated = if oracle_ttl_expired {
+                match self.oracle_ttl_policy {
+                    OracleTtlPolicy::RejectExpired => {
+                        self.record_incident(claim, "oracle_expired")?;
+                        return Err(Status::failed_precondition("OracleExpired"));
+                    }
+                    OracleTtlPolicy::EscalateToHeavy => {
+                        if claim.lane != Lane::Heavy {
+                            self.record_incident(claim, "oracle_expired")?;
+                            return Err(Status::failed_precondition("OracleExpired"));
+                        }
+                        self.record_incident(claim, "oracle_expired_escalated_to_heavy")?;
+                        true
+                    }
+                }
+            } else {
+                false
+            };
+
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let mut context = vault_context(claim)?;
@@ -2506,7 +2552,11 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             let charge_bits = claim.oracle_resolution.bits_per_call()
                 * f64::from(vault_result.oracle_calls.max(1));
-            let dependence_multiplier = self.dependence_tax_multiplier;
+            let dependence_multiplier = if oracle_ttl_escalated {
+                self.dependence_tax_multiplier * self.oracle_ttl_escalation_tax_multiplier
+            } else {
+                self.dependence_tax_multiplier
+            };
             let taxed_bits = charge_bits * dependence_multiplier;
             let covariance_charge = taxed_bits - charge_bits;
             let lane_cfg = LaneConfig::for_lane(
@@ -2650,6 +2700,24 @@ impl EvidenceOsV2 for EvidenceOsService {
                 &reason_codes,
             )?;
             let mut policy_receipts: Vec<PolicyOracleReceipt> = Vec::new();
+            if oracle_ttl_expired {
+                reason_codes.push(ORACLE_EXPIRED_REASON_CODE);
+                policy_receipts.push(PolicyOracleReceipt {
+                    oracle_id: "oracle_ttl".to_string(),
+                    manifest_hash_hex: hex::encode([0_u8; 32]),
+                    wasm_hash_hex: hex::encode([0_u8; 32]),
+                    decision: if oracle_ttl_escalated {
+                        "defer".to_string()
+                    } else {
+                        "reject".to_string()
+                    },
+                    reason_code: if oracle_ttl_escalated {
+                        ORACLE_TTL_ESCALATED_REASON_CODE
+                    } else {
+                        ORACLE_EXPIRED_REASON_CODE
+                    },
+                });
+            }
             let mut oracle_decision = PolicyOracleDecision::Pass;
             for oracle in self.policy_oracles.iter() {
                 match oracle.evaluate(&oracle_input) {
