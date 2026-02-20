@@ -262,7 +262,9 @@ cargo build --workspace
 ```bash
 cargo run -p evidenceos-daemon -- \
   --listen 127.0.0.1:50051 \
-  --data-dir ./data
+  --data-dir ./data \
+  --nullspec-registry-dir ./data/nullspec-registry \
+  --nullspec-authority-keys-dir ./data/trusted-nullspec-keys
 ```
 
 > `--etl-path` is deprecated; use `--data-dir` for all daemon launches.

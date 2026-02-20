@@ -71,6 +71,9 @@ impl DaemonOracleConfig {
     pub fn load(
         oracle_dir: impl AsRef<Path>,
         trusted_keys_path: Option<impl AsRef<Path>>,
+        data_dir: impl AsRef<Path>,
+        nullspec_registry_dir: Option<impl AsRef<Path>>,
+        trusted_nullspec_keys_dir: Option<impl AsRef<Path>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let trusted_authorities = if let Some(path) = trusted_keys_path {
             let payload = fs::read(path)?;
@@ -84,12 +87,17 @@ impl DaemonOracleConfig {
             TrustedOracleAuthorities::default()
         };
 
+        let data_dir = data_dir.as_ref();
         Ok(Self {
             oracle_dir: oracle_dir.as_ref().to_path_buf(),
             trusted_authorities,
             oracle_plusplus_backends: Vec::new(),
-            nullspec_registry_dir: PathBuf::from("./nullspec-registry"),
-            trusted_nullspec_keys_dir: PathBuf::from("./trusted-nullspec-keys"),
+            nullspec_registry_dir: nullspec_registry_dir
+                .map(|p| p.as_ref().to_path_buf())
+                .unwrap_or_else(|| data_dir.join("nullspec-registry")),
+            trusted_nullspec_keys_dir: trusted_nullspec_keys_dir
+                .map(|p| p.as_ref().to_path_buf())
+                .unwrap_or_else(|| data_dir.join("trusted-nullspec-keys")),
             default_nullspec_id: String::new(),
             allow_fixed_e_value_in_dev: false,
         })

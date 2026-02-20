@@ -23,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
@@ -558,6 +558,25 @@ struct KernelState {
     keyring: HashMap<[u8; 32], SigningKey>,
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
     operator_config: Mutex<OperatorRuntimeConfig>,
+    nullspec_registry_state: Mutex<NullSpecRegistryState>,
+}
+
+#[derive(Debug)]
+struct NullSpecRegistryState {
+    registry_dir: PathBuf,
+    authority_keys_dir: PathBuf,
+    keyring: Arc<NullSpecAuthorityKeyring>,
+    registry: Arc<NullSpecRegistry>,
+    healthy: bool,
+    last_reload_attempt: Instant,
+    reload_interval: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct NullSpecRegistryConfig {
+    pub registry_dir: PathBuf,
+    pub authority_keys_dir: PathBuf,
+    pub reload_interval: Duration,
 }
 
 impl Drop for KernelState {
@@ -594,6 +613,20 @@ impl EvidenceOsService {
         data_dir: &str,
         durable_etl: bool,
         telemetry: Arc<Telemetry>,
+    ) -> Result<Self, Status> {
+        let nullspec_config = NullSpecRegistryConfig {
+            registry_dir: PathBuf::from(data_dir).join("nullspec-registry"),
+            authority_keys_dir: PathBuf::from(data_dir).join("trusted-nullspec-keys"),
+            reload_interval: Duration::from_secs(30),
+        };
+        Self::build_with_options_and_nullspec(data_dir, durable_etl, telemetry, nullspec_config)
+    }
+
+    pub fn build_with_options_and_nullspec(
+        data_dir: &str,
+        durable_etl: bool,
+        telemetry: Arc<Telemetry>,
+        nullspec_config: NullSpecRegistryConfig,
     ) -> Result<Self, Status> {
         let root = PathBuf::from(data_dir);
         std::fs::create_dir_all(&root).map_err(|_| Status::internal("mkdir failed"))?;
@@ -650,6 +683,38 @@ impl EvidenceOsService {
         let operator_config =
             load_operator_runtime_config(&root, require_disjointness_attestation)?;
 
+        let (nullspec_keyring, nullspec_registry, nullspec_healthy) =
+            match NullSpecAuthorityKeyring::load_from_dir(&nullspec_config.authority_keys_dir) {
+                Ok(keyring) => match NullSpecRegistry::load_from_dir(
+                    &nullspec_config.registry_dir,
+                    &keyring,
+                    false,
+                ) {
+                    Ok(registry) => (keyring, registry, true),
+                    Err(_) => {
+                        tracing::error!(
+                            event = "nullspec_registry_startup_load_failed",
+                            registry_dir = %nullspec_config.registry_dir.display(),
+                            authority_keys_dir = %nullspec_config.authority_keys_dir.display(),
+                            "failed to load nullspec registry at startup; registry marked unhealthy"
+                        );
+                        (keyring, NullSpecRegistry::default(), false)
+                    }
+                },
+                Err(_) => {
+                    tracing::error!(
+                        event = "nullspec_registry_startup_keyring_load_failed",
+                        authority_keys_dir = %nullspec_config.authority_keys_dir.display(),
+                        "failed to load nullspec keyring at startup; registry marked unhealthy"
+                    );
+                    (
+                        NullSpecAuthorityKeyring::default(),
+                        NullSpecRegistry::default(),
+                        false,
+                    )
+                }
+            };
+
         let holdouts_root = root.join("holdouts");
 
         let state = Arc::new(KernelState {
@@ -671,6 +736,15 @@ impl EvidenceOsService {
             keyring,
             revocation_subscribers: Mutex::new(Vec::new()),
             operator_config: Mutex::new(operator_config),
+            nullspec_registry_state: Mutex::new(NullSpecRegistryState {
+                registry_dir: nullspec_config.registry_dir,
+                authority_keys_dir: nullspec_config.authority_keys_dir,
+                keyring: Arc::new(nullspec_keyring),
+                registry: Arc::new(nullspec_registry),
+                healthy: nullspec_healthy,
+                last_reload_attempt: Instant::now(),
+                reload_interval: nullspec_config.reload_interval,
+            }),
         });
         recover_pending_mutation(&state)?;
         persist_all(&state)?;
@@ -724,6 +798,54 @@ impl EvidenceOsService {
                 .unwrap_or(false),
             require_disjointness_attestation,
         })
+    }
+
+    pub fn reload_nullspec_registry(&self) -> Result<(), Status> {
+        let mut state = self.state.nullspec_registry_state.lock();
+        let keyring = NullSpecAuthorityKeyring::load_from_dir(&state.authority_keys_dir)
+            .map_err(|_| Status::failed_precondition("nullspec keyring load failed"))?;
+        let registry = NullSpecRegistry::load_from_dir(&state.registry_dir, &keyring, false)
+            .map_err(|_| Status::failed_precondition("nullspec registry load failed"))?;
+        state.keyring = Arc::new(keyring);
+        state.registry = Arc::new(registry);
+        state.healthy = true;
+        state.last_reload_attempt = Instant::now();
+        tracing::info!(
+            event = "nullspec_registry_reload",
+            registry_dir = %state.registry_dir.display(),
+            authority_keys_dir = %state.authority_keys_dir.display(),
+            "reloaded nullspec registry and authority keyring"
+        );
+        Ok(())
+    }
+
+    fn ensure_nullspec_registry_fresh(&self) -> Result<Arc<NullSpecRegistry>, Status> {
+        let should_attempt_reload = {
+            let state = self.state.nullspec_registry_state.lock();
+            state.last_reload_attempt.elapsed() >= state.reload_interval
+        };
+
+        if should_attempt_reload {
+            if let Err(err) = self.reload_nullspec_registry() {
+                let mut state = self.state.nullspec_registry_state.lock();
+                state.healthy = false;
+                state.last_reload_attempt = Instant::now();
+                tracing::error!(event = "nullspec_registry_reload_failed", error = %err, "failed to reload nullspec registry; failing closed");
+            }
+        }
+
+        let state = self.state.nullspec_registry_state.lock();
+        if !state.healthy {
+            return Err(Status::failed_precondition(
+                "nullspec registry reload failed; registry marked unhealthy",
+            ));
+        }
+        tracing::debug!(
+            event = "nullspec_registry_cache_hit",
+            authority_keys = state.keyring.keys.len(),
+            "using cached nullspec registry"
+        );
+        Ok(state.registry.clone())
     }
 
     pub fn apply_signed_settlements(
@@ -3129,16 +3251,7 @@ impl EvidenceOsV2 for EvidenceOsService {
 
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let keyring = NullSpecAuthorityKeyring::load_from_dir(std::path::Path::new(
-                "./trusted-nullspec-keys",
-            ))
-            .map_err(|_| Status::failed_precondition("nullspec keyring load failed"))?;
-            let registry = NullSpecRegistry::load_from_dir(
-                std::path::Path::new("./nullspec-registry"),
-                &keyring,
-                false,
-            )
-            .map_err(|_| Status::failed_precondition("nullspec registry load failed"))?;
+            let registry = self.ensure_nullspec_registry_fresh()?;
             let reg_nullspec = registry
                 .get(&hex::encode(contract.nullspec_id))
                 .cloned()
