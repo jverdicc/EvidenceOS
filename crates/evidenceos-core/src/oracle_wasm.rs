@@ -1,8 +1,7 @@
 use crate::aspec::{verify_aspec, AspecLane, AspecPolicy};
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use wasmtime::{
-    Config, Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
-};
+use crate::wasm_config::deterministic_wasmtime_config;
+use wasmtime::{Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 #[derive(Debug, Clone)]
 pub struct WasmOracleSandboxPolicy {
@@ -51,12 +50,7 @@ impl WasmOracleSandbox {
             return Err(EvidenceOSError::AspecRejected);
         }
 
-        let mut cfg = Config::new();
-        cfg.consume_fuel(true);
-        cfg.cranelift_nan_canonicalization(true);
-        cfg.wasm_simd(false);
-        cfg.wasm_relaxed_simd(false);
-        cfg.wasm_memory64(false);
+        let cfg = deterministic_wasmtime_config();
         let engine = Engine::new(&cfg).map_err(|_| EvidenceOSError::OracleViolation)?;
         let module = Module::new(&engine, wasm).map_err(|_| EvidenceOSError::OracleViolation)?;
 
