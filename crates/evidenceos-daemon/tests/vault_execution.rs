@@ -218,6 +218,54 @@ fn vault_hysteresis_local_stalls_system() {
 }
 
 #[test]
+fn pln_padding_equalizes_fuel_total_for_fast_and_slow_paths() {
+    let fast_wasm = wat::parse_str(
+        r#"(module
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01")
+          (func (export "run")
+            i32.const 0 i32.const 1 call $emit drop))"#,
+    )
+    .expect("wat");
+    let slow_wasm = wat::parse_str(
+        r#"(module
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01")
+          (func (export "run")
+            i32.const 0
+            drop
+            i32.const 0
+            drop
+            i32.const 0
+            drop
+            i32.const 0 i32.const 1 call $emit drop))"#,
+    )
+    .expect("wat");
+
+    let engine = VaultEngine::new().expect("engine");
+    let fast = engine
+        .execute(&fast_wasm, &context(), config())
+        .expect("fast");
+    let slow = engine
+        .execute(&slow_wasm, &context(), config())
+        .expect("slow");
+    assert!(slow.fuel_used >= fast.fuel_used);
+
+    let epoch_budget = 64_u64;
+    let pad = |fuel: u64| {
+        let rem = fuel % epoch_budget;
+        if rem == 0 {
+            fuel
+        } else {
+            fuel + (epoch_budget - rem)
+        }
+    };
+    assert_eq!(pad(fast.fuel_used), pad(slow.fuel_used));
+}
+
+#[test]
 fn vault_rejects_invalid_holdout_labels() {
     let wasm = wat::parse_str("(module (memory (export \"memory\") 1) (func (export \"run\")))")
         .expect("wat");
