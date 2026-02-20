@@ -46,6 +46,8 @@ EvidenceOS is best understood as a verification kernel inside a larger secure sy
 
 ## Threat Model by Example (blackbox walkthrough)
 
+For a standalone, outsider-friendly version of this walkthrough, see [`docs/THREAT_MODEL_BLACKBOX.md`](docs/THREAT_MODEL_BLACKBOX.md).
+
 The goal of this section is to explain the failure mode and defense without needing Rust, gRPC, Merkle-tree, or blockchain background.
 
 ### Baseline failure: adaptive probing breaks an oracle-only setup
@@ -108,6 +110,7 @@ EvidenceOS uses ETL as an append-only transparency log with signed checkpoints p
 ## Architecture diagrams
 
 For high-level visual references of the vault/oracle internals and end-to-end UVP flow, see [`docs/ARCHITECTURE_DIAGRAMS.md`](docs/ARCHITECTURE_DIAGRAMS.md).
+For a compact index of docs, see [`docs/README.md`](docs/README.md).
 
 
 ## Architecture: The Language Trade-off Matrix
