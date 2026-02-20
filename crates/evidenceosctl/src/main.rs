@@ -208,9 +208,12 @@ struct CalibrationBuckets {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OracleOperatorRecord {
+    schema_version: u32,
     ttl_epochs: u64,
-    calibration_hash: Option<String>,
+    calibration_manifest_hash_hex: Option<String>,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: Option<String>,
+    nonoverlap_proof_uri: Option<String>,
     updated_at_epoch: u64,
     key_id: String,
     signature_ed25519: String,
@@ -223,9 +226,12 @@ struct OracleOperatorConfig {
 #[derive(Debug, Clone, Serialize)]
 struct OracleOperatorSigningPayload<'a> {
     oracle_id: &'a str,
+    schema_version: u32,
     ttl_epochs: u64,
-    calibration_hash: Option<&'a str>,
+    calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: &'a str,
+    nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
 }
@@ -307,14 +313,27 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
                 sign_governance_event("oracle_ttl_set", epoch, &key_id, payload, &signing_key)?;
 
             let entry = cfg.oracles.entry(oracle_id.clone()).or_default();
+            entry.schema_version = 1;
             entry.ttl_epochs = ttl_epochs;
             entry.updated_at_epoch = epoch;
             entry.key_id = key_id;
+            entry
+                .calibration_manifest_hash_hex
+                .get_or_insert_with(|| "00".repeat(32));
+            entry
+                .disjointness_attestation
+                .get_or_insert_with(|| "operator-attested-disjoint".to_string());
             let record_payload = OracleOperatorSigningPayload {
                 oracle_id: &oracle_id,
+                schema_version: entry.schema_version,
                 ttl_epochs: entry.ttl_epochs,
-                calibration_hash: entry.calibration_hash.as_deref(),
+                calibration_manifest_hash_hex: entry
+                    .calibration_manifest_hash_hex
+                    .as_deref()
+                    .unwrap_or(""),
                 calibration_epoch: entry.calibration_epoch,
+                disjointness_attestation: entry.disjointness_attestation.as_deref().unwrap_or(""),
+                nonoverlap_proof_uri: entry.nonoverlap_proof_uri.as_deref(),
                 updated_at_epoch: entry.updated_at_epoch,
                 key_id: &entry.key_id,
             };
@@ -351,15 +370,25 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
             if entry.ttl_epochs == 0 {
                 entry.ttl_epochs = 1;
             }
-            entry.calibration_hash = Some(calib_hash.clone());
+            entry.calibration_manifest_hash_hex = Some(calib_hash.clone());
             entry.calibration_epoch = Some(epoch);
             entry.updated_at_epoch = epoch;
             entry.key_id = key_id;
+            entry.schema_version = 1;
+            entry
+                .disjointness_attestation
+                .get_or_insert_with(|| "operator-attested-disjoint".to_string());
             let record_payload = OracleOperatorSigningPayload {
                 oracle_id: &oracle_id,
+                schema_version: entry.schema_version,
                 ttl_epochs: entry.ttl_epochs,
-                calibration_hash: entry.calibration_hash.as_deref(),
+                calibration_manifest_hash_hex: entry
+                    .calibration_manifest_hash_hex
+                    .as_deref()
+                    .unwrap_or(""),
                 calibration_epoch: entry.calibration_epoch,
+                disjointness_attestation: entry.disjointness_attestation.as_deref().unwrap_or(""),
+                nonoverlap_proof_uri: entry.nonoverlap_proof_uri.as_deref(),
                 updated_at_epoch: entry.updated_at_epoch,
                 key_id: &entry.key_id,
             };
