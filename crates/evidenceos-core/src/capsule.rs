@@ -143,6 +143,22 @@ pub struct ClaimCapsule {
     pub decision: i32,
     pub reason_codes: Vec<u32>,
     #[serde(default)]
+    pub semantic_hash_hex: Option<String>,
+    #[serde(default)]
+    pub physhir_hash_hex: Option<String>,
+    #[serde(default)]
+    pub lineage_root_hash_hex: Option<String>,
+    #[serde(default)]
+    pub output_schema_id_hash_hex: Option<String>,
+    #[serde(default)]
+    pub holdout_handle_hash_hex: Option<String>,
+    #[serde(default)]
+    pub disagreement_score: Option<u32>,
+    #[serde(default)]
+    pub semantic_physhir_distance_bits: Option<u32>,
+    #[serde(default)]
+    pub escalate_to_heavy: Option<bool>,
+    #[serde(default)]
     pub policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
     #[serde(default)]
     pub nullspec_id_hex: Option<String>,
@@ -311,6 +327,14 @@ impl ClaimCapsule {
             certified,
             decision,
             reason_codes,
+            semantic_hash_hex: None,
+            physhir_hash_hex: None,
+            lineage_root_hash_hex: None,
+            output_schema_id_hash_hex: None,
+            holdout_handle_hash_hex: None,
+            disagreement_score: None,
+            semantic_physhir_distance_bits: None,
+            escalate_to_heavy: None,
             policy_oracle_receipts,
             nullspec_id_hex: None,
             oracle_resolution_hash_hex: None,

@@ -50,10 +50,13 @@ fn wasm_with_payload(payload: &[u8]) -> Vec<u8> {
     .expect("wat")
 }
 
-async fn create_and_seal(
+async fn create_and_seal_with_signals(
     client: &mut EvidenceOsClient<Channel>,
     schema_id: &str,
     wasm: Vec<u8>,
+    semantic_hash: Vec<u8>,
+    physhir_hash: Vec<u8>,
+    lineage_root_hash: Vec<u8>,
 ) -> Vec<u8> {
     let claim_id = client
         .create_claim_v2(pb::CreateClaimV2Request {
@@ -65,9 +68,9 @@ async fn create_and_seal(
                 output_schema_id: schema_id.into(),
             }),
             signals: Some(pb::TopicSignalsV2 {
-                semantic_hash: vec![1; 32],
-                phys_hir_signature_hash: vec![2; 32],
-                dependency_merkle_root: vec![3; 32],
+                semantic_hash,
+                phys_hir_signature_hash: physhir_hash,
+                dependency_merkle_root: lineage_root_hash,
             }),
             holdout_ref: "h".into(),
             epoch_size: 10,
@@ -109,6 +112,21 @@ async fn create_and_seal(
     claim_id
 }
 
+async fn create_and_seal(
+    client: &mut EvidenceOsClient<Channel>,
+    schema_id: &str,
+    wasm: Vec<u8>,
+) -> Vec<u8> {
+    create_and_seal_with_signals(
+        client,
+        schema_id,
+        wasm,
+        vec![1; 32],
+        vec![2; 32],
+        vec![3; 32],
+    )
+    .await
+}
 #[tokio::test]
 async fn valid_cbrn_sc_output_passes_and_returns_capsule() {
     let temp = TempDir::new().expect("temp");
@@ -170,4 +188,48 @@ async fn structured_output_too_large_rejected() {
         .await
         .expect_err("too large output should fail");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn lineage_root_changes_topic_id_by_design() {
+    let temp = TempDir::new().expect("temp");
+    let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
+    let req_a = pb::CreateClaimV2Request {
+        claim_name: "lineage-a".into(),
+        metadata: Some(pb::ClaimMetadataV2 {
+            lane: "fast".into(),
+            alpha_micros: 50_000,
+            epoch_config_ref: "epoch".into(),
+            output_schema_id: "cbrn-sc.v1".into(),
+        }),
+        signals: Some(pb::TopicSignalsV2 {
+            semantic_hash: vec![1; 32],
+            phys_hir_signature_hash: vec![2; 32],
+            dependency_merkle_root: vec![3; 32],
+        }),
+        holdout_ref: "h".into(),
+        epoch_size: 10,
+        oracle_num_symbols: 4,
+        access_credit: 4096,
+    };
+    let req_b = pb::CreateClaimV2Request {
+        signals: Some(pb::TopicSignalsV2 {
+            semantic_hash: vec![1; 32],
+            phys_hir_signature_hash: vec![2; 32],
+            dependency_merkle_root: vec![4; 32],
+        }),
+        claim_name: "lineage-b".into(),
+        ..req_a.clone()
+    };
+    let a = client
+        .create_claim_v2(req_a)
+        .await
+        .expect("create a")
+        .into_inner();
+    let b = client
+        .create_claim_v2(req_b)
+        .await
+        .expect("create b")
+        .into_inner();
+    assert_ne!(a.topic_id, b.topic_id);
 }

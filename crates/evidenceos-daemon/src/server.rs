@@ -50,7 +50,7 @@ use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
-    compute_topic_id, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
+    compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
 use evidenceos_protocol::pb;
 
@@ -149,7 +149,19 @@ struct Claim {
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
     #[serde(default)]
-    semantic_hash: Option<[u8; 32]>,
+    semantic_hash: [u8; 32],
+    #[serde(default)]
+    output_schema_id_hash: [u8; 32],
+    #[serde(default)]
+    holdout_handle_hash: [u8; 32],
+    #[serde(default)]
+    lineage_root_hash: [u8; 32],
+    #[serde(default)]
+    disagreement_score: u32,
+    #[serde(default)]
+    semantic_physhir_distance_bits: u32,
+    #[serde(default)]
+    escalate_to_heavy: bool,
     epoch_size: u64,
     #[serde(default)]
     epoch_counter: u64,
@@ -1396,7 +1408,13 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim_name: "legacy-v1".to_string(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
-            semantic_hash: None,
+            semantic_hash: [0u8; 32],
+            output_schema_id_hash: hash_signal(b"evidenceos/schema_id", b"legacy/v1"),
+            holdout_handle_hash: hash_signal(b"evidenceos/holdout_handle", &holdout_handle_id),
+            lineage_root_hash: topic_id,
+            disagreement_score: 0,
+            semantic_physhir_distance_bits: 0,
+            escalate_to_heavy: false,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
@@ -1782,6 +1800,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "evidenceos.v1".to_string(),
                 fuel_used as f64,
             );
+            capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
+            capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
+            capsule.lineage_root_hash_hex = Some(hex::encode(claim.lineage_root_hash));
+            capsule.output_schema_id_hash_hex = Some(hex::encode(claim.output_schema_id_hash));
+            capsule.holdout_handle_hash_hex = Some(hex::encode(claim.holdout_handle_hash));
+            capsule.disagreement_score = Some(claim.disagreement_score);
+            capsule.semantic_physhir_distance_bits = Some(claim.semantic_physhir_distance_bits);
+            capsule.escalate_to_heavy = Some(claim.escalate_to_heavy);
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -1796,6 +1822,12 @@ impl EvidenceOsV2 for EvidenceOsService {
                     .map_err(|_| Status::internal("capsule hashing failed"))?,
                 "capsule_hash",
             )?;
+            if claim.lineage_root_hash == [0u8; 32] {
+                claim.lineage_root_hash = capsule_hash;
+            }
+            if claim.lineage_root_hash == [0u8; 32] {
+                claim.lineage_root_hash = capsule_hash;
+            }
             let etl_index = {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
@@ -1891,15 +1923,13 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "signals.phys_hir_signature_hash must be 32 bytes",
             ));
         }
-        let semantic_hash = if signals.semantic_hash.is_empty() {
-            None
-        } else if signals.semantic_hash.len() == 32 {
+        let semantic_hash = if signals.semantic_hash.len() == 32 {
             let mut b = [0u8; 32];
             b.copy_from_slice(&signals.semantic_hash);
-            Some(b)
+            b
         } else {
             return Err(Status::invalid_argument(
-                "signals.semantic_hash must be 0 or 32 bytes",
+                "signals.semantic_hash must be 32 bytes",
             ));
         };
         let dependency_merkle_root = if signals.dependency_merkle_root.is_empty() {
@@ -1915,6 +1945,17 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         let mut phys = [0u8; 32];
         phys.copy_from_slice(&signals.phys_hir_signature_hash);
+        let mut holdout_hasher = Sha256::new();
+        holdout_hasher.update(req.holdout_ref.as_bytes());
+        let mut holdout_handle_id = [0u8; 32];
+        holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
+        let output_schema_id_hash = hash_signal(
+            b"evidenceos/schema_id",
+            canonical_output_schema_id.as_bytes(),
+        );
+        let holdout_handle_hash = hash_signal(b"evidenceos/holdout_handle", &holdout_handle_id);
+        let lineage_root_hash = dependency_merkle_root.unwrap_or([0u8; 32]);
+
         let topic = compute_topic_id(
             &CoreClaimMetadataV2 {
                 lane: metadata.lane.clone(),
@@ -1924,8 +1965,10 @@ impl EvidenceOsV2 for EvidenceOsService {
             },
             &TopicSignals {
                 semantic_hash,
-                phys_hir_signature_hash: phys,
-                dependency_merkle_root,
+                physhir_hash: phys,
+                lineage_root_hash,
+                output_schema_id_hash,
+                holdout_handle_hash,
             },
         );
 
@@ -1951,10 +1994,6 @@ impl EvidenceOsV2 for EvidenceOsService {
                     Some(lane_cfg.access_credit_budget),
                 )
             })?;
-        let mut holdout_hasher = Sha256::new();
-        holdout_hasher.update(req.holdout_ref.as_bytes());
-        let mut holdout_handle_id = [0u8; 32];
-        holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
 
         let oracle_resolution = lane_cfg.oracle_resolution;
 
@@ -1990,6 +2029,12 @@ impl EvidenceOsV2 for EvidenceOsService {
             output_schema_id: canonical_output_schema_id,
             phys_hir_hash: phys,
             semantic_hash,
+            output_schema_id_hash,
+            holdout_handle_hash,
+            lineage_root_hash,
+            disagreement_score: topic.disagreement_score,
+            semantic_physhir_distance_bits: topic.semantic_physhir_distance_bits,
+            escalate_to_heavy: topic.escalate_to_heavy,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
             oracle_num_symbols: req.oracle_num_symbols,
@@ -2163,10 +2208,17 @@ impl EvidenceOsV2 for EvidenceOsService {
                         },
                         &TopicSignals {
                             semantic_hash: claim.semantic_hash,
-                            phys_hir_signature_hash: computed_phys,
-                            dependency_merkle_root: claim.dependency_merkle_root,
+                            physhir_hash: computed_phys,
+                            lineage_root_hash: claim.lineage_root_hash,
+                            output_schema_id_hash: claim.output_schema_id_hash,
+                            holdout_handle_hash: claim.holdout_handle_hash,
                         },
                     );
+                    claim.phys_hir_hash = computed_phys;
+                    claim.disagreement_score = topic_check.disagreement_score;
+                    claim.semantic_physhir_distance_bits =
+                        topic_check.semantic_physhir_distance_bits;
+                    claim.escalate_to_heavy = topic_check.escalate_to_heavy;
                     physhir_mismatch = topic_check.escalate_to_heavy;
                 }
             }
@@ -2369,6 +2421,14 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
             capsule.eprocess_kind = Some(eprocess_kind_id);
             capsule.nullspec_contract_hash_hex = Some(hex::encode(contract.compute_id()));
+            capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
+            capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
+            capsule.lineage_root_hash_hex = Some(hex::encode(claim.lineage_root_hash));
+            capsule.output_schema_id_hash_hex = Some(hex::encode(claim.output_schema_id_hash));
+            capsule.holdout_handle_hash_hex = Some(hex::encode(claim.holdout_handle_hash));
+            capsule.disagreement_score = Some(claim.disagreement_score);
+            capsule.semantic_physhir_distance_bits = Some(claim.semantic_physhir_distance_bits);
+            capsule.escalate_to_heavy = Some(claim.escalate_to_heavy);
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
