@@ -34,6 +34,7 @@ use sha2::{Digest, Sha256};
 
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
+use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
@@ -49,6 +50,7 @@ use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
+use evidenceos_core::settlement::UnsignedSettlementProposal;
 use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
@@ -370,6 +372,7 @@ pub struct EvidenceOsService {
     probe_detector: Arc<Mutex<ProbeDetector>>,
     policy_oracles: Arc<Vec<PolicyOracleEngine>>,
     canary_config: CanaryConfig,
+    offline_settlement_ingest: bool,
 }
 
 impl EvidenceOsService {
@@ -474,9 +477,44 @@ impl EvidenceOsService {
             probe_detector: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig::from_env()))),
             policy_oracles: Arc::new(policy_oracles),
             canary_config,
+            offline_settlement_ingest: std::env::var("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         })
     }
 
+    pub fn apply_signed_settlements(
+        &self,
+        import_dir: &Path,
+        verify_key: &VerifyingKey,
+    ) -> Result<usize, Status> {
+        let records = import_signed_settlements(import_dir, verify_key)
+            .map_err(|_| Status::failed_precondition("invalid signed settlement file"))?;
+        let mut applied = 0usize;
+        for record in records {
+            let etl_index = {
+                let mut etl = self.state.etl.lock();
+                let (idx, _) = etl
+                    .append(&record.proposal.capsule_bytes)
+                    .map_err(|_| Status::internal("etl append failed"))?;
+                idx
+            };
+            if let Ok(claim_id) = decode_hex_hash32(&record.proposal.claim_id_hex, "claim_id") {
+                if let Some(claim) = self.state.claims.lock().get_mut(&claim_id) {
+                    claim.etl_index = Some(etl_index);
+                    if let Ok(capsule_hash) =
+                        decode_hex_hash32(&record.proposal.capsule_hash_hex, "capsule_hash")
+                    {
+                        claim.last_capsule_hash = Some(capsule_hash);
+                    }
+                }
+            }
+            applied += 1;
+        }
+        if applied > 0 {
+            persist_all(&self.state)?;
+        }
+        Ok(applied)
     pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
         let next = load_operator_runtime_config(&self.state.data_path)?;
         let mut guard = self.state.operator_config.lock();
@@ -2714,7 +2752,19 @@ impl EvidenceOsV2 for EvidenceOsService {
                     .map_err(|_| Status::internal("capsule hashing failed"))?,
                 "capsule_hash",
             )?;
-            let etl_index = {
+            let etl_index = if self.offline_settlement_ingest {
+                let proposal = UnsignedSettlementProposal {
+                    schema_version: 1,
+                    claim_id_hex: hex::encode(claim.claim_id),
+                    claim_state: Self::state_name(claim.state).to_string(),
+                    epoch: claim.epoch_counter,
+                    capsule_bytes: capsule_bytes.clone(),
+                    capsule_hash_hex: hex::encode(capsule_hash),
+                };
+                write_unsigned_proposal(&self.state.data_path, &proposal)
+                    .map_err(|_| Status::internal("offline settlement spool write failed"))?;
+                0
+            } else {
                 let mut etl = self.state.etl.lock();
                 let (idx, _) = etl
                     .append(&capsule_bytes)
@@ -2724,7 +2774,11 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim.last_decision = Some(decision);
             claim.last_capsule_hash = Some(capsule_hash);
             claim.capsule_bytes = Some(capsule_bytes);
-            claim.etl_index = Some(etl_index);
+            claim.etl_index = if self.offline_settlement_ingest {
+                None
+            } else {
+                Some(etl_index)
+            };
             (
                 claim.state,
                 decision,

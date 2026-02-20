@@ -1,0 +1,16 @@
+[package]
+name = "evidenceos-settle-offline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+evidenceos-core = { path = "../evidenceos-core" }
+
+[dev-dependencies]
+tempfile = "3"
