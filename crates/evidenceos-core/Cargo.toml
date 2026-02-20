@@ -34,5 +34,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 
 [build-dependencies]
+protoc-bin-vendored = "3"
 tonic-build = "0.12"
-
