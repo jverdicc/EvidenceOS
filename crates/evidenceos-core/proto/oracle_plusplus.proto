@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package oracleplusplus.v1;
+
+service OraclePlusPlus {
+  rpc GetAttestation(AttestationRequest) returns (AttestationResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+message AttestationRequest {
+  string oracle_id = 1;
+}
+
+message AttestationResponse {
+  string oracle_id = 1;
+  bytes measurement_hash = 2;
+  bytes manifest_hash = 3;
+  bytes resolution_hash = 4;
+  string pubkey_id = 5;
+  bytes signature = 6;
+}
+
+message QueryRequest {
+  string oracle_id = 1;
+  string session_id = 2;
+  bytes preds = 3;
+}
+
+message QueryResponse {
+  uint64 seq_no = 1;
+  bytes bucket_bytes = 2;
+  double e_value = 3;
+  double k_bits = 4;
+  double remaining_budget_bits = 5;
+  bytes signature = 6;
+}

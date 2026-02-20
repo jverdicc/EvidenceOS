@@ -21,6 +21,12 @@ pub struct OracleRegistry {
 }
 
 impl OracleRegistry {
+    pub fn empty() -> Self {
+        Self {
+            backends: BTreeMap::new(),
+        }
+    }
+
     pub fn load_from_dir(
         path: &Path,
         trusted_keys: &TrustedOracleAuthorities,
@@ -79,6 +85,11 @@ impl OracleRegistry {
             }
         }
         Ok(Self { backends })
+    }
+
+    pub fn register_backend(&mut self, backend: Box<dyn OracleBackend>) {
+        self.backends
+            .insert(backend.oracle_id().to_owned(), backend);
     }
 
     pub fn get(&self, oracle_id: &str) -> Option<&dyn OracleBackend> {

@@ -370,3 +370,18 @@ To configure trusted signers, pass `--trusted-oracle-keys <path>` where JSON map
 Clients reference an `oracle_id` only; external raw metric values are never surfaced as protocol outputs. The kernel emits only canonical bucket symbols.
 
 Warning: Oracle++ only makes sense under remote+attested deployment. Local plugins are still constrained by transcript and ledger controls, but host compromise assumptions differ.
+
+## Oracle++ (remote attested oracle)
+
+Oracle++ is optional and intended for **remote, non-bypassable** oracle deployments only. A local in-process clone can be copied or bypassed and does not provide the UVP remote trust assumptions.
+
+EvidenceOS validates Oracle++ by:
+- verifying signed attestation from trusted authorities,
+- pinning oracle identity and measured runtime hash,
+- pinning the kernel-expected `OracleResolution` hash,
+- enforcing signed monotonic sequence numbers (`seq_no`) for replay/fork protection,
+- enforcing canonical `bucket_bytes` validation (`no hidden bits`).
+
+Attestation binds measured runtime state and protocol signing key material to the declared oracle identity. Query replies are accepted only when signatures validate and counters progress monotonically per `(oracle_id, session_id)`.
+
+Oracle++ does **not** replace ledger controls. It complements transcript canonicalization, leakage accounting (`k`), and settlement controls already enforced by the kernel.
