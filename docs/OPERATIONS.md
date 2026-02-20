@@ -1,31 +1,88 @@
 # Operations Guide
 
-## ETL signing key rotation
+## Deployment checklist
 
-EvidenceOS loads signing keys from `<data-dir>/keys/` using `key_id = sha256(ed25519_public_key)`.
+- Enforce TLS for every gRPC listener (`--tls-cert`, `--tls-key`) and require mTLS for operator/private environments (`--mtls-client-ca`, `--require-client-cert`).
+- Configure request authentication (`--auth-token` or `--auth-hmac-key`) and keep credentials out of logs.
+- Set `--max-request-bytes` defensively for your workload envelope.
+- Store daemon data (`--data-dir`) on durable storage with backups for:
+  - `etl.log`
+  - `state.json`
+  - `keys/`
+  - `nullspec/`
+  - `oracle_operator_config.json`
+  - `epoch_control.json`
+  - `etl_governance_events.log`
 
-### Planned rotation
+## Key management and rotation
 
-1. Generate the new 32-byte Ed25519 secret key material offline.
+EvidenceOS ETL signatures and operator configuration changes are signed with Ed25519 keys.
+
+### Daemon ETL signing keys
+
+1. Generate a fresh 32-byte Ed25519 secret seed offline.
 2. Compute key id from the public key and write `<data-dir>/keys/<key_id_hex>.key`.
-3. Update `<data-dir>/keys/active_key_id` to the new `key_id` hex value.
+3. Update `<data-dir>/keys/active_key_id`.
 4. Restart daemon.
-5. Validate by running `GetSignedTreeHead` and `GetPublicKey(key_id=<new_id>)` and verifying the returned signature.
+5. Verify new STH signatures via `GetSignedTreeHead` + `GetPublicKey`.
 
-### Historical verification requirement
+Keep historical keys available while historical artifacts may be audited.
 
-Do **not** delete old key files immediately. Historical STH verification requires `GetPublicKey` for prior `key_id` values referenced by artifacts.
+### Operator governance signing keys
 
-### Emergency rollback
+1. Provision operator key seeds in secure storage (HSM/KMS/secret manager).
+2. Publish the operator public key in `<data-dir>/trusted_oracle_keys.json` as `{ "keys": { "<key_id>": "<pubkey_hex>" } }`.
+3. Use `evidenceosctl` commands with `--signing-key` and `--key-id` for mutable operations.
+4. Reload daemon config (SIGHUP) after changing trusted keys.
 
-1. Restore the previous `active_key_id` value.
-2. Restart daemon.
-3. Confirm new STHs are signed by the rolled-back key id.
+## NullSpec lifecycle
 
-### Suspected key compromise workflow
+- Author and sign: `evidenceosctl nullspec create ... --signing-key ...`
+- Install: `evidenceosctl nullspec install --data-dir ... --contract ...`
+- Activate: `evidenceosctl nullspec activate --data-dir ... --oracle-id ... --holdout ... --nullspec-id ...`
+- Inspect: `evidenceosctl nullspec list/show ...`
 
-1. Freeze certification traffic at the deployment edge.
-2. Rotate immediately to a fresh key as above.
-3. Preserve compromised key file for historical verification and incident audit.
-4. Re-issue trust distribution artifacts listing compromised key id and validity boundary.
-5. Resume traffic after external trust channel confirms accepted replacement key.
+Each install/activate operation writes an auditable governance event to `etl_governance_events.log`.
+
+## Calibration and TTL management
+
+Use operator commands to update oracle runtime policy without code edits:
+
+- `evidenceosctl oracle list --data-dir ...`
+- `evidenceosctl oracle show --data-dir ... --oracle-id ...`
+- `evidenceosctl oracle set-ttl --data-dir ... --oracle-id ... --ttl-epochs ... --signing-key ... --key-id ...`
+- `evidenceosctl oracle rotate-calibration --data-dir ... --oracle-id ... --calib-hash ... --signing-key ... --key-id ...`
+- `evidenceosctl governance events list/show ...`
+
+Then signal daemon reload (`kill -HUP <pid>`) so updates are re-read and applied.
+
+## Epoch settlement and safe config changes
+
+For operator-controlled epoch progression:
+
+- Advance epoch: `evidenceosctl epoch advance --data-dir ... --to <epoch> --signing-key ... --key-id ...`
+- Reload daemon (`SIGHUP`) to apply.
+
+Recommended safe-change order:
+
+1. Stage signed governance change with `evidenceosctl`.
+2. Verify event appears in `etl_governance_events.log`.
+3. Reload daemon.
+4. Observe structured `config_reload` logs and canary behavior.
+5. Continue with normal claim traffic.
+
+## Canary operations
+
+- Query canary state:
+  - `evidenceosctl canary status --data-dir ... --claim-name ... --holdout ...`
+- Reset (requires signed governance event document):
+  - `evidenceosctl canary reset --data-dir ... --claim-name ... --holdout ... --governance-event ...`
+
+Perform resets only under incident workflow and preserve event artifacts.
+
+## What’s not covered
+
+- External IAM / SSO policy for operator access.
+- Automated HSM workflows and remote attestation for key custody.
+- Multi-region ETL replication and disaster-recovery runbooks.
+- Governance policy approval process (human process before signatures).

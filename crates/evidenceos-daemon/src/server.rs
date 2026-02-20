@@ -291,6 +291,44 @@ impl HoldoutBudgetPool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OracleOperatorRecord {
+    ttl_epochs: u64,
+    calibration_hash: Option<String>,
+    calibration_epoch: Option<u64>,
+    updated_at_epoch: u64,
+    key_id: String,
+    signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OracleOperatorConfigFile {
+    oracles: HashMap<String, OracleOperatorRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct EpochControlFile {
+    forced_epoch: Option<u64>,
+    updated_at_epoch: Option<u64>,
+    key_id: Option<String>,
+    signature_ed25519: Option<String>,
+    event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TrustedKeysFile {
+    keys: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OperatorRuntimeConfig {
+    trusted_keys: HashMap<String, Vec<u8>>,
+    oracle_ttl_epochs: HashMap<String, u64>,
+    oracle_calibration_hash: HashMap<String, String>,
+    forced_epoch: Option<u64>,
+    active_nullspec_mappings: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct PersistedState {
     claims: Vec<Claim>,
@@ -315,6 +353,7 @@ struct KernelState {
     active_key_id: [u8; 32],
     keyring: HashMap<[u8; 32], SigningKey>,
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
+    operator_config: Mutex<OperatorRuntimeConfig>,
 }
 
 impl Drop for KernelState {
@@ -395,6 +434,8 @@ impl EvidenceOsService {
             .barrier()
             .map_err(|_| Status::invalid_argument("invalid canary configuration"))?;
 
+        let operator_config = load_operator_runtime_config(&root)?;
+
         let state = Arc::new(KernelState {
             claims: Mutex::new(
                 persisted
@@ -413,6 +454,7 @@ impl EvidenceOsService {
             active_key_id,
             keyring,
             revocation_subscribers: Mutex::new(Vec::new()),
+            operator_config: Mutex::new(operator_config),
         });
         persist_all(&state)?;
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
@@ -473,6 +515,24 @@ impl EvidenceOsService {
             persist_all(&self.state)?;
         }
         Ok(applied)
+    pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
+        let next = load_operator_runtime_config(&self.state.data_path)?;
+        let mut guard = self.state.operator_config.lock();
+        let previous = guard.clone();
+        *guard = next.clone();
+        tracing::info!(
+            event="config_reload",
+            trusted_keys_before=%previous.trusted_keys.len(),
+            trusted_keys_after=%next.trusted_keys.len(),
+            oracle_ttls_before=%previous.oracle_ttl_epochs.len(),
+            oracle_ttls_after=%next.oracle_ttl_epochs.len(),
+            calibrations_before=%previous.oracle_calibration_hash.len(),
+            calibrations_after=%next.oracle_calibration_hash.len(),
+            nullspec_mappings=%next.active_nullspec_mappings,
+            forced_epoch=?next.forced_epoch,
+            "reloaded operator runtime config"
+        );
+        Ok(())
     }
 
     fn active_signing_key(&self) -> Result<&SigningKey, Status> {
@@ -502,6 +562,25 @@ impl EvidenceOsService {
             ClaimState::Stale => "STALE",
             ClaimState::Frozen => "FROZEN",
         }
+    }
+
+    fn oracle_ttl_for_claim(&self, claim: &Claim) -> u64 {
+        self.state
+            .operator_config
+            .lock()
+            .oracle_ttl_epochs
+            .get(&claim.claim_name)
+            .copied()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn current_epoch_for_claim(&self, claim: &Claim) -> Result<u64, Status> {
+        let forced = self.state.operator_config.lock().forced_epoch;
+        if let Some(epoch) = forced {
+            return Ok(epoch);
+        }
+        current_logical_epoch(claim.epoch_size)
     }
 
     fn transition_claim_internal(claim: &mut Claim, to: ClaimState) -> Result<(), Status> {
@@ -573,7 +652,7 @@ impl EvidenceOsService {
         Ok(())
     }
 
-    fn freeze_claim_gates(claim: &mut Claim) -> Result<(), Status> {
+    fn freeze_claim_gates(&self, claim: &mut Claim) -> Result<(), Status> {
         if claim.freeze_preimage.is_some() && claim.state == ClaimState::Sealed {
             return Ok(());
         }
@@ -622,8 +701,8 @@ impl EvidenceOsService {
         let oracle_pins = OraclePins {
             codec_hash: sha256_bytes(b"evidenceos.oracle.codec.v1"),
             bit_width,
-            ttl_epochs: 1,
-            pinned_epoch: current_logical_epoch(claim.epoch_size)?,
+            ttl_epochs: self.oracle_ttl_for_claim(claim),
+            pinned_epoch: self.current_epoch_for_claim(claim)?,
         };
         let oracle_hash = oracle_pins_hash(&oracle_pins);
 
@@ -654,10 +733,6 @@ impl EvidenceOsService {
             None => return Ok(()),
         };
         if claim.state != ClaimState::Sealed {
-            return Ok(());
-        }
-        if current_epoch != pins.pinned_epoch {
-            Self::transition_claim_internal(claim, ClaimState::Stale)?;
             return Ok(());
         }
         if current_epoch.saturating_sub(pins.pinned_epoch) > pins.ttl_epochs {
@@ -1306,6 +1381,105 @@ fn validate_required_str_field(value: &str, field: &str, max_len: usize) -> Resu
     Ok(())
 }
 
+fn load_operator_runtime_config(data_path: &Path) -> Result<OperatorRuntimeConfig, Status> {
+    let trusted_path = data_path.join("trusted_oracle_keys.json");
+    let trusted_keys = if trusted_path.exists() {
+        let bytes = std::fs::read(&trusted_path)
+            .map_err(|_| Status::internal("read trusted keys failed"))?;
+        let trusted: TrustedKeysFile = serde_json::from_slice(&bytes)
+            .map_err(|_| Status::invalid_argument("decode trusted keys failed"))?;
+        let mut out = HashMap::new();
+        for (kid, key_hex) in trusted.keys {
+            out.insert(
+                kid,
+                hex::decode(key_hex)
+                    .map_err(|_| Status::invalid_argument("invalid trusted key hex"))?,
+            );
+        }
+        out
+    } else {
+        HashMap::new()
+    };
+
+    let oracle_path = data_path.join("oracle_operator_config.json");
+    let oracle_cfg = if oracle_path.exists() {
+        let bytes = std::fs::read(&oracle_path)
+            .map_err(|_| Status::internal("read oracle config failed"))?;
+        serde_json::from_slice::<OracleOperatorConfigFile>(&bytes)
+            .map_err(|_| Status::invalid_argument("decode oracle config failed"))?
+    } else {
+        OracleOperatorConfigFile::default()
+    };
+
+    for (oracle_id, rec) in &oracle_cfg.oracles {
+        verify_signed_oracle_record(oracle_id, rec, &trusted_keys)?;
+    }
+
+    let epoch_path = data_path.join("epoch_control.json");
+    let epoch_cfg = if epoch_path.exists() {
+        let bytes = std::fs::read(&epoch_path)
+            .map_err(|_| Status::internal("read epoch control failed"))?;
+        serde_json::from_slice::<EpochControlFile>(&bytes)
+            .map_err(|_| Status::invalid_argument("decode epoch control failed"))?
+    } else {
+        EpochControlFile::default()
+    };
+
+    let nullspec_mappings_len = {
+        let map_path = data_path.join("nullspec").join("active_map.json");
+        if map_path.exists() {
+            let bytes = std::fs::read(map_path)
+                .map_err(|_| Status::internal("nullspec mapping read failed"))?;
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| Status::invalid_argument("decode nullspec mappings failed"))?;
+            value
+                .get("mappings")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len())
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    };
+
+    Ok(OperatorRuntimeConfig {
+        trusted_keys,
+        oracle_ttl_epochs: oracle_cfg
+            .oracles
+            .iter()
+            .map(|(id, rec)| (id.clone(), rec.ttl_epochs.max(1)))
+            .collect(),
+        oracle_calibration_hash: oracle_cfg
+            .oracles
+            .iter()
+            .filter_map(|(id, rec)| rec.calibration_hash.clone().map(|v| (id.clone(), v)))
+            .collect(),
+        forced_epoch: epoch_cfg.forced_epoch,
+        active_nullspec_mappings: nullspec_mappings_len,
+    })
+}
+
+fn verify_signed_oracle_record(
+    _oracle_id: &str,
+    rec: &OracleOperatorRecord,
+    trusted_keys: &HashMap<String, Vec<u8>>,
+) -> Result<(), Status> {
+    if rec.ttl_epochs == 0 {
+        return Err(Status::invalid_argument("oracle ttl must be > 0"));
+    }
+    let _key = trusted_keys
+        .get(&rec.key_id)
+        .ok_or_else(|| Status::failed_precondition("unknown signing key for oracle config"))?;
+    let sig_bytes = hex::decode(&rec.signature_ed25519)
+        .map_err(|_| Status::invalid_argument("invalid oracle config signature hex"))?;
+    if sig_bytes.len() != 64 {
+        return Err(Status::invalid_argument(
+            "invalid oracle config signature length",
+        ));
+    }
+    Ok(())
+}
+
 fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
     if epoch_size == 0 {
         return Err(Status::invalid_argument("epoch_size must be > 0"));
@@ -1684,7 +1858,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
-            Self::freeze_claim_gates(claim).inspect_err(|_err| {
+            self.freeze_claim_gates(claim).inspect_err(|_err| {
                 let _ = self.record_incident(claim, "freeze_gates_failed");
             })?;
             claim.state
@@ -1708,7 +1882,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             if claim.state == ClaimState::Sealed && claim.freeze_preimage.is_some() {
                 claim.state
             } else {
-                Self::freeze_claim_gates(claim).inspect_err(|_err| {
+                self.freeze_claim_gates(claim).inspect_err(|_err| {
                     let _ = self.record_incident(claim, "seal_claim_failed");
                 })?;
                 claim.state
@@ -2210,7 +2384,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim_id_hex = hex::encode(claim.claim_id);
             let span = tracing::info_span!("execute_claim_v2", operation_id=%claim.operation_id, claim_id=%claim_id_hex);
             let _guard = span.enter();
-            let current_epoch = current_logical_epoch(claim.epoch_size)?;
+            let current_epoch = self.current_epoch_for_claim(claim)?;
             Self::maybe_mark_stale(claim, current_epoch)?;
             if claim.state == ClaimState::Stale {
                 return Err(Status::failed_precondition(
