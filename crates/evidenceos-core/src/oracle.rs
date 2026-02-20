@@ -29,6 +29,8 @@ pub enum EValueFn {
     LikelihoodRatio { n_observations: usize },
     /// Fixed e-value regardless of data.
     Fixed(f64),
+    /// Mixture likelihood ratio for binary accuracy e-processes.
+    MixtureBinaryMartingale { grid: Vec<f64> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,15 +42,39 @@ pub struct NullSpec {
 
 impl NullSpec {
     pub fn compute_e_value(&self, observed_acc: f64) -> f64 {
-        match self.e_value_fn {
+        match &self.e_value_fn {
             EValueFn::LikelihoodRatio { n_observations } => {
                 if self.null_accuracy == 0.0 {
                     return 0.0;
                 }
                 let ratio = (observed_acc / self.null_accuracy).max(0.0);
-                ratio.powf(n_observations as f64).clamp(0.0, f64::MAX)
+                ratio.powf(*n_observations as f64).clamp(0.0, f64::MAX)
             }
-            EValueFn::Fixed(v) => v,
+            EValueFn::Fixed(v) => *v,
+            EValueFn::MixtureBinaryMartingale { grid } => {
+                if grid.is_empty() || self.null_accuracy <= 0.0 || self.null_accuracy >= 1.0 {
+                    return 0.0;
+                }
+                let n_observations = 1usize;
+                let k = (observed_acc.clamp(0.0, 1.0) * n_observations as f64)
+                    .round()
+                    .clamp(0.0, n_observations as f64) as usize;
+                let mut sum = 0.0;
+                for p_i in grid {
+                    if self.null_accuracy >= 1.0 {
+                        return 0.0;
+                    }
+                    let success = (p_i / self.null_accuracy).powf(k as f64);
+                    let failure = ((1.0 - p_i) / (1.0 - self.null_accuracy))
+                        .powf((n_observations - k) as f64);
+                    let term = success * failure;
+                    if !term.is_finite() || term < 0.0 {
+                        return 0.0;
+                    }
+                    sum += term;
+                }
+                (sum / (grid.len() as f64)).clamp(0.0, f64::MAX)
+            }
         }
     }
 }

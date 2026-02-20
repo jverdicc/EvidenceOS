@@ -48,6 +48,8 @@ use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
+use evidenceos_core::nullspec_contract::NullSpecContractV1 as RegistryNullSpecContractV1;
+use evidenceos_core::nullspec_registry::{NullSpecAuthorityKeyring, NullSpecRegistry};
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::settlement::UnsignedSettlementProposal;
@@ -515,6 +517,8 @@ impl EvidenceOsService {
             persist_all(&self.state)?;
         }
         Ok(applied)
+    }
+
     pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
         let next = load_operator_runtime_config(&self.state.data_path)?;
         let mut guard = self.state.operator_config.lock();
@@ -1510,7 +1514,27 @@ fn build_operation_id(
     ])
 }
 
-fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
+fn default_registry_nullspec() -> Result<RegistryNullSpecContractV1, Status> {
+    let mut null_spec = RegistryNullSpecContractV1 {
+        id: String::new(),
+        domain: "sealed-vault".to_string(),
+        null_accuracy: 0.5,
+        e_value: evidenceos_core::nullspec_contract::EValueSpecV1::LikelihoodRatio {
+            n_observations: 1,
+        },
+        created_at_unix: 0,
+        version: 1,
+    };
+    null_spec.id = null_spec
+        .compute_id()
+        .map_err(|_| Status::internal("nullspec id compute failed"))?;
+    Ok(null_spec)
+}
+
+fn vault_context(
+    claim: &Claim,
+    null_spec: RegistryNullSpecContractV1,
+) -> Result<VaultExecutionContext, Status> {
     let holdout_len = usize::try_from(claim.epoch_size)
         .map_err(|_| Status::invalid_argument("epoch_size too large"))?;
     let holdout_labels = derive_holdout_labels(claim.holdout_handle_id, holdout_len)?;
@@ -1518,7 +1542,7 @@ fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
         holdout_labels,
         oracle_num_buckets: claim.oracle_num_symbols,
         oracle_delta_sigma: claim.oracle_resolution.delta_sigma,
-        oracle_null_accuracy: 0.5,
+        null_spec,
         output_schema_id: claim.output_schema_id.clone(),
     })
 }
@@ -1933,7 +1957,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let context = vault_context(claim)?;
+            let context = vault_context(claim, default_registry_nullspec()?)?;
             let vault_result =
                 match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
                     Ok(v) => v,
@@ -2441,10 +2465,21 @@ impl EvidenceOsV2 for EvidenceOsService {
 
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let mut context = vault_context(claim)?;
-            if let NullSpecKind::ParametricBernoulli { p } = &contract.kind {
-                context.oracle_null_accuracy = *p;
-            }
+            let keyring = NullSpecAuthorityKeyring::load_from_dir(std::path::Path::new(
+                "./trusted-nullspec-keys",
+            ))
+            .map_err(|_| Status::failed_precondition("nullspec keyring load failed"))?;
+            let registry = NullSpecRegistry::load_from_dir(
+                std::path::Path::new("./nullspec-registry"),
+                &keyring,
+                false,
+            )
+            .map_err(|_| Status::failed_precondition("nullspec registry load failed"))?;
+            let reg_nullspec = registry
+                .get(&hex::encode(contract.nullspec_id))
+                .cloned()
+                .ok_or_else(|| Status::failed_precondition("active nullspec id not in registry"))?;
+            let context = vault_context(claim, reg_nullspec)?;
             let vault_result =
                 match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
                     Ok(v) => v,

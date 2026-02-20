@@ -39,6 +39,8 @@ pub mod error;
 pub mod etl;
 pub mod ledger;
 pub mod nullspec;
+pub mod nullspec_contract;
+pub mod nullspec_registry;
 pub mod nullspec_store;
 pub mod oracle;
 pub mod oracle_bundle;
