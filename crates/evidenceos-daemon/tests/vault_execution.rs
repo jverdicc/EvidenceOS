@@ -44,6 +44,8 @@ fn context() -> VaultExecutionContext {
         oracle_delta_sigma: 0.01,
         null_spec: test_nullspec(),
         output_schema_id: "legacy/v1".to_string(),
+        dp_epsilon_budget: 0.0,
+        dp_delta_budget: 0.0,
     }
 }
 
