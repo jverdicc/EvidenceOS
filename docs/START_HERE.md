@@ -8,6 +8,7 @@ Read in this order:
 1. [Threat Model by Example (blackbox walkthrough)](THREAT_MODEL_BLACKBOX.md)
 2. [Paper section overview in `README` (focus on discussion of §§3/5/10)](../README.md#technical-summary)
 3. [Experiments summary (`README` case study + scenario matrix)](../README.md#case-study-distillation-style-probing-public-reporting)
+4. [Alignment positioning: UVP vs capability spillover](ALIGNMENT_SPILLOVER_POSITIONING.md)
 
 ## If you’re a systems/security engineer
 
