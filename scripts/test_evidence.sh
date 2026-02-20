@@ -43,6 +43,9 @@ fi
     echo "skipped (dependency resolution unavailable)"
   fi
 
+  echo "== exfiltration demo regression =="
+  python3 -m unittest scripts.tests.test_exfiltration_demo
+
 
   echo "== adversarial scenario suite =="
   if [[ "$can_resolve_workspace_deps" == "true" ]]; then
