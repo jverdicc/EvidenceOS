@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use evidenceos_core::crypto_transcripts::verify_sth_signature;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
@@ -10,8 +10,6 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{transport::Channel, transport::Server};
-
-const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 
 struct TestServer {
     client: EvidenceOsClient<Channel>,
@@ -47,16 +45,6 @@ impl TestServer {
         let _ = self.shutdown.take().expect("shutdown").send(());
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-}
-
-fn sth_payload(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
-    let mut msg = Vec::with_capacity(8 + root_hash.len());
-    msg.extend_from_slice(DOMAIN_STH_V1);
-    msg.extend_from_slice(&tree_size.to_be_bytes());
-    msg.extend_from_slice(root_hash);
-    let mut h = Sha256::new();
-    h.update(msg);
-    h.finalize().into()
 }
 
 fn wasm_legacy() -> Vec<u8> {
@@ -153,10 +141,7 @@ fn rotate_key(data_dir: &std::path::Path, seed: u8) {
 }
 
 fn verify_sth_with_response_key(sth: &pb::SignedTreeHead, key: &[u8]) {
-    let vk = VerifyingKey::from_bytes(&key.try_into().expect("pk len")).expect("vk");
-    let digest = sth_payload(sth.tree_size, &sth.root_hash);
-    let sig = Signature::from_slice(&sth.signature).expect("sig");
-    assert!(vk.verify(&digest, &sig).is_ok());
+    verify_sth_signature(sth, key).expect("sth signature");
 }
 
 #[tokio::test]
@@ -169,8 +154,6 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
         .await
         .expect("pk")
         .into_inner();
-    let key =
-        VerifyingKey::from_bytes(&pubk.ed25519_public_key.try_into().expect("pk len")).expect("vk");
 
     let _first = execute_once(&mut server.client, "c1").await;
     let second = execute_once(&mut server.client, "c2").await;
@@ -193,9 +176,7 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
         &root_hash
     ));
 
-    let digest = sth_payload(sth.tree_size, &sth.root_hash);
-    let sig = Signature::from_slice(&sth.signature).expect("sig");
-    assert!(key.verify(&digest, &sig).is_ok());
+    verify_sth_signature(&sth, &pubk.ed25519_public_key).expect("sth signature");
 
     let cp = second.consistency_proof.expect("consistency");
     let proof = server

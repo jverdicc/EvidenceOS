@@ -34,48 +34,6 @@ fn hash(seed: u8) -> Vec<u8> {
 
 const LEGACY_SCHEMA_ID: &str = "legacy/v1";
 
-const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
-const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
-
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(domain);
-    h.update(payload);
-    let out = h.finalize();
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&out);
-    digest
-}
-
-fn sth_payload_digest(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&tree_size.to_be_bytes());
-    payload.extend_from_slice(root_hash);
-    sha256_domain(DOMAIN_STH_V1, &payload)
-}
-
-fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
-    out.extend_from_slice(bytes);
-}
-
-fn revocations_payload_digest(entries: &[pb::RevocationEntry]) -> [u8; 32] {
-    let mut payload = Vec::new();
-    for entry in entries {
-        append_len_prefixed_bytes(&mut payload, &entry.claim_id);
-        payload.extend_from_slice(&entry.timestamp_unix.to_be_bytes());
-        append_len_prefixed_bytes(&mut payload, entry.reason.as_bytes());
-    }
-    sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
-}
-
-fn sha256_domain_vec(domain: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(payload);
-    hasher.finalize().to_vec()
-}
-
 fn sha256(payload: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(payload);

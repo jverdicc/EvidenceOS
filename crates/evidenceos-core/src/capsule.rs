@@ -15,8 +15,8 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::crypto_transcripts::etl_leaf_hash;
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::etl::leaf_hash;
 use crate::ledger::ConservationLedger;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -356,7 +356,7 @@ impl ClaimCapsule {
         Ok(sha256_hex(&self.to_json_bytes()?))
     }
     pub fn etl_leaf_hash(&self) -> EvidenceOSResult<[u8; 32]> {
-        Ok(leaf_hash(&self.to_json_bytes()?))
+        Ok(etl_leaf_hash(&self.to_json_bytes()?))
     }
 }
 
