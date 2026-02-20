@@ -5,24 +5,32 @@
 
 # EvidenceOS (Rust)
 
-**EvidenceOS** is a production-oriented verification kernel for the Universal Verification Protocol (UVP).
+EvidenceOS is a production-oriented verification kernel for the Universal Verification Protocol (UVP).
 
-- **EvidenceOS** (this repo): trusted kernel that enforces admissibility, deterministic execution, metered oracle access, and auditable settlement.
-- **[DiscOS](https://github.com/jverdicc/DiscOS)** (separate repo): untrusted discovery/userland orchestrator that proposes claim capsules and consumes kernel responses.
-- **UVP**: protocol model for certifying claims under adaptive interaction while conserving verification evidence across time and interfaces.
+## What UVP is (in 60 seconds)
 
-Why this matters: verification systems fail when adaptive querying, side channels, or weak accounting allow attackers to extract holdout information faster than assurance can be maintained. EvidenceOS is designed to constrain this extraction channel, provide auditable receipts, and make risk posture explicit.
+UVP is a kernel + userland architecture for certifying claims under adaptive interaction.
+DiscOS (separate repo) is untrusted discovery/userland that proposes claim capsules.
+EvidenceOS (this repo) is the trusted kernel that executes capsules on holdouts.
+Every oracle response is canonicalized, metered, and logged so leakage is budgeted rather than ignored.
+The protocol tracks evidence wealth (W) and adaptivity leakage (k) across time, identities, and interfaces.
+This makes coordinated probing measurable, expensive, and auditable instead of silently cumulative.
+The result is a verification system with explicit risk posture, deterministic settlement, and revocation-ready evidence trails.
 
-## Start here
+## Start here (2-minute on-ramp)
 
-- **Start here: threat model walkthrough**: [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
+1. **Worked threat-model example (recommended first read):** [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
+2. **Black-box UVP interface explainer:** [`docs/uvp_blackbox_interface.md`](docs/uvp_blackbox_interface.md)
+3. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
+4. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 
-New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for guided reading paths for alignment researchers, systems/security engineers, and operators/deployers.
+New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
 This repository contains:
 
 - `evidenceos-core`: Conservation Ledger primitives, deterministic logical clock, ETL Merkle log, and ASPEC-like Wasm verifier.
 - `evidenceos-daemon`: gRPC service exposing the kernel API.
+- **[DiscOS](https://github.com/jverdicc/DiscOS)** (separate repo): untrusted discovery/userland orchestrator that proposes claim capsules and consumes kernel responses.
 
 ## Technical Summary
 
