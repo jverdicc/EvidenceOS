@@ -37,6 +37,9 @@ jobs:
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 
+      - name: Check protocol drift
+        run: ./scripts/check_proto_drift.sh
+
       - name: Rust format check
         run: cargo fmt --check
 

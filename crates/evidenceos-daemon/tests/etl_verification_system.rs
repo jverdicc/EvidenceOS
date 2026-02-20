@@ -1,17 +1,15 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
-use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::{pb, sha256_domain, DOMAIN_STH_SIGNATURE_V1};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{transport::Channel, transport::Server};
-
-const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 
 struct TestServer {
     client: EvidenceOsClient<Channel>,
@@ -50,13 +48,10 @@ impl TestServer {
 }
 
 fn sth_payload(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
-    let mut msg = Vec::with_capacity(8 + root_hash.len());
-    msg.extend_from_slice(DOMAIN_STH_V1);
-    msg.extend_from_slice(&tree_size.to_be_bytes());
-    msg.extend_from_slice(root_hash);
-    let mut h = Sha256::new();
-    h.update(msg);
-    h.finalize().into()
+    let mut payload = Vec::with_capacity(8 + root_hash.len());
+    payload.extend_from_slice(&tree_size.to_be_bytes());
+    payload.extend_from_slice(root_hash);
+    sha256_domain(DOMAIN_STH_SIGNATURE_V1, &payload)
 }
 
 fn wasm_legacy() -> Vec<u8> {

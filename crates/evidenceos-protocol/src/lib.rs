@@ -40,6 +40,26 @@ pub type CapsuleHash = [u8; 32];
 
 pub const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 pub const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
+pub const DOMAIN_STH_SIGNATURE_V1: &[u8] = b"evidenceos:sth:v1";
+pub const DOMAIN_REVOCATIONS_SNAPSHOT_V1: &[u8] = b"evidenceos:revocations:v1";
+
+/// Returns `SHA256(domain || payload)`.
+///
+/// This construction is a consensus-critical interface shared by daemon and clients.
+/// Do not modify without a coordinated protocol version bump.
+#[must_use]
+pub fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(payload);
+
+    let digest = hasher.finalize();
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +124,10 @@ impl fmt::Display for ErrorCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{CanonicalBytes, CanonicalCodec, ErrorCode};
+    use super::{
+        sha256_domain, CanonicalBytes, CanonicalCodec, ErrorCode, DOMAIN_CLAIM_ID,
+        DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DemoSymbol {
@@ -153,5 +176,21 @@ mod tests {
 
         let not_fixed = CanonicalBytes::<2>::try_from_slice(&[1]);
         assert_eq!(not_fixed, Err(ErrorCode::ENoncanonical));
+    }
+
+    #[test]
+    fn domain_constants_are_stable() {
+        assert_eq!(DOMAIN_CLAIM_ID, b"evidenceos:claim_id:v2");
+        assert_eq!(DOMAIN_STH_SIGNATURE_V1, b"evidenceos:sth:v1");
+        assert_eq!(DOMAIN_REVOCATIONS_SNAPSHOT_V1, b"evidenceos:revocations:v1");
+    }
+
+    #[test]
+    fn sha256_domain_matches_snapshot() {
+        let digest = sha256_domain(b"evidenceos:test:v1", b"payload");
+        assert_eq!(
+            hex::encode(digest),
+            "87793298a928d7506f292db3201b2c471623211631bbb31d22ae30bb28ea5ea5"
+        );
     }
 }

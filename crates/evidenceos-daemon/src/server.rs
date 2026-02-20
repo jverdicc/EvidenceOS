@@ -58,7 +58,9 @@ use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::pb;
+use evidenceos_protocol::{
+    pb, sha256_domain, DOMAIN_CLAIM_ID, DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
+};
 
 use pb::evidence_os_server::EvidenceOs as EvidenceOsV2;
 use pb::v1;
@@ -69,9 +71,6 @@ const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
-const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
-const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
-const DOMAIN_REVOCATIONS_V1: &[u8] = b"evidenceos:revocations:v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Lane {
@@ -1177,16 +1176,6 @@ fn oracle_pins_hash(pins: &OraclePins) -> [u8; 32] {
     sha256_bytes(&payload)
 }
 
-fn sha256_domain(domain: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(domain);
-    h.update(payload);
-    let out = h.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&out);
-    hash
-}
-
 fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
     out.extend_from_slice(bytes);
@@ -1200,7 +1189,7 @@ fn sth_signature_payload(tree_size: u64, root_hash: &[u8; 32]) -> [u8; 32] {
     let mut payload = Vec::with_capacity(40);
     payload.extend_from_slice(&tree_size.to_be_bytes());
     payload.extend_from_slice(root_hash);
-    sha256_domain(DOMAIN_STH_V1, &payload)
+    sha256_domain(DOMAIN_STH_SIGNATURE_V1, &payload)
 }
 
 fn revocations_signature_payload(entries: &[pb::RevocationEntry]) -> [u8; 32] {
@@ -1210,7 +1199,7 @@ fn revocations_signature_payload(entries: &[pb::RevocationEntry]) -> [u8; 32] {
         payload.extend_from_slice(&entry.timestamp_unix.to_be_bytes());
         append_len_prefixed_str(&mut payload, &entry.reason);
     }
-    sha256_domain(DOMAIN_REVOCATIONS_V1, &payload)
+    sha256_domain(DOMAIN_REVOCATIONS_SNAPSHOT_V1, &payload)
 }
 
 fn key_id_from_verifying_key(verifying_key: &VerifyingKey) -> [u8; 32] {
