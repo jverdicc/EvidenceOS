@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+use evidenceos_core::nullspec_contract::{EValueSpecV1, NullSpecContractV1};
 use evidenceos_daemon::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 
 fn config() -> VaultConfig {
@@ -23,12 +24,25 @@ fn config() -> VaultConfig {
     }
 }
 
+fn test_nullspec() -> NullSpecContractV1 {
+    let mut spec = NullSpecContractV1 {
+        id: String::new(),
+        domain: "sealed-vault".to_string(),
+        null_accuracy: 0.5,
+        e_value: EValueSpecV1::LikelihoodRatio { n_observations: 4 },
+        created_at_unix: 1,
+        version: 1,
+    };
+    spec.id = spec.compute_id().expect("id");
+    spec
+}
+
 fn context() -> VaultExecutionContext {
     VaultExecutionContext {
         holdout_labels: vec![1, 0, 1, 1],
         oracle_num_buckets: 4,
         oracle_delta_sigma: 0.01,
-        oracle_null_accuracy: 0.5,
+        null_spec: test_nullspec(),
         output_schema_id: "legacy/v1".to_string(),
     }
 }
@@ -223,7 +237,7 @@ fn vault_rejects_invalid_null_accuracy() {
     let engine = VaultEngine::new().expect("engine");
     for acc in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
         let mut bad = context();
-        bad.oracle_null_accuracy = acc;
+        bad.null_spec.null_accuracy = acc;
         let err = engine
             .execute(&wasm, &bad, config())
             .expect_err("invalid null accuracy");
@@ -247,7 +261,7 @@ fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
     let engine = VaultEngine::new().expect("engine");
     let mut ctx = context();
     ctx.holdout_labels = vec![1, 1, 1, 1];
-    ctx.oracle_null_accuracy = 0.5;
+    ctx.null_spec.null_accuracy = 0.5;
     let out = engine.execute(&wasm, &ctx, config()).expect("execute");
     assert_eq!(out.e_value_total, 0.0);
 }

@@ -21,9 +21,8 @@ use wasmtime::{
     Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
 };
 
-use evidenceos_core::oracle::{
-    AccuracyOracleState, EValueFn, HoldoutLabels, NullSpec, OracleResolution,
-};
+use evidenceos_core::nullspec_contract::NullSpecContractV1;
+use evidenceos_core::oracle::{AccuracyOracleState, HoldoutLabels, NullSpec, OracleResolution};
 use evidenceos_core::structured_claims;
 
 const TRACE_DOMAIN: &[u8] = b"evidenceos:judge_trace:v2";
@@ -43,7 +42,7 @@ pub struct VaultExecutionContext {
     pub holdout_labels: Vec<u8>,
     pub oracle_num_buckets: u32,
     pub oracle_delta_sigma: f64,
-    pub oracle_null_accuracy: f64,
+    pub null_spec: NullSpecContractV1,
     pub output_schema_id: String,
 }
 
@@ -161,11 +160,9 @@ impl VaultEngine {
             OracleResolution::new(context.oracle_num_buckets, context.oracle_delta_sigma)
                 .map_err(|_| VaultError::InvalidConfig("invalid oracle resolution".to_string()))?;
         let null_spec = NullSpec {
-            domain: "sealed-vault".to_string(),
-            null_accuracy: context.oracle_null_accuracy,
-            e_value_fn: EValueFn::LikelihoodRatio {
-                n_observations: holdout.len(),
-            },
+            domain: context.null_spec.domain.clone(),
+            null_accuracy: context.null_spec.null_accuracy,
+            e_value_fn: context.null_spec.as_oracle_evalue(),
         };
         let oracle_state = AccuracyOracleState::new(holdout.clone(), resolution, null_spec)
             .map_err(|_| VaultError::InvalidConfig("invalid oracle state".to_string()))?;
