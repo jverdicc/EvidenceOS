@@ -115,8 +115,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _metrics_handle = telemetry.clone().spawn_metrics_server(metrics_addr).await?;
     let oracle_cfg =
         DaemonOracleConfig::load(&args.oracle_dir, args.trusted_oracle_keys.as_deref())?;
-    let mut oracle_aspec_policy = AspecPolicy::default();
-    oracle_aspec_policy.float_policy = FloatPolicy::Allow;
+    let oracle_aspec_policy = AspecPolicy {
+        float_policy: FloatPolicy::Allow,
+        ..AspecPolicy::default()
+    };
     let registry = OracleRegistry::load_from_dir(
         &oracle_cfg.oracle_dir,
         &oracle_cfg.trusted_authorities,

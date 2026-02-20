@@ -385,3 +385,24 @@ EvidenceOS validates Oracle++ by:
 Attestation binds measured runtime state and protocol signing key material to the declared oracle identity. Query replies are accepted only when signatures validate and counters progress monotonically per `(oracle_id, session_id)`.
 
 Oracle++ does **not** replace ledger controls. It complements transcript canonicalization, leakage accounting (`k`), and settlement controls already enforced by the kernel.
+
+## NullSpec governance
+
+EvidenceOS now requires an active NullSpec contract per `(oracle_id, holdout_handle)` before claim execution. Missing, expired, or resolution-hash-mismatched NullSpecs fail closed and emit incident records.
+
+### Non-parametric e-process option
+
+Operators can select a non-parametric `DirichletMultinomialMixture` e-process over discrete buckets (from calibration counts), or keep parametric Bernoulli/fixed-alt contracts where applicable.
+
+See [docs/NULLSPEC.md](docs/NULLSPEC.md) and `evidenceosctl nullspec *` commands.
+
+Example contract fields:
+
+```json
+{
+  "schema": "evidenceos.nullspec.v1",
+  "oracle_id": "settle",
+  "kind": {"DiscreteBuckets": {"p0": [0.25, 0.25, 0.25, 0.25]}},
+  "eprocess": {"DirichletMultinomialMixture": {"alpha": [1.0, 1.0, 1.0, 1.0]}}
+}
+```

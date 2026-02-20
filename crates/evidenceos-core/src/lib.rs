@@ -33,9 +33,12 @@
 pub mod aspec;
 pub mod capsule;
 pub mod dlc;
+pub mod eprocess;
 pub mod error;
 pub mod etl;
 pub mod ledger;
+pub mod nullspec;
+pub mod nullspec_store;
 pub mod oracle;
 pub mod oracle_bundle;
 pub mod oracle_plusplus;

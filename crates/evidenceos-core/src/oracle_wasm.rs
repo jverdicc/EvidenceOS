@@ -136,8 +136,10 @@ mod tests {
     fn aspec_rejects_wasi_imports() {
         let wasm = wat::parse_str("(module (import \"wasi_snapshot_preview1\" \"fd_write\" (func)) (memory (export \"memory\") 1) (func (export \"oracle_query\") (param i32 i32) (result f64) f64.const 0.1))")
             .unwrap_or_else(|_| unreachable!());
-        let mut policy = AspecPolicy::default();
-        policy.float_policy = FloatPolicy::Allow;
+        let policy = AspecPolicy {
+            float_policy: FloatPolicy::Allow,
+            ..AspecPolicy::default()
+        };
         let sandbox = WasmOracleSandbox::new(&wasm, &policy, WasmOracleSandboxPolicy::default());
         assert!(sandbox.is_err());
     }
@@ -145,8 +147,10 @@ mod tests {
     #[test]
     fn wasm_query_rejects_nan() {
         let wasm = oracle_wat("f64.const nan:canonical");
-        let mut policy = AspecPolicy::default();
-        policy.float_policy = FloatPolicy::Allow;
+        let policy = AspecPolicy {
+            float_policy: FloatPolicy::Allow,
+            ..AspecPolicy::default()
+        };
         let sandbox = WasmOracleSandbox::new(&wasm, &policy, WasmOracleSandboxPolicy::default())
             .unwrap_or_else(|_| unreachable!());
         assert!(sandbox.query_raw_metric(&[0, 1]).is_err());

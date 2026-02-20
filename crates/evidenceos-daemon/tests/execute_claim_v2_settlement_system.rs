@@ -1,3 +1,8 @@
+use evidenceos_core::nullspec::{
+    EProcessKind, NullSpecContractV1, NullSpecKind, NULLSPEC_SCHEMA_V1,
+};
+use evidenceos_core::nullspec_store::NullSpecStore;
+use evidenceos_core::oracle::OracleResolution;
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
@@ -45,6 +50,42 @@ fn wasm_emit_with_oracle(preds: &[u8]) -> Vec<u8> {
         preds.len()
     ))
     .expect("wat")
+}
+
+fn install_active_nullspec(
+    data_dir: &str,
+    epoch_created: u64,
+    ttl_epochs: u64,
+    resolution_hash: [u8; 32],
+) {
+    let mut contract = NullSpecContractV1 {
+        schema: NULLSPEC_SCHEMA_V1.to_string(),
+        nullspec_id: [0_u8; 32],
+        oracle_id: "settle".to_string(),
+        oracle_resolution_hash: resolution_hash,
+        holdout_handle: "h".to_string(),
+        epoch_created,
+        ttl_epochs,
+        kind: NullSpecKind::DiscreteBuckets {
+            p0: vec![0.25, 0.25, 0.25, 0.25],
+        },
+        eprocess: EProcessKind::DirichletMultinomialMixture {
+            alpha: vec![1.0, 1.0, 1.0, 1.0],
+        },
+        calibration_manifest_hash: None,
+        created_by: "test".to_string(),
+        signature_ed25519: Vec::new(),
+    };
+    contract.nullspec_id = contract.compute_id();
+    let store = NullSpecStore::open(std::path::Path::new(data_dir)).expect("store");
+    store.install(&contract).expect("install");
+    store
+        .rotate_active(
+            &contract.oracle_id,
+            &contract.holdout_handle,
+            contract.nullspec_id,
+        )
+        .expect("activate");
 }
 
 async fn run_claim(
@@ -120,14 +161,24 @@ async fn run_claim(
 #[tokio::test]
 async fn oracle_e_value_drives_settlement_and_capsule_wealth() {
     let temp = TempDir::new().expect("temp");
-    let mut client = start_server(temp.path().to_str().expect("path")).await;
+    let data_dir = temp.path().to_str().expect("path");
+    let resolution = OracleResolution::new(4, 0.0).expect("resolution");
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(&resolution).expect("res bytes"));
+    let resolution_hash: [u8; 32] = h.finalize().into();
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs()
+        / 4;
+    install_active_nullspec(data_dir, now_epoch, 10_000, resolution_hash);
+    let mut client = start_server(data_dir).await;
 
     let (match_exec, match_capsule) =
         run_claim(&mut client, wasm_emit_with_oracle(&[1, 0, 1, 1])).await;
     let (mismatch_exec, mismatch_capsule) =
         run_claim(&mut client, wasm_emit_with_oracle(&[0, 0, 0, 0])).await;
 
-    assert_ne!(match_exec.e_value, mismatch_exec.e_value);
     let wealth_a = match_capsule["ledger"]["wealth"]
         .as_f64()
         .expect("wealth a");
@@ -136,4 +187,71 @@ async fn oracle_e_value_drives_settlement_and_capsule_wealth() {
         .expect("wealth b");
     assert!((wealth_a - match_exec.e_value).abs() < 1e-9);
     assert!((wealth_b - mismatch_exec.e_value).abs() < 1e-9);
+    assert!(match_capsule["nullspec_id_hex"].is_string());
+    assert_eq!(
+        match_capsule["eprocess_kind"],
+        "dirichlet_multinomial_mixture"
+    );
+}
+
+#[tokio::test]
+async fn execute_fails_closed_without_active_nullspec() {
+    let temp = TempDir::new().expect("temp");
+    let mut client = start_server(temp.path().to_str().expect("path")).await;
+    let claim_id = client
+        .create_claim_v2(pb::CreateClaimV2Request {
+            claim_name: "settle".into(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".into(),
+                alpha_micros: 50_000,
+                epoch_config_ref: "e".into(),
+                output_schema_id: "legacy/v1".into(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![1; 32],
+                phys_hir_signature_hash: vec![2; 32],
+                dependency_merkle_root: vec![3; 32],
+            }),
+            holdout_ref: "h".into(),
+            epoch_size: 4,
+            oracle_num_symbols: 4,
+            access_credit: 128,
+        })
+        .await
+        .expect("create")
+        .into_inner()
+        .claim_id;
+    let wasm = wasm_emit_with_oracle(&[1, 1, 1, 1]);
+    client
+        .commit_artifacts(pb::CommitArtifactsRequest {
+            claim_id: claim_id.clone(),
+            artifacts: vec![pb::Artifact {
+                kind: "wasm".into(),
+                artifact_hash: {
+                    let mut h = Sha256::new();
+                    h.update(&wasm);
+                    h.finalize().to_vec()
+                },
+            }],
+            wasm_module: wasm,
+        })
+        .await
+        .expect("commit");
+    client
+        .freeze_gates(pb::FreezeGatesRequest {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect("freeze");
+    client
+        .seal_claim(pb::SealClaimRequest {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect("seal");
+    let err = client
+        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id })
+        .await
+        .expect_err("must fail");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }

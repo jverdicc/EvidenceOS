@@ -5,9 +5,7 @@ use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
-use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, IsCa, KeyPair,
-};
+use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -30,7 +28,7 @@ fn generate_test_pki() -> TestPki {
     ca_params.distinguished_name = ca_dn;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let ca_key = KeyPair::generate().expect("ca key");
-    let ca_issuer = CertifiedIssuer::self_signed(ca_params, ca_key).expect("ca cert");
+    let ca_issuer = ca_params.self_signed(&ca_key).expect("ca cert");
 
     let mut server_dn = DistinguishedName::new();
     server_dn.push(DnType::CommonName, "localhost");
@@ -39,7 +37,7 @@ fn generate_test_pki() -> TestPki {
     server_params.distinguished_name = server_dn;
     let server_key = KeyPair::generate().expect("server key");
     let server_cert = server_params
-        .signed_by(&server_key, &ca_issuer)
+        .signed_by(&server_key, &ca_issuer, &ca_key)
         .expect("server cert");
 
     let mut client_dn = DistinguishedName::new();
@@ -48,7 +46,7 @@ fn generate_test_pki() -> TestPki {
     client_params.distinguished_name = client_dn;
     let client_key = KeyPair::generate().expect("client key");
     let client_cert = client_params
-        .signed_by(&client_key, &ca_issuer)
+        .signed_by(&client_key, &ca_issuer, &ca_key)
         .expect("client cert");
 
     TestPki {

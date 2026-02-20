@@ -40,6 +40,7 @@ impl RequestGuard {
         Self { auth, timeout }
     }
 
+    #[allow(clippy::result_large_err)]
     fn validate_auth(&self, metadata: &MetadataMap) -> Result<(), Status> {
         match &self.auth {
             Some(AuthConfig::BearerToken(expected)) => {
@@ -155,6 +156,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+#[allow(clippy::result_large_err)]
 pub fn decode_with_max_size<T: Message + Default>(
     bytes: &[u8],
     max_bytes: usize,
