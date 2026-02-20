@@ -15,6 +15,8 @@ Why this matters: verification systems fail when adaptive querying, side channel
 
 ## Start here
 
+- **Start here: threat model walkthrough**: [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
+
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for guided reading paths for alignment researchers, systems/security engineers, and operators/deployers.
 
 This repository contains:
