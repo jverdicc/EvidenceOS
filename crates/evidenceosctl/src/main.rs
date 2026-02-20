@@ -1,10 +1,14 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use evidenceos_core::canary::CanaryState;
+use evidenceos_core::capsule::canonical_json;
 use evidenceos_core::nullspec::{
     EProcessKind, NullSpecContractV1, NullSpecKind, NULLSPEC_SCHEMA_V1,
 };
 use evidenceos_core::nullspec_store::NullSpecStore;
+use evidenceos_protocol::{
+    sha256_domain, DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -25,6 +29,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(alias = "operator")]
+    Oracle {
+        #[command(subcommand)]
+        cmd: OracleCmd,
+    },
+    #[command(alias = "operator-epoch")]
+    Epoch {
+        #[command(subcommand)]
+        cmd: EpochCmd,
+    },
     Nullspec {
         #[command(subcommand)]
         cmd: NullspecCmd,
@@ -32,14 +46,6 @@ enum Command {
     Canary {
         #[command(subcommand)]
         cmd: CanaryCmd,
-    },
-    Oracle {
-        #[command(subcommand)]
-        cmd: OracleCmd,
-    },
-    Epoch {
-        #[command(subcommand)]
-        cmd: EpochCmd,
     },
     Governance {
         #[command(subcommand)]
@@ -129,7 +135,8 @@ enum OracleCmd {
         #[arg(long)]
         oracle_id: String,
     },
-    SetTtl {
+    #[command(name = "sign-oracle-record", alias = "set-ttl")]
+    SignOracleRecord {
         #[arg(long)]
         data_dir: PathBuf,
         #[arg(long)]
@@ -141,7 +148,8 @@ enum OracleCmd {
         #[arg(long)]
         key_id: String,
     },
-    RotateCalibration {
+    #[command(name = "sign-oracle-calibration", alias = "rotate-calibration")]
+    SignOracleCalibration {
         #[arg(long)]
         data_dir: PathBuf,
         #[arg(long)]
@@ -154,10 +162,10 @@ enum OracleCmd {
         key_id: String,
     },
 }
-
 #[derive(Subcommand)]
 enum EpochCmd {
-    Advance {
+    #[command(name = "sign-epoch-control", alias = "advance")]
+    SignEpochControl {
         #[arg(long)]
         data_dir: PathBuf,
         #[arg(long)]
@@ -211,6 +219,22 @@ struct OracleOperatorRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OracleOperatorConfig {
     oracles: BTreeMap<String, OracleOperatorRecord>,
+}
+#[derive(Debug, Clone, Serialize)]
+struct OracleOperatorSigningPayload<'a> {
+    oracle_id: &'a str,
+    ttl_epochs: u64,
+    calibration_hash: Option<&'a str>,
+    calibration_epoch: Option<u64>,
+    updated_at_epoch: u64,
+    key_id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EpochControlSigningPayload<'a> {
+    forced_epoch: u64,
+    updated_at_epoch: u64,
+    key_id: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +290,7 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
                 .ok_or_else(|| "oracle not found".to_string())?;
             Ok(json!(record))
         }
-        OracleCmd::SetTtl {
+        OracleCmd::SignOracleRecord {
             data_dir,
             oracle_id,
             ttl_epochs,
@@ -279,19 +303,22 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
             let mut cfg = read_oracle_config(&data_dir)?;
             let epoch = unix_epoch_now()?;
             let payload = json!({"oracle_id": oracle_id, "ttl_epochs": ttl_epochs});
-            let event = sign_governance_event(
-                "oracle_ttl_set",
-                epoch,
-                &key_id,
-                payload.clone(),
-                &signing_key,
-            )?;
+            let event =
+                sign_governance_event("oracle_ttl_set", epoch, &key_id, payload, &signing_key)?;
 
             let entry = cfg.oracles.entry(oracle_id.clone()).or_default();
             entry.ttl_epochs = ttl_epochs;
             entry.updated_at_epoch = epoch;
             entry.key_id = key_id;
-            entry.signature_ed25519 = event.signature_ed25519.clone();
+            let record_payload = OracleOperatorSigningPayload {
+                oracle_id: &oracle_id,
+                ttl_epochs: entry.ttl_epochs,
+                calibration_hash: entry.calibration_hash.as_deref(),
+                calibration_epoch: entry.calibration_epoch,
+                updated_at_epoch: entry.updated_at_epoch,
+                key_id: &entry.key_id,
+            };
+            entry.signature_ed25519 = sign_oracle_record_payload(&signing_key, &record_payload)?;
 
             write_json_atomic(
                 data_dir.join(ORACLE_OPERATOR_PATH),
@@ -301,7 +328,7 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
             append_governance_event(&data_dir, &event)?;
             Ok(json!({"status":"ok", "event_id": event.event_id}))
         }
-        OracleCmd::RotateCalibration {
+        OracleCmd::SignOracleCalibration {
             data_dir,
             oracle_id,
             calib_hash,
@@ -316,7 +343,7 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
                 "oracle_calibration_rotated",
                 epoch,
                 &key_id,
-                payload.clone(),
+                payload,
                 &signing_key,
             )?;
 
@@ -324,14 +351,19 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
             if entry.ttl_epochs == 0 {
                 entry.ttl_epochs = 1;
             }
-            entry.calibration_hash = payload
-                .get("calibration_hash")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string);
+            entry.calibration_hash = Some(calib_hash.clone());
             entry.calibration_epoch = Some(epoch);
             entry.updated_at_epoch = epoch;
             entry.key_id = key_id;
-            entry.signature_ed25519 = event.signature_ed25519.clone();
+            let record_payload = OracleOperatorSigningPayload {
+                oracle_id: &oracle_id,
+                ttl_epochs: entry.ttl_epochs,
+                calibration_hash: entry.calibration_hash.as_deref(),
+                calibration_epoch: entry.calibration_epoch,
+                updated_at_epoch: entry.updated_at_epoch,
+                key_id: &entry.key_id,
+            };
+            entry.signature_ed25519 = sign_oracle_record_payload(&signing_key, &record_payload)?;
 
             write_json_atomic(
                 data_dir.join(ORACLE_OPERATOR_PATH),
@@ -346,7 +378,7 @@ fn run_oracle(cmd: OracleCmd) -> Result<serde_json::Value, String> {
 
 fn run_epoch(cmd: EpochCmd) -> Result<serde_json::Value, String> {
     match cmd {
-        EpochCmd::Advance {
+        EpochCmd::SignEpochControl {
             data_dir,
             to,
             signing_key,
@@ -360,11 +392,17 @@ fn run_epoch(cmd: EpochCmd) -> Result<serde_json::Value, String> {
                 json!({"to": to}),
                 &signing_key,
             )?;
+            let control_payload = EpochControlSigningPayload {
+                forced_epoch: to,
+                updated_at_epoch: epoch,
+                key_id: &key_id,
+            };
+            let signature_ed25519 = sign_epoch_control_payload(&signing_key, &control_payload)?;
             let control = json!({
                 "forced_epoch": to,
                 "updated_at_epoch": epoch,
                 "key_id": key_id,
-                "signature_ed25519": event.signature_ed25519,
+                "signature_ed25519": signature_ed25519,
                 "event_id": event.event_id,
             });
             write_json_atomic(
@@ -665,6 +703,26 @@ fn sign_governance_event(
         payload,
         signature_ed25519: hex::encode(sig),
     })
+}
+
+fn sign_oracle_record_payload(
+    signing_key: &Path,
+    payload: &OracleOperatorSigningPayload<'_>,
+) -> Result<String, String> {
+    let signing = read_signing_key(signing_key)?;
+    let canonical = canonical_json(payload).map_err(|e| e.to_string())?;
+    let digest = sha256_domain(DOMAIN_ORACLE_OPERATOR_RECORD_V1, &canonical);
+    Ok(hex::encode(signing.sign(&digest).to_bytes()))
+}
+
+fn sign_epoch_control_payload(
+    signing_key: &Path,
+    payload: &EpochControlSigningPayload<'_>,
+) -> Result<String, String> {
+    let signing = read_signing_key(signing_key)?;
+    let canonical = canonical_json(payload).map_err(|e| e.to_string())?;
+    let digest = sha256_domain(DOMAIN_EPOCH_CONTROL_V1, &canonical);
+    Ok(hex::encode(signing.sign(&digest).to_bytes()))
 }
 
 fn read_signing_key(path: &Path) -> Result<SigningKey, String> {

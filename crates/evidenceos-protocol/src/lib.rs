@@ -42,6 +42,8 @@ pub const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 pub const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 pub const DOMAIN_STH_SIGNATURE_V1: &[u8] = b"evidenceos:sth:v1";
 pub const DOMAIN_REVOCATIONS_SNAPSHOT_V1: &[u8] = b"evidenceos:revocations:v1";
+pub const DOMAIN_ORACLE_OPERATOR_RECORD_V1: &[u8] = b"evidenceos:oracle_operator_record:v1";
+pub const DOMAIN_EPOCH_CONTROL_V1: &[u8] = b"evidenceos:epoch_control:v1";
 
 /// Returns `SHA256(domain || payload)`.
 ///
@@ -126,7 +128,8 @@ impl fmt::Display for ErrorCode {
 mod tests {
     use super::{
         sha256_domain, CanonicalBytes, CanonicalCodec, ErrorCode, DOMAIN_CLAIM_ID,
-        DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
+        DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1, DOMAIN_REVOCATIONS_SNAPSHOT_V1,
+        DOMAIN_STH_SIGNATURE_V1,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +186,11 @@ mod tests {
         assert_eq!(DOMAIN_CLAIM_ID, b"evidenceos:claim_id:v2");
         assert_eq!(DOMAIN_STH_SIGNATURE_V1, b"evidenceos:sth:v1");
         assert_eq!(DOMAIN_REVOCATIONS_SNAPSHOT_V1, b"evidenceos:revocations:v1");
+        assert_eq!(
+            DOMAIN_ORACLE_OPERATOR_RECORD_V1,
+            b"evidenceos:oracle_operator_record:v1"
+        );
+        assert_eq!(DOMAIN_EPOCH_CONTROL_V1, b"evidenceos:epoch_control:v1");
     }
 
     #[test]

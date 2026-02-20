@@ -59,9 +59,7 @@ use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
-use evidenceos_protocol::{
-    pb, sha256_domain, DOMAIN_CLAIM_ID, DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
-};
+use evidenceos_protocol::{pb, DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1};
 
 use pb::evidence_os_server::EvidenceOs as EvidenceOsV2;
 use pb::v1;
@@ -304,6 +302,16 @@ struct OracleOperatorRecord {
     signature_ed25519: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct OracleOperatorRecordSigningPayload<'a> {
+    oracle_id: &'a str,
+    ttl_epochs: u64,
+    calibration_hash: Option<&'a str>,
+    calibration_epoch: Option<u64>,
+    updated_at_epoch: u64,
+    key_id: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OracleOperatorConfigFile {
     oracles: HashMap<String, OracleOperatorRecord>,
@@ -316,6 +324,13 @@ struct EpochControlFile {
     key_id: Option<String>,
     signature_ed25519: Option<String>,
     event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EpochControlSigningPayload<'a> {
+    forced_epoch: u64,
+    updated_at_epoch: u64,
+    key_id: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -543,7 +558,18 @@ impl EvidenceOsService {
     }
 
     pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
-        let next = load_operator_runtime_config(&self.state.data_path)?;
+        let next = match load_operator_runtime_config(&self.state.data_path) {
+            Ok(cfg) => cfg,
+            Err(status) => {
+                tracing::error!(
+                    event="config_reload_rejected",
+                    severity="high",
+                    error=%status,
+                    "rejected operator runtime config reload; retaining last-known-good config"
+                );
+                return Err(status);
+            }
+        };
         let mut guard = self.state.operator_config.lock();
         let previous = guard.clone();
         *guard = next.clone();
@@ -1403,11 +1429,13 @@ fn load_operator_runtime_config(data_path: &Path) -> Result<OperatorRuntimeConfi
             .map_err(|_| Status::invalid_argument("decode trusted keys failed"))?;
         let mut out = HashMap::new();
         for (kid, key_hex) in trusted.keys {
-            out.insert(
-                kid,
-                hex::decode(key_hex)
-                    .map_err(|_| Status::invalid_argument("invalid trusted key hex"))?,
-            );
+            let key_bytes = hex::decode(key_hex)
+                .map_err(|_| Status::invalid_argument("invalid trusted key hex"))?;
+            let key_arr: [u8; 32] = key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("invalid trusted key length"))?;
+            out.insert(kid, key_arr.to_vec());
         }
         out
     } else {
@@ -1437,6 +1465,7 @@ fn load_operator_runtime_config(data_path: &Path) -> Result<OperatorRuntimeConfi
     } else {
         EpochControlFile::default()
     };
+    verify_epoch_control_record(&epoch_cfg, &trusted_keys)?;
 
     let nullspec_mappings_len = {
         let map_path = data_path.join("nullspec").join("active_map.json");
@@ -1473,22 +1502,84 @@ fn load_operator_runtime_config(data_path: &Path) -> Result<OperatorRuntimeConfi
 }
 
 fn verify_signed_oracle_record(
-    _oracle_id: &str,
+    oracle_id: &str,
     rec: &OracleOperatorRecord,
     trusted_keys: &HashMap<String, Vec<u8>>,
 ) -> Result<(), Status> {
     if rec.ttl_epochs == 0 {
         return Err(Status::invalid_argument("oracle ttl must be > 0"));
     }
-    let _key = trusted_keys
+    let key_bytes = trusted_keys
         .get(&rec.key_id)
         .ok_or_else(|| Status::failed_precondition("unknown signing key for oracle config"))?;
+    let key_arr: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| Status::invalid_argument("invalid trusted key length"))?;
+    let verifying_key = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|_| Status::invalid_argument("invalid trusted oracle verifying key"))?;
     let sig_bytes = hex::decode(&rec.signature_ed25519)
         .map_err(|_| Status::invalid_argument("invalid oracle config signature hex"))?;
-    if sig_bytes.len() != 64 {
-        return Err(Status::invalid_argument(
-            "invalid oracle config signature length",
-        ));
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|_| Status::invalid_argument("invalid oracle config signature length"))?;
+    let payload = OracleOperatorRecordSigningPayload {
+        oracle_id,
+        ttl_epochs: rec.ttl_epochs,
+        calibration_hash: rec.calibration_hash.as_deref(),
+        calibration_epoch: rec.calibration_epoch,
+        updated_at_epoch: rec.updated_at_epoch,
+        key_id: &rec.key_id,
+    };
+    let canonical = evidenceos_core::capsule::canonical_json(&payload)
+        .map_err(|_| Status::internal("oracle config canonicalization failed"))?;
+    let digest = sha256_domain(DOMAIN_ORACLE_OPERATOR_RECORD_V1, &canonical);
+    verifying_key
+        .verify_strict(&digest, &signature)
+        .map_err(|_| Status::failed_precondition("oracle config signature verification failed"))
+}
+
+fn verify_epoch_control_record(
+    epoch_cfg: &EpochControlFile,
+    trusted_keys: &HashMap<String, Vec<u8>>,
+) -> Result<(), Status> {
+    if let Some(forced_epoch) = epoch_cfg.forced_epoch {
+        let updated_at_epoch = epoch_cfg
+            .updated_at_epoch
+            .ok_or_else(|| Status::failed_precondition("epoch control updated_at_epoch missing"))?;
+        let key_id = epoch_cfg
+            .key_id
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("epoch control key_id missing"))?;
+        let signature_hex = epoch_cfg
+            .signature_ed25519
+            .as_deref()
+            .ok_or_else(|| Status::failed_precondition("epoch control signature missing"))?;
+        let key_bytes = trusted_keys
+            .get(key_id)
+            .ok_or_else(|| Status::failed_precondition("unknown signing key for epoch control"))?;
+        let key_arr: [u8; 32] = key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("invalid trusted key length"))?;
+        let verifying_key = VerifyingKey::from_bytes(&key_arr)
+            .map_err(|_| Status::invalid_argument("invalid trusted oracle verifying key"))?;
+        let sig_bytes = hex::decode(signature_hex)
+            .map_err(|_| Status::invalid_argument("invalid epoch control signature hex"))?;
+        let signature = Signature::from_slice(&sig_bytes)
+            .map_err(|_| Status::invalid_argument("invalid epoch control signature length"))?;
+        let payload = EpochControlSigningPayload {
+            forced_epoch,
+            updated_at_epoch,
+            key_id,
+        };
+        let canonical = evidenceos_core::capsule::canonical_json(&payload)
+            .map_err(|_| Status::internal("epoch control canonicalization failed"))?;
+        let digest = sha256_domain(DOMAIN_EPOCH_CONTROL_V1, &canonical);
+        verifying_key
+            .verify_strict(&digest, &signature)
+            .map_err(|_| {
+                Status::failed_precondition("epoch control signature verification failed")
+            })?;
     }
     Ok(())
 }
