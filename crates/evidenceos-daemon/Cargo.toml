@@ -52,3 +52,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [[bench]]
 name = "verification_latency"
 harness = false
+
+[features]
+crash-test-failpoints = []

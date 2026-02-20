@@ -86,3 +86,19 @@ Perform resets only under incident workflow and preserve event artifacts.
 - Automated HSM workflows and remote attestation for key custody.
 - Multi-region ETL replication and disaster-recovery runbooks.
 - Governance policy approval process (human process before signatures).
+
+## Durable storage mode and crash recovery
+
+The daemon now enforces a durable-before-ack discipline for `ExecuteClaim`, `ExecuteClaimV2`, and `RevokeClaim`:
+
+- ETL append/revoke is flushed with `sync_data` before the RPC can succeed.
+- Claim/revocation state is persisted via atomic write+rename with file and parent-directory sync.
+- A `pending_mutation.json` intent record in `<data-dir>` is used for crash recovery between ETL durability and state checkpointing.
+
+On startup, if `pending_mutation.json` exists, the daemon replays it into in-memory state, persists `state.json`, and then removes the pending file.
+
+Crash-test failpoints can be enabled with cargo feature `crash-test-failpoints` and env var `EVIDENCEOS_CRASH_FAILPOINT`:
+
+- `after_etl_append_execute_claim`
+- `after_etl_append_execute_claim_v2`
+- `after_etl_append_revoke_claim`
