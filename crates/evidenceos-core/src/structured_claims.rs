@@ -1,4 +1,5 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
+use crate::magnitude_envelope::{EnvelopeRegistry, EnvelopeViolation};
 use crate::physhir::{check_dimension, parse_quantity, quantity_from_parts, Dimension, Quantity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -61,6 +62,7 @@ pub struct StructuredClaimValidation {
     pub kout_bits_upper_bound: u64,
     pub max_bytes_upper_bound: u32,
     pub claim: StructuredClaim,
+    pub envelope_violation: Option<EnvelopeViolation>,
 }
 
 #[derive(Clone)]
@@ -373,6 +375,7 @@ pub fn validate_and_canonicalize(
                 schema_id: LEGACY_SCHEMA_ID.to_string(),
                 fields: Vec::new(),
             },
+            envelope_violation: None,
         });
     }
     let schema =
@@ -404,11 +407,14 @@ pub fn validate_and_canonicalize(
     if canonical_bytes.len() > schema.max_total_bytes {
         return Err(EvidenceOSError::InvalidArgument);
     }
+    let envelope_registry = EnvelopeRegistry::with_defaults();
+    let envelope_violation = envelope_registry.validate_claim(&claim).err().map(|v| *v);
     Ok(StructuredClaimValidation {
         kout_bits_upper_bound: kout_bits_upper_bound(&canonical_bytes),
         max_bytes_upper_bound: schema.max_total_bytes as u32,
         canonical_bytes,
         claim,
+        envelope_violation,
     })
 }
 
@@ -464,6 +470,22 @@ mod tests {
         payload["measurement"] = json!("1 s");
         let bytes = serde_json::to_vec(&payload).expect("json");
         assert!(validate_and_canonicalize(SCHEMA_ID, &bytes).is_err());
+    }
+
+    #[test]
+    fn envelope_violation_is_reported() {
+        let mut payload = valid_payload();
+        payload["measurement"] = json!("1000001 mmol/L");
+        let bytes = serde_json::to_vec(&payload).expect("json");
+        let validated = validate_and_canonicalize(SCHEMA_ID, &bytes).expect("valid schema");
+        assert!(validated.envelope_violation.is_some());
+    }
+
+    #[test]
+    fn envelope_in_range_is_none() {
+        let payload = serde_json::to_vec(&valid_payload()).expect("json");
+        let validated = validate_and_canonicalize(SCHEMA_ID, &payload).expect("valid schema");
+        assert!(validated.envelope_violation.is_none());
     }
 
     #[test]
