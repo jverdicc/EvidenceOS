@@ -42,8 +42,11 @@ use tonic::{Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
+use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
+use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
+use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::structured_claims;
 use evidenceos_core::topicid::{
@@ -794,6 +797,7 @@ fn write_secret_key(key_path: &Path, secret: &[u8; 32]) -> Result<(), Status> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 fn load_or_create_keyring(
     data_dir: &Path,
 ) -> Result<([u8; 32], HashMap<[u8; 32], SigningKey>), Status> {
@@ -1230,6 +1234,77 @@ fn vault_context(claim: &Claim) -> Result<VaultExecutionContext, Status> {
         oracle_null_accuracy: 0.5,
         output_schema_id: claim.output_schema_id.clone(),
     })
+}
+
+fn oracle_resolution_hash(resolution: &OracleResolution) -> Result<[u8; 32], Status> {
+    let bytes = serde_json::to_vec(resolution)
+        .map_err(|_| Status::internal("oracle resolution encode failed"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(&out);
+    Ok(hash)
+}
+
+fn compute_nullspec_e_value(
+    contract: &evidenceos_core::nullspec::NullSpecContractV1,
+    oracle_buckets: &[u32],
+) -> Result<(f64, String), Status> {
+    match (&contract.kind, &contract.eprocess) {
+        (
+            NullSpecKind::ParametricBernoulli { p },
+            EProcessKind::LikelihoodRatioFixedAlt { alt },
+        ) => {
+            if alt.len() != 2 || *p <= 0.0 || *p >= 1.0 {
+                return Err(Status::failed_precondition("invalid parametric nullspec"));
+            }
+            let mut e = 1.0_f64;
+            for &b in oracle_buckets {
+                let idx = usize::try_from(b)
+                    .map_err(|_| Status::failed_precondition("bucket overflow"))?;
+                if idx >= 2 {
+                    return Err(Status::failed_precondition(
+                        "bucket out of range for bernoulli nullspec",
+                    ));
+                }
+                let p0 = if idx == 1 { *p } else { 1.0 - *p };
+                let altp = alt[idx];
+                if !p0.is_finite() || p0 <= 0.0 || !altp.is_finite() || altp < 0.0 {
+                    return Err(Status::failed_precondition(
+                        "invalid bernoulli probabilities",
+                    ));
+                }
+                let inc = altp / p0;
+                if !inc.is_finite() || inc < 0.0 {
+                    return Err(Status::failed_precondition("invalid e-process increment"));
+                }
+                e *= inc;
+                if !e.is_finite() || e < 0.0 {
+                    return Err(Status::failed_precondition("invalid e-process state"));
+                }
+            }
+            Ok((e, "likelihood_ratio_fixed_alt".to_string()))
+        }
+        (
+            NullSpecKind::DiscreteBuckets { p0 },
+            EProcessKind::DirichletMultinomialMixture { alpha },
+        ) => {
+            let mut ep = DirichletMixtureEProcess::new(alpha.clone())
+                .map_err(|_| Status::failed_precondition("invalid dirichlet alpha"))?;
+            for &b in oracle_buckets {
+                let idx = usize::try_from(b)
+                    .map_err(|_| Status::failed_precondition("bucket overflow"))?;
+                ep.update(idx, p0).map_err(|_| {
+                    Status::failed_precondition("invalid non-parametric e-process update")
+                })?;
+            }
+            Ok((ep.e, "dirichlet_multinomial_mixture".to_string()))
+        }
+        _ => Err(Status::failed_precondition(
+            "nullspec kind/eprocess mismatch",
+        )),
+    }
 }
 
 fn map_vault_error(err: VaultError) -> Status {
@@ -2015,9 +2090,39 @@ impl EvidenceOsV2 for EvidenceOsService {
                 hex::encode(claim.topic_id),
                 hex::encode(claim.phys_hir_hash),
             )?;
+            let nullspec_store = NullSpecStore::open(&self.state.data_path)
+                .map_err(|_| Status::internal("nullspec store init failed"))?;
+            let active_id = match nullspec_store
+                .active_for(&claim.claim_name, &claim.holdout_ref)
+                .map_err(|_| Status::internal("nullspec mapping read failed"))?
+            {
+                Some(id) => id,
+                None => {
+                    self.record_incident(claim, "nullspec_missing")?;
+                    return Err(Status::failed_precondition("missing active nullspec"));
+                }
+            };
+            let contract = nullspec_store
+                .get(&active_id)
+                .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
+            if contract.is_expired(current_epoch) {
+                self.record_incident(claim, "nullspec_expired")?;
+                return Err(Status::failed_precondition("active nullspec expired"));
+            }
+            let expected_resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
+            if contract.oracle_resolution_hash != expected_resolution_hash {
+                self.record_incident(claim, "nullspec_resolution_hash_mismatch")?;
+                return Err(Status::failed_precondition(
+                    "nullspec resolution hash mismatch",
+                ));
+            }
+
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let context = vault_context(claim)?;
+            let mut context = vault_context(claim)?;
+            if let NullSpecKind::ParametricBernoulli { p } = &contract.kind {
+                context.oracle_null_accuracy = *p;
+            }
             let vault_result =
                 match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
                     Ok(v) => v,
@@ -2103,7 +2208,8 @@ impl EvidenceOsV2 for EvidenceOsService {
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
-            let e_value = vault_result.e_value_total;
+            let (e_value, eprocess_kind_id) =
+                compute_nullspec_e_value(&contract, &vault_result.oracle_buckets)?;
             claim
                 .ledger
                 .settle_e_value(e_value, "decision", json!({"e_value_total": e_value}))
@@ -2227,6 +2333,10 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "evidenceos.v1".to_string(),
                 fuel_used as f64,
             );
+            capsule.nullspec_id_hex = Some(hex::encode(contract.nullspec_id));
+            capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
+            capsule.eprocess_kind = Some(eprocess_kind_id);
+            capsule.nullspec_contract_hash_hex = Some(hex::encode(contract.compute_id()));
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {

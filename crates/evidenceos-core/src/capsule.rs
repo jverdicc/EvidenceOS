@@ -142,6 +142,14 @@ pub struct ClaimCapsule {
     pub reason_codes: Vec<u32>,
     #[serde(default)]
     pub policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
+    #[serde(default)]
+    pub nullspec_id_hex: Option<String>,
+    #[serde(default)]
+    pub oracle_resolution_hash_hex: Option<String>,
+    #[serde(default)]
+    pub eprocess_kind: Option<String>,
+    #[serde(default)]
+    pub nullspec_contract_hash_hex: Option<String>,
     pub environment_attestations: EnvironmentAttestations,
     pub state: ClaimState,
 }
@@ -300,6 +308,10 @@ impl ClaimCapsule {
             decision,
             reason_codes,
             policy_oracle_receipts,
+            nullspec_id_hex: None,
+            oracle_resolution_hash_hex: None,
+            eprocess_kind: None,
+            nullspec_contract_hash_hex: None,
             environment_attestations: EnvironmentAttestations {
                 runtime_version,
                 aspec_version,

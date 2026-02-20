@@ -12,9 +12,10 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 fn oracle_aspec_policy() -> AspecPolicy {
-    let mut p = AspecPolicy::default();
-    p.float_policy = FloatPolicy::Allow;
-    p
+    AspecPolicy {
+        float_policy: FloatPolicy::Allow,
+        ..AspecPolicy::default()
+    }
 }
 
 fn build_wasm_fraction() -> Vec<u8> {

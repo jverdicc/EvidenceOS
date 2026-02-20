@@ -11,10 +11,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
 use tonic::{Code, Request};
 
-async fn start_server(
-    data_dir: &str,
-    max_bytes: usize,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -25,7 +22,6 @@ async fn start_server(
     );
     let handle = tokio::spawn(async move {
         Server::builder()
-            .max_decoding_message_size(max_bytes)
             .add_service(EvidenceOsServer::with_interceptor(svc, guard))
             .serve_with_incoming(incoming)
             .await
@@ -46,7 +42,7 @@ async fn daemon_rejects_missing_auth_token() {
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("mkdir");
 
-    let (addr, handle) = start_server(&data_dir.to_string_lossy(), 1024 * 1024).await;
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
 
     let err = c
@@ -63,7 +59,7 @@ async fn daemon_accepts_correct_auth_token() {
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("mkdir");
 
-    let (addr, handle) = start_server(&data_dir.to_string_lossy(), 1024 * 1024).await;
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
 
     let mut req = Request::new(pb::HealthRequest {});
@@ -87,7 +83,7 @@ async fn daemon_enforces_max_request_size() {
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("mkdir");
 
-    let (addr, handle) = start_server(&data_dir.to_string_lossy(), 128).await;
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
 
     let mut req = Request::new(pb::CreateClaimV2Request {

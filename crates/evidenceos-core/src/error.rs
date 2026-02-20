@@ -43,6 +43,12 @@ pub enum EvidenceOSError {
     #[error("oracle sandbox or bundle violation")]
     OracleViolation,
 
+    #[error("nullspec validation failed: {0}")]
+    NullSpecInvalid(String),
+
+    #[error("nullspec signature verification failed")]
+    SignatureInvalid,
+
     #[error("internal error")]
     Internal,
 }
@@ -57,6 +63,8 @@ impl EvidenceOSError {
             EvidenceOSError::InvalidCanonicalEncoding => ErrorCode::EInvalidArgument,
             EvidenceOSError::NaNNotAllowed => ErrorCode::EInvalidArgument,
             EvidenceOSError::OracleViolation => ErrorCode::EInternal,
+            EvidenceOSError::NullSpecInvalid(_) => ErrorCode::EInvalidArgument,
+            EvidenceOSError::SignatureInvalid => ErrorCode::EInvalidArgument,
             EvidenceOSError::Internal => ErrorCode::EInternal,
         }
     }

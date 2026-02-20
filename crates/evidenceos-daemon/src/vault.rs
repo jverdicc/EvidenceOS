@@ -57,6 +57,7 @@ pub struct VaultExecutionResult {
     pub e_value_total: f64,
     pub leakage_bits_total: f64,
     pub kout_bits_total: f64,
+    pub oracle_buckets: Vec<u32>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -231,6 +232,15 @@ impl VaultEngine {
             host.accumulated_log_e_value.exp()
         };
 
+        let oracle_buckets: Vec<u32> = host
+            .call_trace
+            .iter()
+            .filter_map(|c| match c {
+                HostCallRecord::OracleBucket { bucket, .. } => Some(*bucket),
+                HostCallRecord::EmitStructuredClaim { .. } => None,
+            })
+            .collect();
+
         Ok(VaultExecutionResult {
             canonical_output: output,
             judge_trace_hash,
@@ -240,6 +250,7 @@ impl VaultEngine {
             e_value_total,
             leakage_bits_total: host.leakage_bits,
             kout_bits_total: host.kout_bits,
+            oracle_buckets,
         })
     }
 
