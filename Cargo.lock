@@ -779,6 +779,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidenceos-operator"
+version = "0.1.0-alpha"
+dependencies = [
+ "clap",
+ "ed25519-dalek",
+ "evidenceos-core",
+ "evidenceos-protocol",
+ "hex",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "evidenceos-pln-calibrate"
 version = "0.1.0-alpha"
 dependencies = [
