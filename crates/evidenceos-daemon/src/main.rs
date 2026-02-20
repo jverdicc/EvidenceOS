@@ -77,6 +77,8 @@ struct Args {
     rpc_timeout_ms: Option<u64>,
     #[arg(long, default_value_t = false)]
     offline_settlement_ingest: bool,
+    #[arg(long, default_value_t = false)]
+    insecure_synthetic_holdout: bool,
     #[arg(long)]
     import_signed_settlements_dir: Option<String>,
     #[arg(long)]
@@ -123,6 +125,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
     if args.offline_settlement_ingest {
         std::env::set_var("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", "1");
+    }
+    if args.insecure_synthetic_holdout {
+        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+        tracing::warn!(
+            "insecure synthetic holdout mode enabled; do not use in production environments"
+        );
     }
     if let Some(profile) = load_pln_profile(std::path::Path::new(&args.data_dir))? {
         tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_cycles.p99_cycles, wasm_p99=%profile.wasm_instruction_cycles.p99_cycles, "loaded PLN profile");

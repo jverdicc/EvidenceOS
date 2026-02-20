@@ -73,6 +73,130 @@ const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
+const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+struct HoldoutDescriptor {
+    holdout_ref: String,
+    handle: [u8; 32],
+    len: usize,
+    labels_hash: [u8; 32],
+}
+
+trait HoldoutProvider: Send + Sync {
+    fn resolve(&self, holdout_ref: &str) -> Result<HoldoutDescriptor, Status>;
+    fn load_labels(&self, descriptor: &HoldoutDescriptor) -> Result<Vec<u8>, Status>;
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HoldoutManifest {
+    holdout_handle_hex: String,
+    len: usize,
+    labels_sha256_hex: String,
+    created_at_unix: u64,
+    schema_version: u32,
+    encryption_key_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct RegistryHoldoutProvider {
+    root: PathBuf,
+}
+
+impl RegistryHoldoutProvider {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn holdout_dir(&self, holdout_ref: &str) -> PathBuf {
+        self.root.join(holdout_ref)
+    }
+}
+
+impl HoldoutProvider for RegistryHoldoutProvider {
+    fn resolve(&self, holdout_ref: &str) -> Result<HoldoutDescriptor, Status> {
+        validate_holdout_ref(holdout_ref)?;
+        let manifest_path = self.holdout_dir(holdout_ref).join("manifest.json");
+        if !manifest_path.exists() {
+            return Err(Status::invalid_argument("unknown holdout_ref"));
+        }
+        let bytes = std::fs::read(&manifest_path)
+            .map_err(|_| Status::internal("holdout manifest read failed"))?;
+        let manifest: HoldoutManifest = serde_json::from_slice(&bytes)
+            .map_err(|_| Status::invalid_argument("invalid holdout manifest"))?;
+        if manifest.schema_version != HOLDOUT_MANIFEST_SCHEMA_VERSION {
+            return Err(Status::failed_precondition(
+                "unsupported holdout manifest schema_version",
+            ));
+        }
+        if manifest.created_at_unix == 0 {
+            return Err(Status::invalid_argument(
+                "invalid holdout manifest created_at_unix",
+            ));
+        }
+        if let Some(key_id) = manifest.encryption_key_id.as_deref() {
+            validate_required_str_field(key_id, "holdout manifest encryption_key_id", 128)?;
+        }
+        if manifest.len == 0 || manifest.len > 4096 {
+            return Err(Status::invalid_argument("invalid holdout manifest len"));
+        }
+        let handle = decode_hex_hash32(&manifest.holdout_handle_hex, "holdout_handle_hex")?;
+        let labels_hash = decode_hex_hash32(&manifest.labels_sha256_hex, "labels_sha256_hex")?;
+        Ok(HoldoutDescriptor {
+            holdout_ref: holdout_ref.to_string(),
+            handle,
+            len: manifest.len,
+            labels_hash,
+        })
+    }
+
+    fn load_labels(&self, descriptor: &HoldoutDescriptor) -> Result<Vec<u8>, Status> {
+        let dir = self.holdout_dir(&descriptor.holdout_ref);
+        let mut labels_path = dir.join("labels.bin");
+        if !labels_path.exists() {
+            labels_path = dir.join("labels.enc");
+        }
+        let labels = std::fs::read(&labels_path)
+            .map_err(|_| Status::failed_precondition("holdout labels read failed"))?;
+        if labels.len() != descriptor.len {
+            return Err(Status::failed_precondition("holdout label length mismatch"));
+        }
+        if sha256_bytes(&labels) != descriptor.labels_hash {
+            return Err(Status::failed_precondition("holdout label hash mismatch"));
+        }
+        for &label in &labels {
+            if label > 1 {
+                return Err(Status::failed_precondition("holdout labels must be binary"));
+            }
+        }
+        Ok(labels)
+    }
+}
+
+#[derive(Debug)]
+struct SyntheticHoldoutProvider;
+
+impl HoldoutProvider for SyntheticHoldoutProvider {
+    fn resolve(&self, holdout_ref: &str) -> Result<HoldoutDescriptor, Status> {
+        validate_holdout_ref(holdout_ref)?;
+        let mut holdout_hasher = Sha256::new();
+        holdout_hasher.update(holdout_ref.as_bytes());
+        let mut holdout_handle_id = [0u8; 32];
+        holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
+        let len = 128_usize;
+        let labels = derive_holdout_labels(holdout_handle_id, len)?;
+        Ok(HoldoutDescriptor {
+            holdout_ref: holdout_ref.to_string(),
+            handle: holdout_handle_id,
+            len,
+            labels_hash: sha256_bytes(&labels),
+        })
+    }
+
+    fn load_labels(&self, descriptor: &HoldoutDescriptor) -> Result<Vec<u8>, Status> {
+        derive_holdout_labels(descriptor.handle, descriptor.len)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Lane {
@@ -151,6 +275,8 @@ struct Claim {
     topic_id: [u8; 32],
     holdout_handle_id: [u8; 32],
     holdout_ref: String,
+    #[serde(default)]
+    holdout_len: u64,
     #[serde(default)]
     metadata_locked: bool,
     claim_name: String,
@@ -398,6 +524,7 @@ impl Drop for KernelState {
 pub struct EvidenceOsService {
     state: Arc<KernelState>,
     insecure_v1_enabled: bool,
+    holdout_provider: Arc<dyn HoldoutProvider>,
     dependence_tax_multiplier: f64,
     oracle_ttl_policy: OracleTtlPolicy,
     oracle_ttl_escalation_tax_multiplier: f64,
@@ -476,6 +603,8 @@ impl EvidenceOsService {
         let operator_config =
             load_operator_runtime_config(&root, require_disjointness_attestation)?;
 
+        let holdouts_root = root.join("holdouts");
+
         let state = Arc::new(KernelState {
             claims: Mutex::new(
                 persisted
@@ -500,6 +629,14 @@ impl EvidenceOsService {
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let insecure_synthetic_holdout = std::env::var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let holdout_provider: Arc<dyn HoldoutProvider> = if insecure_synthetic_holdout {
+            Arc::new(SyntheticHoldoutProvider)
+        } else {
+            Arc::new(RegistryHoldoutProvider::new(holdouts_root))
+        };
         let dependence_tax_multiplier = std::env::var("EVIDENCEOS_DEPENDENCE_TAX_MULTIPLIER")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -526,6 +663,7 @@ impl EvidenceOsService {
         Ok(Self {
             state,
             insecure_v1_enabled,
+            holdout_provider,
             dependence_tax_multiplier,
             oracle_ttl_policy,
             oracle_ttl_escalation_tax_multiplier,
@@ -1437,6 +1575,20 @@ fn derive_holdout_labels(
     Ok(labels)
 }
 
+fn validate_holdout_ref(holdout_ref: &str) -> Result<(), Status> {
+    validate_required_str_field(holdout_ref, "holdout_ref", 128)?;
+    if holdout_ref
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Ok(())
+    } else {
+        Err(Status::invalid_argument(
+            "holdout_ref must match [A-Za-z0-9_-]+",
+        ))
+    }
+}
+
 fn requested_lane(lane: &str) -> Result<Lane, Status> {
     match lane.to_ascii_lowercase().as_str() {
         "fast" | "highassurance" | "high_assurance" => Ok(Lane::Fast),
@@ -1705,10 +1857,23 @@ fn default_registry_nullspec() -> Result<RegistryNullSpecContractV1, Status> {
 fn vault_context(
     claim: &Claim,
     null_spec: RegistryNullSpecContractV1,
+    holdout_provider: &dyn HoldoutProvider,
 ) -> Result<VaultExecutionContext, Status> {
-    let holdout_len = usize::try_from(claim.epoch_size)
-        .map_err(|_| Status::invalid_argument("epoch_size too large"))?;
-    let holdout_labels = derive_holdout_labels(claim.holdout_handle_id, holdout_len)?;
+    let descriptor = holdout_provider.resolve(&claim.holdout_ref)?;
+    if descriptor.handle != claim.holdout_handle_id {
+        return Err(Status::failed_precondition("claim holdout handle mismatch"));
+    }
+    let raw_len = if claim.holdout_len == 0 {
+        claim.epoch_size
+    } else {
+        claim.holdout_len
+    };
+    let claim_len = usize::try_from(raw_len)
+        .map_err(|_| Status::failed_precondition("claim holdout length invalid"))?;
+    if descriptor.len != claim_len {
+        return Err(Status::failed_precondition("claim holdout length mismatch"));
+    }
+    let holdout_labels = holdout_provider.load_labels(&descriptor)?;
     Ok(VaultExecutionContext {
         holdout_labels,
         oracle_num_buckets: claim.oracle_num_symbols,
@@ -1872,6 +2037,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             dependency_merkle_root: None,
             holdout_handle_id,
             holdout_ref: hex::encode(holdout_handle_id),
+            holdout_len: req.epoch_size,
             metadata_locked: false,
             claim_name: "legacy-v1".to_string(),
             output_schema_id: "legacy/v1".to_string(),
@@ -2128,7 +2294,11 @@ impl EvidenceOsV2 for EvidenceOsService {
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let context = vault_context(claim, default_registry_nullspec()?)?;
+            let context = vault_context(
+                claim,
+                default_registry_nullspec()?,
+                self.holdout_provider.as_ref(),
+            )?;
             let vault_result =
                 match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
                     Ok(v) => v,
@@ -2361,7 +2531,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         if req.epoch_size == 0 {
             return Err(Status::invalid_argument("epoch_size must be > 0"));
         }
-        validate_required_str_field(&req.holdout_ref, "holdout_ref", 128)?;
+        let holdout_descriptor = self.holdout_provider.resolve(&req.holdout_ref)?;
         let metadata = req
             .metadata
             .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
@@ -2413,10 +2583,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         let mut phys = [0u8; 32];
         phys.copy_from_slice(&signals.phys_hir_signature_hash);
-        let mut holdout_hasher = Sha256::new();
-        holdout_hasher.update(req.holdout_ref.as_bytes());
-        let mut holdout_handle_id = [0u8; 32];
-        holdout_handle_id.copy_from_slice(&holdout_hasher.finalize());
+        let holdout_handle_id = holdout_descriptor.handle;
         let output_schema_id_hash = hash_signal(
             b"evidenceos/schema_id",
             canonical_output_schema_id.as_bytes(),
@@ -2492,6 +2659,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             dependency_merkle_root,
             holdout_handle_id,
             holdout_ref: req.holdout_ref,
+            holdout_len: holdout_descriptor.len as u64,
             metadata_locked: false,
             claim_name: req.claim_name,
             output_schema_id: canonical_output_schema_id,
@@ -2689,7 +2857,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .get(&hex::encode(contract.nullspec_id))
                 .cloned()
                 .ok_or_else(|| Status::failed_precondition("active nullspec id not in registry"))?;
-            let context = vault_context(claim, reg_nullspec)?;
+            let context = vault_context(claim, reg_nullspec, self.holdout_provider.as_ref())?;
             let vault_result =
                 match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
                     Ok(v) => v,
@@ -3549,6 +3717,9 @@ impl EvidenceOsV1 for EvidenceOsService {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signature, Verifier};
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::TempDir;
+    use tonic::Code;
 
     #[test]
     fn canonical_encoding_rejects_invalid_without_charge() {
@@ -3633,5 +3804,179 @@ mod tests {
         let mut tampered = digest_ab;
         tampered[31] ^= 0x80;
         assert!(signing_key.verifying_key().verify(&tampered, &sig).is_err());
+    }
+
+    fn write_holdout_registry(
+        root: &Path,
+        holdout_ref: &str,
+        handle: [u8; 32],
+        labels: &[u8],
+        manifest_hash: [u8; 32],
+    ) {
+        let dir = root.join("holdouts").join(holdout_ref);
+        std::fs::create_dir_all(&dir).expect("mkdir holdout dir");
+        std::fs::write(dir.join("labels.bin"), labels).expect("write labels");
+        let manifest = serde_json::json!({
+            "holdout_handle_hex": hex::encode(handle),
+            "len": labels.len(),
+            "labels_sha256_hex": hex::encode(manifest_hash),
+            "created_at_unix": 1,
+            "schema_version": HOLDOUT_MANIFEST_SCHEMA_VERSION,
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("manifest encode"),
+        )
+        .expect("write manifest");
+    }
+
+    fn claim_request(holdout_ref: &str) -> pb::CreateClaimV2Request {
+        pb::CreateClaimV2Request {
+            claim_name: "claim-a".to_string(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".to_string(),
+                alpha_micros: 50_000,
+                epoch_config_ref: "epoch-a".to_string(),
+                output_schema_id: "legacy/v1".to_string(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![1; 32],
+                phys_hir_signature_hash: vec![2; 32],
+                dependency_merkle_root: vec![3; 32],
+            }),
+            holdout_ref: holdout_ref.to_string(),
+            epoch_size: 10,
+            oracle_num_symbols: 4,
+            access_credit: 32,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_claim_v2_rejects_unknown_holdout_ref() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+        let err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            Request::new(claim_request("unknown-holdout")),
+        )
+        .await
+        .expect_err("unknown holdout should fail");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert_eq!(err.message(), "unknown holdout_ref");
+    }
+
+    #[test]
+    fn vault_context_rejects_holdout_label_hash_mismatch() {
+        let dir = TempDir::new().expect("tmp");
+        let holdout_ref = "holdout-a";
+        let handle = [9u8; 32];
+        let expected_labels = vec![0, 1, 0, 1];
+        let wrong_labels = vec![1, 1, 1, 1];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &wrong_labels,
+            sha256_bytes(&expected_labels),
+        );
+        let provider = RegistryHoldoutProvider::new(dir.path().join("holdouts"));
+        let claim = Claim {
+            claim_id: [0; 32],
+            topic_id: [0; 32],
+            holdout_handle_id: handle,
+            holdout_ref: holdout_ref.to_string(),
+            holdout_len: 4,
+            metadata_locked: false,
+            claim_name: "c".to_string(),
+            output_schema_id: "legacy/v1".to_string(),
+            phys_hir_hash: [0; 32],
+            semantic_hash: [0; 32],
+            output_schema_id_hash: [0; 32],
+            holdout_handle_hash: [0; 32],
+            lineage_root_hash: [0; 32],
+            disagreement_score: 0,
+            semantic_physhir_distance_bits: 0,
+            escalate_to_heavy: false,
+            epoch_size: 10,
+            epoch_counter: 0,
+            oracle_num_symbols: 4,
+            oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
+            state: ClaimState::Uncommitted,
+            artifacts: Vec::new(),
+            dependency_capsule_hashes: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
+            wasm_module: Vec::new(),
+            aspec_rejection: None,
+            aspec_report_summary: None,
+            lane: Lane::Fast,
+            heavy_lane_diversion_recorded: false,
+            ledger: ConservationLedger::new(0.1).expect("ledger"),
+            last_decision: None,
+            last_capsule_hash: None,
+            capsule_bytes: None,
+            etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
+            operation_id: "op".to_string(),
+        };
+        let err = vault_context(
+            &claim,
+            default_registry_nullspec().expect("nullspec"),
+            &provider,
+        )
+        .expect_err("hash mismatch should fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(err.message(), "holdout label hash mismatch");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn synthetic_holdout_only_works_when_explicitly_enabled() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock");
+
+        std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
+        let strict_dir = TempDir::new().expect("tmp");
+        let strict_telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let strict_svc = EvidenceOsService::build_with_options(
+            strict_dir.path().to_str().expect("utf8"),
+            false,
+            strict_telemetry,
+        )
+        .expect("strict service");
+        let strict_err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &strict_svc,
+            Request::new(claim_request("synthetic-holdout")),
+        )
+        .await
+        .expect_err("strict mode should reject synthetic holdout");
+        assert_eq!(strict_err.code(), Code::InvalidArgument);
+
+        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+        let insecure_dir = TempDir::new().expect("tmp");
+        let insecure_telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let insecure_svc = EvidenceOsService::build_with_options(
+            insecure_dir.path().to_str().expect("utf8"),
+            false,
+            insecure_telemetry,
+        )
+        .expect("insecure service");
+        <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &insecure_svc,
+            Request::new(claim_request("synthetic-holdout")),
+        )
+        .await
+        .expect("insecure synthetic holdout should be accepted");
+        std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
     }
 }
