@@ -28,6 +28,8 @@ cargo test -p evidenceos-daemon schema_aliases_system
 
 ## Evidence captured by these tests
 
+**>= 95%**
+
 ### Protocol compatibility
 
 - `daemon_protocol_v1_and_v2_smoke`
