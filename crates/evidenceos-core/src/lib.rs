@@ -39,6 +39,7 @@ pub mod eprocess;
 pub mod error;
 pub mod etl;
 pub mod ledger;
+pub mod magnitude_envelope;
 pub mod nullspec;
 pub mod nullspec_contract;
 pub mod nullspec_registry;

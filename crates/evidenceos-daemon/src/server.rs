@@ -543,6 +543,7 @@ type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 
 const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
 const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
+const MAGNITUDE_ENVELOPE_REASON_CODE: u32 = 9205;
 
 #[derive(Debug)]
 struct KernelState {
@@ -3283,11 +3284,13 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
             }
             let mut physhir_mismatch = false;
+            let mut magnitude_envelope_violation = false;
             if claim.output_schema_id != structured_claims::LEGACY_SCHEMA_ID {
                 if let Ok(validated) = structured_claims::validate_and_canonicalize(
                     &claim.output_schema_id,
                     &canonical_output,
                 ) {
+                    magnitude_envelope_violation = validated.envelope_violation.is_some();
                     let computed_phys =
                         evidenceos_core::physhir::physhir_signature_hash(&validated.claim);
                     let topic_check = compute_topic_id(
@@ -3414,14 +3417,17 @@ impl EvidenceOsV2 for EvidenceOsService {
                 None,
             )?;
             let can_certify = claim.ledger.can_certify();
-            let mut decision =
-                if claim.ledger.frozen || claim.lane == Lane::Heavy || physhir_mismatch {
-                    pb::Decision::Defer as i32
-                } else if can_certify {
-                    pb::Decision::Approve as i32
-                } else {
-                    pb::Decision::Reject as i32
-                };
+            let mut decision = if claim.ledger.frozen
+                || claim.lane == Lane::Heavy
+                || physhir_mismatch
+                || magnitude_envelope_violation
+            {
+                pb::Decision::Defer as i32
+            } else if can_certify {
+                pb::Decision::Approve as i32
+            } else {
+                pb::Decision::Reject as i32
+            };
             if canary_state.drift_frozen {
                 decision = pb::Decision::Reject as i32;
                 self.append_canary_incident(
@@ -3447,6 +3453,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             if physhir_mismatch {
                 reason_codes.push(9104);
+            }
+            if magnitude_envelope_violation {
+                reason_codes.push(MAGNITUDE_ENVELOPE_REASON_CODE);
             }
             let oracle_input = policy_oracle_input_json(
                 claim,

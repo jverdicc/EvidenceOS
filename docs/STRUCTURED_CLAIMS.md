@@ -25,3 +25,12 @@ Canonical encoding rules:
 5. Enforce schema byte bounds before accept.
 
 This format is schema-driven and intentionally excludes operational guidance content.
+
+## Magnitude envelope enforcement (CBRN profile)
+
+EvidenceOS enforces a built-in `cbrn.v1` magnitude envelope for `cbrn-sc.v1` structured claims.
+After canonicalization, PhysHIR quantity fields are checked against a signed-envelope-compatible registry model.
+Current default envelope bounds `measurement` to `[-1000000, 1000000]` in normalized `mmol/L` fixed-point units.
+
+In HEAVY/SEALED execution paths, envelope violations fail closed by forcing a deferred decision with explicit kernel reason code `9205`.
+This keeps CBRN profile behavior truthful: schema validation alone is not sufficient for certification.
