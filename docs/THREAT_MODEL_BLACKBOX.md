@@ -25,7 +25,7 @@ Trust boundary summary:
 
 > **Glossary bridge**
 >
-> - **"leakage k"** means transcript support budget (how much information interaction can reveal), **not** a blockchain token.
+> - **"leakage k"** means transcript support budget (how much information interaction can reveal), **not** a cryptocurrency token.
 > - **"ETL"** means an append-only transparency log used for auditability, **not** cryptocurrency.
 
 ## C) Worked example #1: Adaptive evaluation leakage

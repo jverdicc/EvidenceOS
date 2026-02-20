@@ -52,7 +52,7 @@ EvidenceOS is best understood as a verification kernel inside a larger secure sy
 
 For a standalone, outsider-friendly version of this walkthrough, see [`docs/THREAT_MODEL_BLACKBOX.md`](docs/THREAT_MODEL_BLACKBOX.md).
 
-The goal of this section is to explain the failure mode and defense without needing Rust, gRPC, Merkle-tree, or blockchain background.
+The goal of this section is to explain the failure mode and defense without needing Rust, gRPC, Merkle-tree, or append-only transparency log (ETL) background.
 
 ### Baseline failure: adaptive probing breaks an oracle-only setup
 
@@ -107,9 +107,9 @@ The goal of this section is to explain the failure mode and defense without need
 - Hardware/microarchitectural side channels and physical exfiltration paths.
 - Any path that bypasses the kernel and directly exposes raw holdout data.
 
-### Not a blockchain
+### ETL is transparency-log infrastructure
 
-EvidenceOS uses ETL as an append-only transparency log with signed checkpoints plus inclusion/consistency proofs. A blockchain, mining, and global consensus are **not** required for EvidenceOS to operate.
+EvidenceOS uses ETL as an append-only transparency log with signed checkpoints plus inclusion/consistency proofs. It is a Merkle append-only log with inclusion/consistency proofs; mining and global consensus are **not** required for EvidenceOS to operate.
 
 ## Architecture diagrams
 
