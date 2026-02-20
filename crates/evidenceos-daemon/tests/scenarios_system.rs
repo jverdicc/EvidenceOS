@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use evidenceos_core::crypto_transcripts::verify_sth_signature;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
@@ -103,13 +103,6 @@ fn hex32(input: &str) -> Vec<u8> {
     bytes
 }
 
-fn sth_payload(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
-    let mut payload = Vec::with_capacity(8 + root_hash.len());
-    payload.extend_from_slice(&tree_size.to_be_bytes());
-    payload.extend_from_slice(root_hash);
-    sha256_domain(DOMAIN_STH_SIGNATURE_V1, &payload)
-}
-
 #[tokio::test]
 async fn scenarios_produce_deterministic_public_evidence() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -134,9 +127,6 @@ async fn scenarios_produce_deterministic_public_evidence() {
         .expect("public key")
         .into_inner()
         .ed25519_public_key;
-    let verifying_key =
-        VerifyingKey::from_bytes(&public_key.try_into().expect("pk len")).expect("verifying key");
-
     let mut artifacts = Vec::new();
 
     for (_path, scenario) in specs {
@@ -298,10 +288,7 @@ async fn scenarios_produce_deterministic_public_evidence() {
                     );
 
                     let sth = response.signed_tree_head.expect("sth");
-                    let sig = Signature::from_slice(&sth.signature).expect("signature");
-                    evidence.verify_sth_signature = verifying_key
-                        .verify(&sth_payload(sth.tree_size, &sth.root_hash), &sig)
-                        .is_ok();
+                    evidence.verify_sth_signature = verify_sth_signature(&sth, &public_key).is_ok();
                     summary.push(json!({"rpc": "fetch_capsule", "status": "ok"}));
                 }
                 _ => panic!("unsupported step {}", step.rpc),

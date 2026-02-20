@@ -33,6 +33,7 @@
 pub mod aspec;
 pub mod canary;
 pub mod capsule;
+pub mod crypto_transcripts;
 pub mod dlc;
 pub mod eprocess;
 pub mod error;
