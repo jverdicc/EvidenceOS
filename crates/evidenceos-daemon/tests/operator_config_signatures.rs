@@ -11,9 +11,12 @@ use tempfile::TempDir;
 #[derive(Serialize)]
 struct OracleOperatorRecordPayload<'a> {
     oracle_id: &'a str,
+    schema_version: u32,
     ttl_epochs: u64,
-    calibration_hash: Option<&'a str>,
+    calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: &'a str,
+    nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
 }
@@ -25,20 +28,26 @@ struct EpochControlPayload<'a> {
     key_id: &'a str,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_oracle_record(
     sk: &SigningKey,
     oracle_id: &str,
     ttl_epochs: u64,
-    calibration_hash: Option<&str>,
+    calibration_manifest_hash_hex: &str,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: &str,
+    nonoverlap_proof_uri: Option<&str>,
     updated_at_epoch: u64,
     key_id: &str,
 ) -> String {
     let payload = OracleOperatorRecordPayload {
         oracle_id,
+        schema_version: 1,
         ttl_epochs,
-        calibration_hash,
+        calibration_manifest_hash_hex,
         calibration_epoch,
+        disjointness_attestation,
+        nonoverlap_proof_uri,
         updated_at_epoch,
         key_id,
     };
@@ -85,8 +94,10 @@ fn valid_signature_passes() {
         &sk,
         oracle_id,
         12,
-        Some("ab"),
+        &"ab".repeat(32),
         Some(10),
+        "attested-disjoint",
+        None,
         updated_at_epoch,
         key_id,
     );
@@ -95,9 +106,12 @@ fn valid_signature_passes() {
         serde_json::to_vec(&json!({
             "oracles": {
                 oracle_id: {
+                    "schema_version": 1,
                     "ttl_epochs": 12,
-                    "calibration_hash": "ab",
+                    "calibration_manifest_hash_hex": "abababababababababababababababababababababababababababababababab",
                     "calibration_epoch": 10,
+                    "disjointness_attestation": "attested-disjoint",
+                    "nonoverlap_proof_uri": null,
                     "updated_at_epoch": updated_at_epoch,
                     "key_id": key_id,
                     "signature_ed25519": signature,
@@ -133,13 +147,26 @@ fn mutation_fails_verification() {
     let sk = SigningKey::from_bytes(&[9u8; 32]);
     setup_trusted_key(&dir, key_id, &sk);
 
-    let signature = sign_oracle_record(&sk, oracle_id, 4, None, None, 88, key_id);
+    let signature = sign_oracle_record(
+        &sk,
+        oracle_id,
+        4,
+        &"11".repeat(32),
+        None,
+        "attested-disjoint",
+        None,
+        88,
+        key_id,
+    );
     std::fs::write(
         dir.path().join("oracle_operator_config.json"),
         serde_json::to_vec(&json!({
             "oracles": {
                 oracle_id: {
+                    "schema_version": 1,
                     "ttl_epochs": 5,
+                    "calibration_manifest_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "disjointness_attestation": "attested-disjoint",
                     "updated_at_epoch": 88,
                     "key_id": key_id,
                     "signature_ed25519": signature,
@@ -160,13 +187,26 @@ fn unknown_key_id_fails_verification() {
     let sk = SigningKey::from_bytes(&[11u8; 32]);
     setup_trusted_key(&dir, "ops-k1", &sk);
 
-    let signature = sign_oracle_record(&sk, "oracle-a", 7, None, None, 1, "ops-k2");
+    let signature = sign_oracle_record(
+        &sk,
+        "oracle-a",
+        7,
+        &"22".repeat(32),
+        None,
+        "attested-disjoint",
+        None,
+        1,
+        "ops-k2",
+    );
     std::fs::write(
         dir.path().join("oracle_operator_config.json"),
         serde_json::to_vec(&json!({
             "oracles": {
                 "oracle-a": {
+                    "schema_version": 1,
                     "ttl_epochs": 7,
+                    "calibration_manifest_hash_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+                    "disjointness_attestation": "attested-disjoint",
                     "updated_at_epoch": 1,
                     "key_id": "ops-k2",
                     "signature_ed25519": signature,

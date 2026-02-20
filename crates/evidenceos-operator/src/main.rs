@@ -48,9 +48,12 @@ enum Command {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OracleOperatorRecord {
+    schema_version: u32,
     ttl_epochs: u64,
-    calibration_hash: Option<String>,
+    calibration_manifest_hash_hex: Option<String>,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: Option<String>,
+    nonoverlap_proof_uri: Option<String>,
     updated_at_epoch: u64,
     key_id: String,
     signature_ed25519: String,
@@ -64,9 +67,12 @@ struct OracleOperatorConfig {
 #[derive(Debug, Clone, Serialize)]
 struct OracleOperatorRecordSigningPayload<'a> {
     oracle_id: &'a str,
+    schema_version: u32,
     ttl_epochs: u64,
-    calibration_hash: Option<&'a str>,
+    calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
+    disjointness_attestation: &'a str,
+    nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
 }
@@ -102,15 +108,28 @@ fn main() -> Result<(), String> {
 
             let now_epoch = unix_epoch_now()?;
             let mut entry = cfg.oracles.remove(&oracle_id).unwrap_or_default();
+            entry.schema_version = 1;
             entry.ttl_epochs = ttl_epochs;
             entry.updated_at_epoch = now_epoch;
             entry.key_id = key_id.clone();
+            entry
+                .calibration_manifest_hash_hex
+                .get_or_insert_with(|| "00".repeat(32));
+            entry
+                .disjointness_attestation
+                .get_or_insert_with(|| "operator-attested-disjoint".to_string());
 
             let payload = OracleOperatorRecordSigningPayload {
                 oracle_id: &oracle_id,
+                schema_version: entry.schema_version,
                 ttl_epochs: entry.ttl_epochs,
-                calibration_hash: entry.calibration_hash.as_deref(),
+                calibration_manifest_hash_hex: entry
+                    .calibration_manifest_hash_hex
+                    .as_deref()
+                    .unwrap_or(""),
                 calibration_epoch: entry.calibration_epoch,
+                disjointness_attestation: entry.disjointness_attestation.as_deref().unwrap_or(""),
+                nonoverlap_proof_uri: entry.nonoverlap_proof_uri.as_deref(),
                 updated_at_epoch: entry.updated_at_epoch,
                 key_id: &entry.key_id,
             };

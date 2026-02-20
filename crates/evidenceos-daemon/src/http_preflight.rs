@@ -127,7 +127,8 @@ async fn preflight_tool_call(
     }
 }
 
-pub(crate) struct HttpErr {
+#[derive(Debug)]
+pub struct HttpErr {
     pub(crate) status: StatusCode,
     pub(crate) kind: &'static str,
     pub(crate) response: PreflightToolCallResponse,
@@ -201,6 +202,7 @@ impl HttpErr {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn preflight_tool_call_impl(
     state: &HttpPreflightState,
     headers: &HeaderMap,
@@ -410,6 +412,7 @@ fn downgrade_params(
     None
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_ascii_printable_len(
     value: &str,
     min: usize,
@@ -431,6 +434,7 @@ fn validate_ascii_printable_len(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_authorization(headers: &HeaderMap, cfg: &DaemonConfig) -> Result<(), HttpErr> {
     let Some(token) = cfg.preflight_require_bearer_token.as_ref() else {
         return Ok(());
@@ -446,6 +450,7 @@ fn validate_authorization(headers: &HeaderMap, cfg: &DaemonConfig) -> Result<(),
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn enforce_rate_limit(state: &HttpPreflightState) -> Result<(), HttpErr> {
     let mut guard = state.rate_state.lock();
     if guard.started_at.elapsed() >= std::time::Duration::from_secs(1) {
@@ -468,7 +473,7 @@ pub fn build_state(
     let high_risk_tools = cfg
         .preflight_high_risk_tools
         .iter()
-        .map(|v| v.clone())
+        .cloned()
         .collect::<HashSet<_>>();
     HttpPreflightState {
         hard_freeze_ops: crate::probe::ProbeConfig::from_env().freeze_total_requests,
