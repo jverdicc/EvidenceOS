@@ -1,0 +1,37 @@
+{
+  "demo_name": "toy_blackbox_transcript",
+  "description": "Sanitized toy transcript that demonstrates budget accumulation and freeze semantics.",
+  "k_budget_bits": 8.0,
+  "calls": [
+    {
+      "call_id": "c01",
+      "oracle_name": "quality_oracle",
+      "output_symbol": "Q_BUCKET_MED",
+      "alphabet_size": 4
+    },
+    {
+      "call_id": "c02",
+      "oracle_name": "quality_oracle",
+      "output_symbol": "Q_BUCKET_MED",
+      "alphabet_size": 4
+    },
+    {
+      "call_id": "c03",
+      "oracle_name": "safety_oracle",
+      "output_symbol": "S_FLAG_LOW",
+      "alphabet_size": 8
+    },
+    {
+      "call_id": "c04",
+      "oracle_name": "robustness_oracle",
+      "output_symbol": "R_BAND_2",
+      "alphabet_size": 16
+    },
+    {
+      "call_id": "c05",
+      "oracle_name": "quality_oracle",
+      "output_symbol": "Q_BUCKET_HIGH",
+      "alphabet_size": 4
+    }
+  ]
+}

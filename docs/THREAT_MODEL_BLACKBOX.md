@@ -115,3 +115,22 @@ Result: timing becomes a lower-bandwidth signal, reducing practical leakage thro
 ---
 
 If you only remember one thing: **EvidenceOS is a defensive kernel that constrains what repeated interaction can leak, and proves what happened afterward.**
+
+## G) Reproducible sanitized transcript demo
+
+A concrete, precomputed walkthrough is available at:
+
+- [`docs/generated/blackbox_demo.md`](generated/blackbox_demo.md)
+
+Regenerate it with:
+
+```bash
+make blackbox-demo
+```
+
+The generated report shows, step-by-step:
+
+- canonical oracle outputs returned to DiscOS,
+- per-step and cumulative leakage charge (`k`),
+- budget remaining, and
+- the exact freeze/escalation point once budget is exhausted.
