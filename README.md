@@ -109,9 +109,9 @@ The goal of this section is to explain the failure mode and defense without need
 - Hardware/microarchitectural side channels and physical exfiltration paths.
 - Any path that bypasses the kernel and directly exposes raw holdout data.
 
-### ETL is transparency-log infrastructure
+### ETL is append-only transparency-log infrastructure
 
-EvidenceOS uses ETL as an append-only transparency log with signed checkpoints plus inclusion/consistency proofs. It is a Merkle append-only log with inclusion/consistency proofs; mining and global consensus are **not** required for EvidenceOS to operate.
+EvidenceOS uses ETL as an append-only Merkle transparency log with signed checkpoints plus inclusion/consistency proofs. This is **not** a blockchain, and blockchain-style mining or global consensus are **not** required for EvidenceOS to operate.
 
 ## Architecture diagrams
 

@@ -81,7 +81,7 @@ flowchart LR
     SETTLE --> OF[Oracle Feedback<br/>Hysteresis Filter / Quantization]
     OF --> CAPSULE[Claim Capsule<br/>Certified Merkle Proof + Score + Metadata]
 
-    subgraph B[3. ETL / Transparency Log (Public Ledger)]
+    subgraph B[3. ETL / Evidence Transparency Log (append-only Merkle log)]
       PRE[Pre-Commitment<br/>Hashes only: Model, Data]
       CHAIN[Certified Claim<br/>32-byte hash]
       PRE --> CHAIN
