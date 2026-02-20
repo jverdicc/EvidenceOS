@@ -749,6 +749,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidenceos-pln-calibrate"
+version = "0.1.0-alpha"
+dependencies = [
+ "clap",
+ "evidenceos-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "evidenceos-protocol"
 version = "0.1.0-alpha"
 dependencies = [
@@ -758,6 +768,19 @@ dependencies = [
  "sha2",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "evidenceos-settle-offline"
+version = "0.1.0-alpha"
+dependencies = [
+ "clap",
+ "ed25519-dalek",
+ "evidenceos-core",
+ "hex",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use clap::Parser;
+use ed25519_dalek::VerifyingKey;
 use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
 use evidenceos_core::oracle_registry::OracleRegistry;
 use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
@@ -30,6 +31,7 @@ use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
 use evidenceos_daemon::config::DaemonOracleConfig;
+use evidenceos_daemon::pln_profile::load_pln_profile;
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
@@ -87,6 +89,15 @@ struct Args {
 
     #[arg(long)]
     rpc_timeout_ms: Option<u64>,
+
+    #[arg(long, default_value_t = false)]
+    offline_settlement_ingest: bool,
+
+    #[arg(long)]
+    import_signed_settlements_dir: Option<String>,
+
+    #[arg(long)]
+    offline_settlement_verify_key_hex: Option<String>,
 }
 
 #[tokio::main]
@@ -108,6 +119,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     std::fs::create_dir_all(&args.data_dir)?;
+    if args.offline_settlement_ingest {
+        std::env::set_var("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", "1");
+    }
+    if let Some(profile) = load_pln_profile(std::path::Path::new(&args.data_dir))? {
+        tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_cycles.p99_cycles, wasm_p99=%profile.wasm_instruction_cycles.p99_cycles, "loaded PLN profile");
+    }
 
     let addr: SocketAddr = args.listen.parse()?;
     let metrics_addr: SocketAddr = args.metrics_listen.parse()?;
@@ -129,6 +146,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(count=%loaded_oracles.len(), "loaded oracle bundles");
 
     let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry)?;
+
+    if let Some(import_dir) = args.import_signed_settlements_dir.as_ref() {
+        let key_hex = args.offline_settlement_verify_key_hex.as_ref().ok_or(
+            "--import-signed-settlements-dir requires --offline-settlement-verify-key-hex",
+        )?;
+        let key_bytes = hex::decode(key_hex)?;
+        let verify_key = VerifyingKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "offline settlement verify key must be 32 bytes")?,
+        )?;
+        let applied =
+            svc.apply_signed_settlements(std::path::Path::new(import_dir), &verify_key)?;
+        tracing::info!(count=%applied, "applied signed settlements");
+    }
 
     if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
         return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());

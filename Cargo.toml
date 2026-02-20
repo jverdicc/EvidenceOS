@@ -8,6 +8,8 @@ members = [
   "crates/evidenceos-core",
   "crates/evidenceos-daemon",
   "crates/evidenceosctl",
+  "crates/evidenceos-settle-offline",
+  "crates/evidenceos-pln-calibrate",
 ]
 
 [workspace.package]

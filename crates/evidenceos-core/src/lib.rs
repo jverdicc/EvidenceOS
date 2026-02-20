@@ -46,7 +46,10 @@ pub mod oracle_plusplus;
 pub mod oracle_registry;
 pub mod oracle_wasm;
 pub mod physhir;
+pub mod pln;
+pub mod settlement;
 pub mod structured_claims;
+pub mod tee;
 pub mod topicid;
 
 pub use crate::error::{EvidenceOSError, EvidenceOSResult};
