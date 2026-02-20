@@ -46,6 +46,7 @@ use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::canary::{CanaryConfig, CanaryState};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
 use evidenceos_core::crypto_transcripts::{revocations_snapshot_digest, sth_signature_digest};
+use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
 use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
@@ -74,6 +75,11 @@ const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const BURN_WASM_MODULE: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
+    0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x0a, 0x08, 0x01, 0x06, 0x00,
+    0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+];
 
 #[derive(Debug, Clone)]
 struct HoldoutDescriptor {
@@ -276,6 +282,8 @@ struct Claim {
     holdout_handle_id: [u8; 32],
     holdout_ref: String,
     #[serde(default)]
+    epoch_config_ref: String,
+    #[serde(default)]
     holdout_len: u64,
     #[serde(default)]
     metadata_locked: bool,
@@ -299,6 +307,8 @@ struct Claim {
     epoch_size: u64,
     #[serde(default)]
     epoch_counter: u64,
+    #[serde(default)]
+    dlc_fuel_accumulated: u64,
     oracle_num_symbols: u32,
     oracle_resolution: OracleResolution,
     state: ClaimState,
@@ -326,6 +336,13 @@ struct Claim {
     freeze_preimage: Option<FreezePreimage>,
     #[serde(default)]
     operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EpochRuntimeConfigFile {
+    epoch_size: u64,
+    #[serde(default)]
+    pln_constant_cost: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -798,7 +815,7 @@ impl EvidenceOsService {
         if let Some(epoch) = forced {
             return Ok(epoch);
         }
-        current_logical_epoch(claim.epoch_size)
+        current_logical_epoch(claim)
     }
 
     fn transition_claim_internal(claim: &mut Claim, to: ClaimState) -> Result<(), Status> {
@@ -1493,6 +1510,36 @@ fn vault_config(claim: &Claim) -> Result<VaultConfig, Status> {
     })
 }
 
+fn burn_padding_fuel(
+    vault: &VaultEngine,
+    context: &VaultExecutionContext,
+    padding_fuel: u64,
+) -> Result<(), Status> {
+    if padding_fuel == 0 {
+        return Ok(());
+    }
+    let burn_cfg = VaultConfig {
+        max_fuel: padding_fuel,
+        max_memory_bytes: 65_536,
+        max_output_bytes: 1,
+        max_oracle_calls: 1,
+    };
+    match vault.execute(BURN_WASM_MODULE, context, burn_cfg) {
+        Err(VaultError::FuelExhausted) => Ok(()),
+        Err(err) => Err(map_vault_error(err)),
+        Ok(_) => Err(Status::internal("burn module terminated unexpectedly")),
+    }
+}
+
+fn padded_fuel_total(epoch_budget: u64, fuel_used: u64) -> Result<u64, Status> {
+    if epoch_budget == 0 {
+        return Err(Status::invalid_argument("epoch_size must be > 0"));
+    }
+    let rem = fuel_used % epoch_budget;
+    let padding_fuel = if rem == 0 { 0 } else { epoch_budget - rem };
+    Ok(fuel_used.saturating_add(padding_fuel))
+}
+
 fn kernel_structured_output(
     output_schema_id: &str,
     canonical_output: &[u8],
@@ -1517,6 +1564,7 @@ fn kernel_structured_output(
 fn policy_oracle_input_json(
     claim: &Claim,
     vault_result: &crate::vault::VaultExecutionResult,
+    fuel_total: u64,
     ledger: &ConservationLedger,
     canonical_output: &[u8],
     reason_codes: &[u32],
@@ -1527,7 +1575,7 @@ fn policy_oracle_input_json(
         "canonical_output_sha256": hex::encode(sha256_bytes(canonical_output)),
         "claim_id": hex::encode(claim.claim_id),
         "epoch": claim.epoch_counter,
-        "fuel_used": vault_result.fuel_used,
+        "fuel_used": fuel_total,
         "k_bits_total": ledger.k_bits_total,
         "lane": EvidenceOsService::lane_name(claim.lane),
         "oracle_calls": vault_result.oracle_calls,
@@ -1807,15 +1855,41 @@ fn verify_epoch_control_record(
     Ok(())
 }
 
-fn current_logical_epoch(epoch_size: u64) -> Result<u64, Status> {
-    if epoch_size == 0 {
-        return Err(Status::invalid_argument("epoch_size must be > 0"));
+fn load_epoch_runtime_config(
+    data_dir: &Path,
+    epoch_config_ref: &str,
+    fallback_epoch_size: u64,
+) -> Result<DlcConfig, Status> {
+    validate_required_str_field(epoch_config_ref, "epoch_config_ref", MAX_METADATA_FIELD_LEN)?;
+    let mut cfg_path = data_dir.join("epoch_configs").join(epoch_config_ref);
+    cfg_path.set_extension("json");
+    if !cfg_path.exists() {
+        return DlcConfig::new(fallback_epoch_size)
+            .map_err(|_| Status::invalid_argument("epoch_size must be > 0"));
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| Status::internal("system clock before unix epoch"))?
-        .as_secs();
-    Ok(now / epoch_size)
+    let bytes = std::fs::read(&cfg_path)
+        .map_err(|_| Status::failed_precondition("read epoch config failed"))?;
+    let parsed: EpochRuntimeConfigFile = serde_json::from_slice(&bytes)
+        .map_err(|_| Status::invalid_argument("decode epoch config failed"))?;
+    let mut cfg = DlcConfig::new(parsed.epoch_size)
+        .map_err(|_| Status::invalid_argument("epoch config epoch_size must be > 0"))?;
+    if let Some(cost) = parsed.pln_constant_cost {
+        if cost == 0 {
+            return Err(Status::invalid_argument(
+                "epoch config pln_constant_cost must be > 0",
+            ));
+        }
+        cfg.pln_constant_cost = Some(cost);
+    }
+    Ok(cfg)
+}
+
+fn current_logical_epoch(claim: &Claim) -> Result<u64, Status> {
+    let cfg = DlcConfig::new(claim.epoch_size)
+        .map_err(|_| Status::invalid_argument("epoch_size must be > 0"))?;
+    let mut dlc = DeterministicLogicalClock::new(cfg);
+    dlc.tick(claim.dlc_fuel_accumulated)
+        .map_err(|_| Status::internal("dlc epoch computation overflow"))
 }
 
 fn build_operation_id(
@@ -2037,6 +2111,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             dependency_merkle_root: None,
             holdout_handle_id,
             holdout_ref: hex::encode(holdout_handle_id),
+            epoch_config_ref: "legacy-v1".to_string(),
             holdout_len: req.epoch_size,
             metadata_locked: false,
             claim_name: "legacy-v1".to_string(),
@@ -2051,6 +2126,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             escalate_to_heavy: false,
             epoch_size: req.epoch_size,
             epoch_counter: 0,
+            dlc_fuel_accumulated: 0,
             oracle_num_symbols: req.oracle_num_symbols,
             oracle_resolution,
             state: ClaimState::Uncommitted,
@@ -2137,7 +2213,6 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim.dependency_merkle_root = None;
             claim.freeze_preimage = None;
             claim.oracle_pins = None;
-            claim.epoch_counter = claim.epoch_counter.saturating_add(1);
             let mut declared_wasm_hash = None;
             for artifact in req.artifacts {
                 if artifact.kind.is_empty() || artifact.kind.len() > 64 {
@@ -2309,6 +2384,12 @@ impl EvidenceOsV2 for EvidenceOsService {
                 };
             let emitted_output = vault_result.canonical_output;
             let fuel_used = vault_result.fuel_used;
+            let epoch_budget = claim.epoch_size;
+            let fuel_total = padded_fuel_total(epoch_budget, fuel_used)?;
+            let padding_fuel = fuel_total.saturating_sub(fuel_used);
+            burn_padding_fuel(&vault, &context, padding_fuel)?;
+            claim.dlc_fuel_accumulated = claim.dlc_fuel_accumulated.saturating_add(fuel_total);
+            claim.epoch_counter = current_logical_epoch(claim)?;
             let trace_hash = vault_result.judge_trace_hash;
             if !req.canonical_output.is_empty() && req.canonical_output != emitted_output {
                 self.record_incident(claim, "canonical_output_mismatch")?;
@@ -2436,7 +2517,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
                 "aspec.v1".to_string(),
                 "evidenceos.v1".to_string(),
-                fuel_used as f64,
+                fuel_total as f64,
             );
             capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
             capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
@@ -2535,11 +2616,14 @@ impl EvidenceOsV2 for EvidenceOsService {
         let metadata = req
             .metadata
             .ok_or_else(|| Status::invalid_argument("metadata is required"))?;
+        let epoch_config_ref = metadata.epoch_config_ref.clone();
         validate_required_str_field(
-            &metadata.epoch_config_ref,
+            &epoch_config_ref,
             "metadata.epoch_config_ref",
             MAX_METADATA_FIELD_LEN,
         )?;
+        let dlc_cfg =
+            load_epoch_runtime_config(&self.state.data_path, &epoch_config_ref, req.epoch_size)?;
         validate_required_str_field(
             &metadata.output_schema_id,
             "metadata.output_schema_id",
@@ -2595,7 +2679,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             &CoreClaimMetadataV2 {
                 lane: metadata.lane.clone(),
                 alpha_micros: metadata.alpha_micros,
-                epoch_config_ref: metadata.epoch_config_ref,
+                epoch_config_ref: epoch_config_ref.clone(),
                 output_schema_id: canonical_output_schema_id.clone(),
             },
             &TopicSignals {
@@ -2636,7 +2720,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         id_payload.extend_from_slice(&topic.topic_id);
         id_payload.extend_from_slice(&holdout_handle_id);
         id_payload.extend_from_slice(&phys);
-        id_payload.extend_from_slice(&req.epoch_size.to_be_bytes());
+        id_payload.extend_from_slice(&dlc_cfg.epoch_size.to_be_bytes());
         id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
@@ -2659,6 +2743,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             dependency_merkle_root,
             holdout_handle_id,
             holdout_ref: req.holdout_ref,
+            epoch_config_ref,
             holdout_len: holdout_descriptor.len as u64,
             metadata_locked: false,
             claim_name: req.claim_name,
@@ -2671,8 +2756,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             disagreement_score: topic.disagreement_score,
             semantic_physhir_distance_bits: topic.semantic_physhir_distance_bits,
             escalate_to_heavy: topic.escalate_to_heavy,
-            epoch_size: req.epoch_size,
+            epoch_size: dlc_cfg.epoch_size,
             epoch_counter: 0,
+            dlc_fuel_accumulated: 0,
             oracle_num_symbols: req.oracle_num_symbols,
             oracle_resolution,
             state: ClaimState::Uncommitted,
@@ -2873,6 +2959,12 @@ impl EvidenceOsV2 for EvidenceOsService {
             );
             let canonical_output = vault_result.canonical_output.clone();
             let fuel_used = vault_result.fuel_used;
+            let epoch_budget = claim.epoch_size;
+            let fuel_total = padded_fuel_total(epoch_budget, fuel_used)?;
+            let padding_fuel = fuel_total.saturating_sub(fuel_used);
+            burn_padding_fuel(&vault, &context, padding_fuel)?;
+            claim.dlc_fuel_accumulated = claim.dlc_fuel_accumulated.saturating_add(fuel_total);
+            claim.epoch_counter = current_logical_epoch(claim)?;
             let trace_hash = vault_result.judge_trace_hash;
             if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
                 let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
@@ -3053,6 +3145,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let oracle_input = policy_oracle_input_json(
                 claim,
                 &vault_result,
+                fuel_total,
                 &claim.ledger,
                 &canonical_output,
                 &reason_codes,
@@ -3159,7 +3252,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 format!("deterministic-kernel-{}", env!("CARGO_PKG_VERSION")),
                 "aspec.v1".to_string(),
                 "evidenceos.v1".to_string(),
-                fuel_used as f64,
+                fuel_total as f64,
             );
             capsule.nullspec_id_hex = Some(hex::encode(contract.nullspec_id));
             capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
@@ -3891,6 +3984,7 @@ mod tests {
             topic_id: [0; 32],
             holdout_handle_id: handle,
             holdout_ref: holdout_ref.to_string(),
+            epoch_config_ref: "epoch-a".to_string(),
             holdout_len: 4,
             metadata_locked: false,
             claim_name: "c".to_string(),
@@ -3905,6 +3999,7 @@ mod tests {
             escalate_to_heavy: false,
             epoch_size: 10,
             epoch_counter: 0,
+            dlc_fuel_accumulated: 0,
             oracle_num_symbols: 4,
             oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
             state: ClaimState::Uncommitted,
