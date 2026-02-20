@@ -108,6 +108,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     std::fs::create_dir_all(&args.data_dir)?;
+    if let Some(src) = args.trusted_oracle_keys.as_deref() {
+        let dst = std::path::Path::new(&args.data_dir).join("trusted_oracle_keys.json");
+        std::fs::copy(src, dst)?;
+    }
 
     let addr: SocketAddr = args.listen.parse()?;
     let metrics_addr: SocketAddr = args.metrics_listen.parse()?;
@@ -176,6 +180,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tls = tls.client_ca_root(ca);
         }
         builder = builder.tls_config(tls)?;
+    }
+
+    #[cfg(unix)]
+    {
+        let svc_reload = svc.clone();
+        tokio::spawn(async move {
+            let mut hup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(sig) => sig,
+                    Err(err) => {
+                        tracing::warn!(error=%err, "failed to install SIGHUP handler");
+                        return;
+                    }
+                };
+            while hup.recv().await.is_some() {
+                if let Err(err) = svc_reload.reload_operator_runtime_config() {
+                    tracing::warn!(error=%err, "failed to reload operator runtime config");
+                }
+            }
+        });
     }
 
     builder
