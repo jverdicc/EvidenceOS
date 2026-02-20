@@ -13,6 +13,10 @@
 
 Why this matters: verification systems fail when adaptive querying, side channels, or weak accounting allow attackers to extract holdout information faster than assurance can be maintained. EvidenceOS is designed to constrain this extraction channel, provide auditable receipts, and make risk posture explicit.
 
+## Start here
+
+New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for guided reading paths for alignment researchers, systems/security engineers, and operators/deployers.
+
 This repository contains:
 
 - `evidenceos-core`: Conservation Ledger primitives, deterministic logical clock, ETL Merkle log, and ASPEC-like Wasm verifier.
