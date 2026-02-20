@@ -1,5 +1,7 @@
 # Oracle Bundles (Signed WASM)
 
+For a visual map of how the oracle subsystem fits into the sealed vault, see [`docs/ARCHITECTURE_DIAGRAMS.md`](ARCHITECTURE_DIAGRAMS.md).
+
 External oracles are treated as **untrusted computation inside the vault**. They are constrained by interface controls, deterministic sandboxing, canonical realization encoding, and fail-closed enforcement; they are not trusted by intent.
 
 ## Bundle format
