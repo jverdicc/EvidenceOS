@@ -18,13 +18,13 @@
 use getrandom::getrandom;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use wasmtime::{
-    Caller, Config, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
-};
+use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 use evidenceos_core::nullspec_contract::NullSpecContractV1;
 use evidenceos_core::oracle::{AccuracyOracleState, HoldoutLabels, NullSpec, OracleResolution};
 use evidenceos_core::structured_claims;
+
+use crate::wasm_config::deterministic_wasmtime_config;
 
 const TRACE_DOMAIN: &[u8] = b"evidenceos:judge_trace:v2";
 const TRACE_INPUT_CAP_BYTES: usize = 64;
@@ -147,12 +147,7 @@ pub struct VaultEngine {
 
 impl VaultEngine {
     pub fn new() -> Result<Self, VaultError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        config.wasm_simd(false);
-        config.wasm_relaxed_simd(false);
-        config.wasm_multi_memory(false);
-        config.wasm_memory64(false);
+        let config = deterministic_wasmtime_config();
 
         let engine = Engine::new(&config)
             .map_err(|err| VaultError::InvalidModule(format!("engine init failed: {err}")))?;

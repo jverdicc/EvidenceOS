@@ -80,7 +80,43 @@ fn vault_happy_path_single_oracle_single_output() {
     assert_eq!(first.oracle_calls, 1);
     assert_eq!(first.canonical_output, vec![1]);
     assert_eq!(first.judge_trace_hash, second.judge_trace_hash);
+    assert_eq!(first.canonical_output, second.canonical_output);
+    assert_eq!(first.oracle_buckets, second.oracle_buckets);
     assert_eq!(first.fuel_used, second.fuel_used);
+}
+
+#[test]
+fn vault_determinism_regression_trace_output_and_bucket_counts_match() {
+    let wasm = wat::parse_str(
+        r#"(module
+          (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01\00\01\01")
+          (func (export "run")
+            i32.const 0 i32.const 4 call $oracle drop
+            i32.const 0 i32.const 4 call $oracle drop
+            i32.const 0 i32.const 1 call $emit drop))"#,
+    )
+    .expect("wat");
+
+    let engine = VaultEngine::new().expect("engine");
+    let deterministic_config = VaultConfig {
+        max_oracle_calls: 2,
+        ..config()
+    };
+
+    let first = engine
+        .execute(&wasm, &context(), deterministic_config)
+        .expect("first execution");
+    let second = engine
+        .execute(&wasm, &context(), deterministic_config)
+        .expect("second execution");
+
+    assert_eq!(first.judge_trace_hash, second.judge_trace_hash);
+    assert_eq!(first.canonical_output, second.canonical_output);
+    assert_eq!(first.oracle_buckets.len(), second.oracle_buckets.len());
+    assert_eq!(first.oracle_buckets, second.oracle_buckets);
 }
 
 #[test]

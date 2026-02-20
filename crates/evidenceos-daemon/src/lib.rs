@@ -26,6 +26,7 @@ pub mod server;
 pub mod settlement;
 pub mod telemetry;
 pub mod vault;
+pub mod wasm_config;
 
 #[cfg(test)]
 mod http_preflight_tests;
