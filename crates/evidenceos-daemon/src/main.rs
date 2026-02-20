@@ -34,7 +34,7 @@ use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
 use evidenceos_daemon::config::{DaemonConfig, DaemonOracleConfig};
 use evidenceos_daemon::http_preflight;
 use evidenceos_daemon::pln_profile::load_pln_profile;
-use evidenceos_daemon::server::EvidenceOsService;
+use evidenceos_daemon::server::{EvidenceOsService, NullSpecRegistryConfig};
 use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
 use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as EvidenceOsV1Server;
@@ -73,6 +73,10 @@ struct Args {
     oracle_dir: String,
     #[arg(long)]
     trusted_oracle_keys: Option<String>,
+    #[arg(long)]
+    nullspec_registry_dir: Option<String>,
+    #[arg(long)]
+    nullspec_authority_keys_dir: Option<String>,
     #[arg(long)]
     rpc_timeout_ms: Option<u64>,
     #[arg(long, default_value_t = false)]
@@ -144,8 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_addr: SocketAddr = args.metrics_listen.parse()?;
     let telemetry = Arc::new(Telemetry::new()?);
     let _metrics_handle = telemetry.clone().spawn_metrics_server(metrics_addr).await?;
-    let oracle_cfg =
-        DaemonOracleConfig::load(&args.oracle_dir, args.trusted_oracle_keys.as_deref())?;
+    let oracle_cfg = DaemonOracleConfig::load(
+        &args.oracle_dir,
+        args.trusted_oracle_keys.as_deref(),
+        std::path::Path::new(&args.data_dir),
+        args.nullspec_registry_dir.as_deref(),
+        args.nullspec_authority_keys_dir.as_deref(),
+    )?;
     let oracle_aspec_policy = AspecPolicy {
         float_policy: FloatPolicy::Allow,
         ..AspecPolicy::default()
@@ -158,8 +167,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     tracing::info!(count=%registry.oracle_ids().len(), "loaded oracle bundles");
 
-    let svc =
-        EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry.clone())?;
+    let svc = EvidenceOsService::build_with_options_and_nullspec(
+        &args.data_dir,
+        args.durable_etl,
+        telemetry.clone(),
+        NullSpecRegistryConfig {
+            registry_dir: oracle_cfg.nullspec_registry_dir.clone(),
+            authority_keys_dir: oracle_cfg.trusted_nullspec_keys_dir.clone(),
+            reload_interval: Duration::from_secs(30),
+        },
+    )?;
 
     if let Some(import_dir) = args.import_signed_settlements_dir.as_ref() {
         let key_hex = args.offline_settlement_verify_key_hex.as_ref().ok_or(

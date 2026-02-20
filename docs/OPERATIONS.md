@@ -13,6 +13,9 @@
   - `oracle_operator_config.json`
   - `epoch_control.json`
   - `etl_governance_events.log`
+- Keep NullSpec governance assets available to the daemon, either at defaults under `--data-dir`
+  (`nullspec-registry/`, `trusted-nullspec-keys/`) or explicitly via
+  `--nullspec-registry-dir` and `--nullspec-authority-keys-dir`.
 
 ## Key management and rotation
 
@@ -36,6 +39,9 @@ Keep historical keys available while historical artifacts may be audited.
 4. Reload daemon config (SIGHUP) after changing trusted keys.
 
 ## NullSpec lifecycle
+
+- Runtime registry loading is cached in memory and periodically reloaded. If reload fails,
+  claim execution fails closed until a successful reload.
 
 - Author and sign: `evidenceosctl nullspec create ... --signing-key ...`
 - Install: `evidenceosctl nullspec install --data-dir ... --contract ...`
