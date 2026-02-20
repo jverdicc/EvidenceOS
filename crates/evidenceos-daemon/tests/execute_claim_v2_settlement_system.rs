@@ -255,3 +255,34 @@ async fn execute_fails_closed_without_active_nullspec() {
         .expect_err("must fail");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
 }
+
+#[tokio::test]
+async fn canary_drift_freezes_subsequent_certifications_and_writes_incident() {
+    std::env::set_var("EVIDENCEOS_PROBE_THROTTLE_TOTAL", "1000");
+    std::env::set_var("EVIDENCEOS_PROBE_ESCALATE_TOTAL", "2000");
+    std::env::set_var("EVIDENCEOS_PROBE_FREEZE_TOTAL", "3000");
+    std::env::set_var("EVIDENCEOS_CANARY_ALPHA_DRIFT_MICROS", "900000");
+    let temp = TempDir::new().expect("temp");
+    let data_dir = temp.path().to_str().expect("path");
+    let resolution = OracleResolution::new(4, 0.0).expect("resolution");
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(&resolution).expect("res bytes"));
+    let resolution_hash: [u8; 32] = h.finalize().into();
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs()
+        / 4;
+    install_active_nullspec(data_dir, now_epoch, 10_000, resolution_hash);
+    let mut client = start_server(data_dir).await;
+
+    let _ = run_claim(&mut client, wasm_emit_with_oracle(&[1; 4])).await;
+    let (second_exec, _) = run_claim(&mut client, wasm_emit_with_oracle(&[1; 4])).await;
+
+    assert_ne!(second_exec.decision, pb::Decision::Approve as i32);
+    assert!(second_exec.reason_codes.contains(&91));
+
+    let etl_bytes = std::fs::read(temp.path().join("etl.log")).expect("etl");
+    let etl_text = String::from_utf8_lossy(&etl_bytes);
+    assert!(etl_text.contains("canary_incident"));
+}

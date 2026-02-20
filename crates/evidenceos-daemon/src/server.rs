@@ -41,6 +41,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
+use evidenceos_core::canary::{CanaryConfig, CanaryState};
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
 use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
@@ -294,6 +295,7 @@ struct PersistedState {
     revocations: Vec<([u8; 32], u64, String)>,
     topic_pools: Vec<([u8; 32], TopicBudgetPool)>,
     holdout_pools: Vec<([u8; 32], HoldoutBudgetPool)>,
+    canary_states: Vec<(String, CanaryState)>,
 }
 
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
@@ -303,6 +305,7 @@ struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
     topic_pools: Mutex<HashMap<[u8; 32], TopicBudgetPool>>,
     holdout_pools: Mutex<HashMap<[u8; 32], HoldoutBudgetPool>>,
+    canary_states: Mutex<HashMap<String, CanaryState>>,
     etl: Mutex<Etl>,
     data_path: PathBuf,
     revocations: Mutex<Vec<([u8; 32], u64, String)>>,
@@ -327,6 +330,7 @@ pub struct EvidenceOsService {
     telemetry: Arc<Telemetry>,
     probe_detector: Arc<Mutex<ProbeDetector>>,
     policy_oracles: Arc<Vec<PolicyOracleEngine>>,
+    canary_config: CanaryConfig,
 }
 
 impl EvidenceOsService {
@@ -370,6 +374,23 @@ impl EvidenceOsService {
         }
 
         let policy_oracles = load_policy_oracles(&root)?;
+        let canary_config = CanaryConfig {
+            alpha_drift_micros: std::env::var("EVIDENCEOS_CANARY_ALPHA_DRIFT_MICROS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(50_000),
+            check_every_epochs: std::env::var("EVIDENCEOS_CANARY_CHECK_EVERY_EPOCHS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(1),
+            max_staleness_epochs: std::env::var("EVIDENCEOS_CANARY_MAX_STALENESS_EPOCHS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(100),
+        };
+        let _ = canary_config
+            .barrier()
+            .map_err(|_| Status::invalid_argument("invalid canary configuration"))?;
 
         let state = Arc::new(KernelState {
             claims: Mutex::new(
@@ -381,6 +402,7 @@ impl EvidenceOsService {
             ),
             topic_pools: Mutex::new(persisted.topic_pools.into_iter().collect()),
             holdout_pools: Mutex::new(persisted.holdout_pools.into_iter().collect()),
+            canary_states: Mutex::new(persisted.canary_states.into_iter().collect()),
             etl: Mutex::new(etl),
             data_path: root,
             revocations: Mutex::new(persisted.revocations),
@@ -409,6 +431,7 @@ impl EvidenceOsService {
             telemetry,
             probe_detector: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig::from_env()))),
             policy_oracles: Arc::new(policy_oracles),
+            canary_config,
         })
     }
 
@@ -730,6 +753,32 @@ impl EvidenceOsService {
         Ok(())
     }
 
+    fn append_canary_incident(
+        &self,
+        claim: &Claim,
+        reason: &str,
+        e_drift: f64,
+        barrier: f64,
+    ) -> Result<(), Status> {
+        let entry = serde_json::to_vec(&json!({
+            "kind": "canary_incident",
+            "reason": reason,
+            "claim_id": hex::encode(claim.claim_id),
+            "claim_name": claim.claim_name,
+            "holdout_ref": claim.holdout_ref,
+            "e_drift": e_drift,
+            "barrier": barrier,
+            "operation_id": claim.operation_id,
+        }))
+        .map_err(|_| Status::internal("canary incident encoding failed"))?;
+        self.state
+            .etl
+            .lock()
+            .append(&entry)
+            .map_err(|_| Status::internal("canary incident append failed"))?;
+        Ok(())
+    }
+
     fn validate_budget_value(value: f64, field: &str) -> Result<(), Status> {
         if !value.is_finite() || value < 0.0 {
             return Err(Status::invalid_argument(format!(
@@ -737,6 +786,10 @@ impl EvidenceOsService {
             )));
         }
         Ok(())
+    }
+
+    fn canary_key(claim_name: &str, holdout_ref: &str) -> String {
+        format!("{claim_name}::{holdout_ref}")
     }
 }
 
@@ -755,6 +808,12 @@ fn persist_all(state: &KernelState) -> Result<(), Status> {
             .lock()
             .iter()
             .map(|(k, v)| (*k, v.clone()))
+            .collect(),
+        canary_states: state
+            .canary_states
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
@@ -2290,6 +2349,30 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             let (e_value, eprocess_kind_id) =
                 compute_nullspec_e_value(&contract, &vault_result.oracle_buckets)?;
+            let canary_key = Self::canary_key(&claim.claim_name, &claim.holdout_ref);
+            let mut canary_state = {
+                let mut canary_states = self.state.canary_states.lock();
+                if !canary_states.contains_key(&canary_key) {
+                    let initial = CanaryState::new(self.canary_config)
+                        .map_err(|_| Status::internal("canary state init failed"))?;
+                    canary_states.insert(canary_key.clone(), initial);
+                }
+                canary_states
+                    .get(&canary_key)
+                    .cloned()
+                    .ok_or_else(|| Status::internal("missing canary state"))?
+            };
+            for b in &vault_result.oracle_buckets {
+                let bucket = usize::try_from(*b)
+                    .map_err(|_| Status::failed_precondition("bucket overflow"))?;
+                canary_state
+                    .update_with_bucket(&contract, bucket, current_epoch)
+                    .map_err(|_| Status::failed_precondition("canary drift update failed"))?;
+            }
+            {
+                let mut canary_states = self.state.canary_states.lock();
+                canary_states.insert(canary_key, canary_state.clone());
+            }
             claim
                 .ledger
                 .settle_e_value(e_value, "decision", json!({"e_value_total": e_value}))
@@ -2310,6 +2393,15 @@ impl EvidenceOsV2 for EvidenceOsService {
                 } else {
                     pb::Decision::Reject as i32
                 };
+            if canary_state.drift_frozen {
+                decision = pb::Decision::Reject as i32;
+                self.append_canary_incident(
+                    claim,
+                    "canary_drift_frozen",
+                    canary_state.e_drift,
+                    canary_state.barrier,
+                )?;
+            }
             let mut reason_codes = match decision {
                 x if x == pb::Decision::Approve as i32 => vec![1],
                 x if x == pb::Decision::Defer as i32 => {
@@ -2321,6 +2413,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     vec![2]
                 }
             };
+            if canary_state.drift_frozen {
+                reason_codes.push(91);
+            }
             if physhir_mismatch {
                 reason_codes.push(9104);
             }
