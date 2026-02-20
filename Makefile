@@ -1,4 +1,4 @@
-.PHONY: fmt lint test test-evidence audit
+.PHONY: fmt lint test test-evidence audit blackbox-demo
 
 fmt:
 	cargo fmt --all
@@ -16,3 +16,6 @@ test-evidence:
 audit:
 	mkdir -p artifacts
 	bash -o pipefail -c 'cargo audit 2>&1 | tee artifacts/audit.log'
+
+blackbox-demo:
+	python3 examples/blackbox_demo/render_demo.py
