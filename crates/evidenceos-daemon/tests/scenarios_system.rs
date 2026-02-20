@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
 use evidenceos_daemon::server::EvidenceOsService;
-use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_protocol::{pb, sha256_domain, DOMAIN_STH_SIGNATURE_V1};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,8 +15,6 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
-
-const DOMAIN_STH_V1: &[u8] = b"evidenceos:sth:v1";
 
 #[derive(Debug, Deserialize)]
 struct ScenarioSpec {
@@ -106,11 +104,10 @@ fn hex32(input: &str) -> Vec<u8> {
 }
 
 fn sth_payload(tree_size: u64, root_hash: &[u8]) -> [u8; 32] {
-    let mut msg = Vec::with_capacity(8 + root_hash.len());
-    msg.extend_from_slice(DOMAIN_STH_V1);
-    msg.extend_from_slice(&tree_size.to_be_bytes());
-    msg.extend_from_slice(root_hash);
-    Sha256::digest(msg).into()
+    let mut payload = Vec::with_capacity(8 + root_hash.len());
+    payload.extend_from_slice(&tree_size.to_be_bytes());
+    payload.extend_from_slice(root_hash);
+    sha256_domain(DOMAIN_STH_SIGNATURE_V1, &payload)
 }
 
 #[tokio::test]
