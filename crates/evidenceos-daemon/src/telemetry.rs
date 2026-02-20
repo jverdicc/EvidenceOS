@@ -43,6 +43,9 @@ struct TelemetryState {
     probe_escalated_total: HashMap<String, u64>,
     probe_frozen_total: HashMap<String, u64>,
     probe_risk_score: HashMap<String, f64>,
+    preflight_requests_total: HashMap<(String, String), u64>,
+    preflight_latency_ms_bucket: BTreeMap<u64, u64>,
+    preflight_failures_total: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -143,6 +146,34 @@ impl Telemetry {
             .insert(operation_id.to_string(), if frozen { 1 } else { 0 });
     }
 
+    pub fn record_preflight_request(&self, decision: &str, reason_code: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .preflight_requests_total
+            .entry((decision.to_string(), reason_code.to_string()))
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_preflight_latency_ms(&self, latency_ms: u64) {
+        let mut guard = self.state.lock();
+        let bucket = [1_u64, 5, 10, 25, 50, 100, 250, 500, 1000]
+            .into_iter()
+            .find(|bound| latency_ms <= *bound)
+            .unwrap_or(u64::MAX);
+        let entry = guard.preflight_latency_ms_bucket.entry(bucket).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    pub fn record_preflight_failure(&self, kind: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .preflight_failures_total
+            .entry(kind.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
     pub fn render(&self) -> String {
         let guard = self.state.lock();
         let mut out = String::new();
@@ -222,6 +253,35 @@ impl Telemetry {
         out.push_str("# TYPE frozen gauge\n");
         for (operation_id, value) in &guard.frozen {
             let _ = writeln!(out, "frozen{{operation_id=\"{}\"}} {}", operation_id, value);
+        }
+        out.push_str("# TYPE evidenceos_preflight_requests_total counter\n");
+        for ((decision, reason_code), value) in &guard.preflight_requests_total {
+            let _ = writeln!(
+                out,
+                "evidenceos_preflight_requests_total{{decision=\"{}\",reasonCode=\"{}\"}} {}",
+                decision, reason_code, value
+            );
+        }
+        out.push_str("# TYPE evidenceos_preflight_latency_ms_bucket counter\n");
+        for (bucket, value) in &guard.preflight_latency_ms_bucket {
+            let bucket_label = if *bucket == u64::MAX {
+                "+Inf".to_string()
+            } else {
+                bucket.to_string()
+            };
+            let _ = writeln!(
+                out,
+                "evidenceos_preflight_latency_ms_bucket{{le=\"{}\"}} {}",
+                bucket_label, value
+            );
+        }
+        out.push_str("# TYPE evidenceos_preflight_failures_total counter\n");
+        for (kind, value) in &guard.preflight_failures_total {
+            let _ = writeln!(
+                out,
+                "evidenceos_preflight_failures_total{{kind=\"{}\"}} {}",
+                kind, value
+            );
         }
         out
     }

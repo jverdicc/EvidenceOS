@@ -18,6 +18,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod http_preflight;
 pub mod pln_profile;
 pub mod policy_oracle;
 pub mod probe;
@@ -25,3 +26,6 @@ pub mod server;
 pub mod settlement;
 pub mod telemetry;
 pub mod vault;
+
+#[cfg(test)]
+mod http_preflight_tests;

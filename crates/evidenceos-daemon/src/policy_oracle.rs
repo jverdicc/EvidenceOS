@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use evidenceos_core::capsule::{canonical_json, PolicyOracleReceiptLike};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,13 @@ pub enum PolicyOracleDecision {
     Pass,
     DeferToHeavy,
     Reject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightPolicyDecision {
+    Approve { reason: String },
+    Reject { reason: String },
+    Defer { reason: String },
 }
 
 impl PolicyOracleDecision {
@@ -241,6 +249,52 @@ impl PolicyOracleEngine {
             wasm_hash_hex: hex::encode(self.wasm_hash),
             decision: PolicyOracleDecision::DeferToHeavy.as_str().to_string(),
             reason_code: self.manifest.reason_code,
+        }
+    }
+
+    pub fn preflight_tool_call(
+        &self,
+        tool_name: &str,
+        params_canonical_json: &[u8],
+        agent_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> PreflightPolicyDecision {
+        #[derive(Serialize)]
+        struct Input<'a> {
+            tool_name: &'a str,
+            params_canonical_json_b64: String,
+            agent_id: Option<&'a str>,
+            session_id: Option<&'a str>,
+        }
+
+        let input = Input {
+            tool_name,
+            params_canonical_json_b64: base64::engine::general_purpose::STANDARD
+                .encode(params_canonical_json),
+            agent_id,
+            session_id,
+        };
+        let payload = match canonical_json(&input) {
+            Ok(v) => v,
+            Err(_) => {
+                return PreflightPolicyDecision::Defer {
+                    reason: "policy_oracle_input_encode_failed".to_string(),
+                }
+            }
+        };
+        match self.evaluate(&payload) {
+            Ok((PolicyOracleDecision::Pass, _)) => PreflightPolicyDecision::Approve {
+                reason: "policy_oracle_pass".to_string(),
+            },
+            Ok((PolicyOracleDecision::Reject, receipt)) => PreflightPolicyDecision::Reject {
+                reason: format!("policy_oracle_reject_{}", receipt.reason_code),
+            },
+            Ok((PolicyOracleDecision::DeferToHeavy, receipt)) => PreflightPolicyDecision::Defer {
+                reason: format!("policy_oracle_defer_{}", receipt.reason_code),
+            },
+            Err(_) => PreflightPolicyDecision::Defer {
+                reason: "policy_oracle_failure".to_string(),
+            },
         }
     }
 }

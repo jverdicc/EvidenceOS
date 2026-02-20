@@ -27,10 +27,12 @@ use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
-use evidenceos_daemon::config::DaemonOracleConfig;
+use evidenceos_daemon::config::{DaemonConfig, DaemonOracleConfig};
+use evidenceos_daemon::http_preflight;
 use evidenceos_daemon::pln_profile::load_pln_profile;
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_daemon::telemetry::Telemetry;
@@ -43,61 +45,61 @@ use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as Evidenc
 struct Args {
     #[arg(long, default_value = "127.0.0.1:50051")]
     listen: String,
-
     #[arg(long, default_value = "./data")]
     data_dir: String,
-
-    /// Deprecated: path to ETL log file. Use --data-dir instead.
     #[arg(long, hide = true)]
     etl_path: Option<String>,
-
     #[arg(long, default_value = "info")]
     log: String,
-
     #[arg(long, default_value_t = false)]
     durable_etl: bool,
-
     #[arg(long)]
     tls_cert: Option<String>,
-
     #[arg(long)]
     tls_key: Option<String>,
-
     #[arg(long)]
     mtls_client_ca: Option<String>,
-
     #[arg(long, default_value_t = false)]
     require_client_cert: bool,
-
     #[arg(long)]
     auth_token: Option<String>,
-
     #[arg(long)]
     auth_hmac_key: Option<String>,
-
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
     max_request_bytes: usize,
-
     #[arg(long, default_value = "127.0.0.1:9464")]
     metrics_listen: String,
-
     #[arg(long, default_value = "./oracles")]
     oracle_dir: String,
-
     #[arg(long)]
     trusted_oracle_keys: Option<String>,
-
     #[arg(long)]
     rpc_timeout_ms: Option<u64>,
-
     #[arg(long, default_value_t = false)]
     offline_settlement_ingest: bool,
-
     #[arg(long)]
     import_signed_settlements_dir: Option<String>,
-
     #[arg(long)]
     offline_settlement_verify_key_hex: Option<String>,
+
+    #[arg(long)]
+    preflight_http_listen: Option<String>,
+    #[arg(long, default_value_t = 16_384)]
+    preflight_max_body_bytes: usize,
+    #[arg(long)]
+    preflight_require_bearer_token: Option<String>,
+    #[arg(long, default_value_t = true)]
+    preflight_fail_open_for_low_risk: bool,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "exec,shell.exec,fs.write,fs.delete_tree,email.send,payment.charge"
+    )]
+    preflight_high_risk_tools: Vec<String>,
+    #[arg(long, default_value_t = 120)]
+    preflight_timeout_ms: u64,
+    #[arg(long, default_value_t = 50)]
+    preflight_rate_limit_rps: u32,
 }
 
 #[tokio::main]
@@ -115,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(args.log))
+        .with_env_filter(EnvFilter::new(args.log.clone()))
         .init();
 
     std::fs::create_dir_all(&args.data_dir)?;
@@ -124,6 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(profile) = load_pln_profile(std::path::Path::new(&args.data_dir))? {
         tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_cycles.p99_cycles, wasm_p99=%profile.wasm_instruction_cycles.p99_cycles, "loaded PLN profile");
+    }
     if let Some(src) = args.trusted_oracle_keys.as_deref() {
         let dst = std::path::Path::new(&args.data_dir).join("trusted_oracle_keys.json");
         std::fs::copy(src, dst)?;
@@ -145,10 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &oracle_aspec_policy,
         WasmOracleSandboxPolicy::default(),
     )?;
-    let loaded_oracles = registry.oracle_ids();
-    tracing::info!(count=%loaded_oracles.len(), "loaded oracle bundles");
+    tracing::info!(count=%registry.oracle_ids().len(), "loaded oracle bundles");
 
-    let svc = EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry)?;
+    let svc =
+        EvidenceOsService::build_with_options(&args.data_dir, args.durable_etl, telemetry.clone())?;
 
     if let Some(import_dir) = args.import_signed_settlements_dir.as_ref() {
         let key_hex = args.offline_settlement_verify_key_hex.as_ref().ok_or(
@@ -180,21 +183,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some(token), None) => Some(AuthConfig::BearerToken(token)),
         (None, Some(hmac)) => Some(AuthConfig::HmacKey(hmac.into_bytes())),
         (None, None) => None,
-        (Some(_), Some(_)) => unreachable!("validated above"),
+        (Some(_), Some(_)) => return Err("mutually exclusive auth already validated".into()),
     };
+
     let timeout = args.rpc_timeout_ms.map(Duration::from_millis);
     let interceptor = RequestGuard::new(auth, timeout);
-
-    tracing::info!(
-        %addr,
-        data_dir=%args.data_dir,
-        tls_enabled=%args.tls_cert.is_some(),
-        mtls_required=%args.require_client_cert,
-        max_request_bytes=%args.max_request_bytes,
-        auth_enabled=%(args.auth_token.is_some() || args.auth_hmac_key.is_some()),
-        metrics_addr=%metrics_addr,
-        "starting EvidenceOS gRPC server"
-    );
 
     let mut builder = tonic::transport::Server::builder();
     if let (Some(cert_path), Some(key_path)) = (args.tls_cert.as_ref(), args.tls_key.as_ref()) {
@@ -214,34 +207,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.tls_config(tls)?;
     }
 
-    #[cfg(unix)]
-    {
-        let svc_reload = svc.clone();
-        tokio::spawn(async move {
-            let mut hup =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-                    Ok(sig) => sig,
-                    Err(err) => {
-                        tracing::warn!(error=%err, "failed to install SIGHUP handler");
-                        return;
-                    }
-                };
-            while hup.recv().await.is_some() {
-                if let Err(err) = svc_reload.reload_operator_runtime_config() {
-                    tracing::warn!(error=%err, "failed to reload operator runtime config");
-                }
-            }
-        });
-    }
+    let daemon_cfg = DaemonConfig {
+        preflight_http_listen: args.preflight_http_listen.clone(),
+        preflight_max_body_bytes: args.preflight_max_body_bytes,
+        preflight_require_bearer_token: args.preflight_require_bearer_token.clone(),
+        preflight_fail_open_for_low_risk: args.preflight_fail_open_for_low_risk,
+        preflight_high_risk_tools: args.preflight_high_risk_tools.clone(),
+        preflight_timeout_ms: args.preflight_timeout_ms,
+        preflight_rate_limit_rps: args.preflight_rate_limit_rps,
+    };
 
-    builder
+    let (shutdown_tx, _) = broadcast::channel::<()>(2);
+    let mut grpc_shutdown_rx = shutdown_tx.subscribe();
+    let grpc = builder
         .add_service(EvidenceOsV2Server::with_interceptor(
             svc.clone(),
             interceptor.clone(),
         ))
-        .add_service(EvidenceOsV1Server::with_interceptor(svc, interceptor))
-        .serve(addr)
-        .await?;
+        .add_service(EvidenceOsV1Server::with_interceptor(
+            svc.clone(),
+            interceptor,
+        ))
+        .serve_with_shutdown(addr, async move {
+            let _ = grpc_shutdown_rx.recv().await;
+        });
+
+    let mut tasks = vec![tokio::spawn(async move {
+        grpc.await.map_err(|e| e.to_string())
+    })];
+
+    if let Some(http_listen) = daemon_cfg.preflight_http_listen.clone() {
+        let listener = http_preflight::bind_listener(&http_listen).await?;
+        let mut http_shutdown_rx = shutdown_tx.subscribe();
+        let preflight_state = http_preflight::build_state(
+            daemon_cfg,
+            telemetry,
+            svc.probe_detector(),
+            svc.policy_oracles(),
+        );
+        tasks.push(tokio::spawn(async move {
+            http_preflight::serve(listener, preflight_state, async move {
+                let _ = http_shutdown_rx.recv().await;
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }));
+    }
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            let _ = shutdown_tx.send(());
+        }
+        r = async {
+            for task in tasks {
+                let joined = task.await.map_err(|e| e.to_string())?;
+                joined?;
+            }
+            Ok::<(), String>(())
+        } => {
+            if let Err(err) = r {
+                return Err(err.into());
+            }
+        }
+    }
 
     Ok(())
 }

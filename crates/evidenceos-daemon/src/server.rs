@@ -515,6 +515,8 @@ impl EvidenceOsService {
             persist_all(&self.state)?;
         }
         Ok(applied)
+    }
+
     pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
         let next = load_operator_runtime_config(&self.state.data_path)?;
         let mut guard = self.state.operator_config.lock();
@@ -533,6 +535,13 @@ impl EvidenceOsService {
             "reloaded operator runtime config"
         );
         Ok(())
+    }
+    pub fn probe_detector(&self) -> Arc<Mutex<ProbeDetector>> {
+        self.probe_detector.clone()
+    }
+
+    pub fn policy_oracles(&self) -> Arc<Vec<PolicyOracleEngine>> {
+        self.policy_oracles.clone()
     }
 
     fn active_signing_key(&self) -> Result<&SigningKey, Status> {
