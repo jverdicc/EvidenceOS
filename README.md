@@ -44,6 +44,10 @@ For the highest-risk profiles (e.g., CBRN), UVP recommends restricting outputs t
 
 EvidenceOS is best understood as a verification kernel inside a larger secure system: host compromise, key theft, and hardware side-channels require standard isolation and deployment controls in addition to the protocol.
 
+## Architecture diagrams
+
+For high-level visual references of the vault/oracle internals and end-to-end UVP flow, see [`docs/ARCHITECTURE_DIAGRAMS.md`](docs/ARCHITECTURE_DIAGRAMS.md).
+
 
 ## Architecture: The Language Trade-off Matrix
 
