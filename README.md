@@ -406,3 +406,29 @@ Example contract fields:
   "eprocess": {"DirichletMultinomialMixture": {"alpha": [1.0, 1.0, 1.0, 1.0]}}
 }
 ```
+
+
+## Structured Claims + PhysHIR
+
+EvidenceOS supports strict structured-claim schemas with deterministic canonicalization:
+
+- typed and bounded fields (reject unknown keys and floats),
+- canonical JSON encoding with sorted keys,
+- PhysHIR unit parsing and SI-dimension checks for quantity fields.
+
+Example (non-sensitive):
+
+```json
+{
+  "schema_id": "cbrn-sc.v1",
+  "claim_id": "claim-001",
+  "event_time_unix": 1700000000,
+  "sensor_id": "sensor-a",
+  "location_id": "zone-1",
+  "measurement": "12.3 mmol/L",
+  "confidence_bps": 9800,
+  "reason_code": "WATCH"
+}
+```
+
+The `measurement` value is parsed into fixed-point form and checked against the schema-required physical dimension before acceptance.
