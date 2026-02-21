@@ -88,6 +88,8 @@ struct Args {
     offline_settlement_ingest: bool,
     #[arg(long, default_value_t = false)]
     insecure_synthetic_holdout: bool,
+    #[arg(long, default_value_t = false)]
+    allow_plaintext_holdouts: bool,
     #[arg(long)]
     import_signed_settlements_dir: Option<String>,
     #[arg(long)]
@@ -134,6 +136,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
     if args.offline_settlement_ingest {
         std::env::set_var("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", "1");
+    }
+    if args.allow_plaintext_holdouts {
+        std::env::set_var("EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS", "1");
+        tracing::warn!(
+            "plaintext holdout mode enabled; development-only and unsafe for production"
+        );
     }
     if args.insecure_synthetic_holdout {
         std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");

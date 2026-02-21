@@ -38,6 +38,7 @@ pub mod dlc;
 pub mod eprocess;
 pub mod error;
 pub mod etl;
+pub mod holdout_crypto;
 pub mod ledger;
 pub mod magnitude_envelope;
 pub mod nullspec;

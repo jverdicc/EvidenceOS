@@ -25,6 +25,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use parking_lot::Mutex;
 use prost::Message;
@@ -49,6 +52,7 @@ use evidenceos_core::crypto_transcripts::{revocations_snapshot_digest, sth_signa
 use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
 use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
+use evidenceos_core::holdout_crypto::{decrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
 use evidenceos_core::nullspec_contract::NullSpecContractV1 as RegistryNullSpecContractV1;
@@ -105,6 +109,7 @@ struct HoldoutDescriptor {
     handle: [u8; 32],
     len: usize,
     labels_hash: [u8; 32],
+    encryption_key_id: Option<String>,
 }
 
 trait HoldoutProvider: Send + Sync {
@@ -122,14 +127,23 @@ struct HoldoutManifest {
     encryption_key_id: Option<String>,
 }
 
-#[derive(Debug)]
 struct RegistryHoldoutProvider {
     root: PathBuf,
+    allow_plaintext: bool,
+    key_provider: Arc<dyn HoldoutKeyProvider>,
 }
 
 impl RegistryHoldoutProvider {
-    fn new(root: PathBuf) -> Self {
-        Self { root }
+    fn new(
+        root: PathBuf,
+        allow_plaintext: bool,
+        key_provider: Arc<dyn HoldoutKeyProvider>,
+    ) -> Self {
+        Self {
+            root,
+            allow_plaintext,
+            key_provider,
+        }
     }
 
     fn holdout_dir(&self, holdout_ref: &str) -> PathBuf {
@@ -171,17 +185,34 @@ impl HoldoutProvider for RegistryHoldoutProvider {
             handle,
             len: manifest.len,
             labels_hash,
+            encryption_key_id: manifest.encryption_key_id,
         })
     }
 
     fn load_labels(&self, descriptor: &HoldoutDescriptor) -> Result<Vec<u8>, Status> {
         let dir = self.holdout_dir(&descriptor.holdout_ref);
-        let mut labels_path = dir.join("labels.bin");
-        if !labels_path.exists() {
-            labels_path = dir.join("labels.enc");
-        }
-        let labels = std::fs::read(&labels_path)
-            .map_err(|_| Status::failed_precondition("holdout labels read failed"))?;
+        let labels = if let Some(key_id) = descriptor.encryption_key_id.as_deref() {
+            let labels_path = dir.join("labels.enc");
+            verify_holdout_permissions(&dir, &labels_path)?;
+            let payload = std::fs::read(&labels_path)
+                .map_err(|_| Status::failed_precondition("holdout labels read failed"))?;
+            let key = self
+                .key_provider
+                .key_for_id(key_id)
+                .map_err(|_| Status::failed_precondition("holdout key lookup failed"))?;
+            decrypt_holdout_labels(&payload, &key)
+                .map_err(|_| Status::failed_precondition("holdout labels decrypt failed"))?
+        } else {
+            if !self.allow_plaintext {
+                return Err(Status::failed_precondition(
+                    "plaintext holdouts disabled; set --allow-plaintext-holdouts for development only",
+                ));
+            }
+            let labels_path = dir.join("labels.bin");
+            verify_holdout_permissions(&dir, &labels_path)?;
+            std::fs::read(&labels_path)
+                .map_err(|_| Status::failed_precondition("holdout labels read failed"))?
+        };
         if labels.len() != descriptor.len {
             return Err(Status::failed_precondition("holdout label length mismatch"));
         }
@@ -200,6 +231,27 @@ impl HoldoutProvider for RegistryHoldoutProvider {
 #[derive(Debug)]
 struct SyntheticHoldoutProvider;
 
+fn verify_holdout_permissions(dir: &Path, file: &Path) -> Result<(), Status> {
+    #[cfg(unix)]
+    {
+        let dir_meta = std::fs::metadata(dir)
+            .map_err(|_| Status::failed_precondition("holdout directory metadata read failed"))?;
+        if dir_meta.permissions().mode() & 0o777 != 0o700 {
+            return Err(Status::failed_precondition(
+                "holdout directory permissions must be 0700",
+            ));
+        }
+        let file_meta = std::fs::metadata(file)
+            .map_err(|_| Status::failed_precondition("holdout file metadata read failed"))?;
+        if file_meta.permissions().mode() & 0o777 != 0o600 {
+            return Err(Status::failed_precondition(
+                "holdout label file permissions must be 0600",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl HoldoutProvider for SyntheticHoldoutProvider {
     fn resolve(&self, holdout_ref: &str) -> Result<HoldoutDescriptor, Status> {
         validate_holdout_ref(holdout_ref)?;
@@ -214,6 +266,7 @@ impl HoldoutProvider for SyntheticHoldoutProvider {
             handle: holdout_handle_id,
             len,
             labels_hash: sha256_bytes(&labels),
+            encryption_key_id: None,
         })
     }
 
@@ -874,7 +927,14 @@ impl EvidenceOsService {
         let holdout_provider: Arc<dyn HoldoutProvider> = if insecure_synthetic_holdout {
             Arc::new(SyntheticHoldoutProvider)
         } else {
-            Arc::new(RegistryHoldoutProvider::new(holdouts_root))
+            let allow_plaintext_holdouts = std::env::var("EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            Arc::new(RegistryHoldoutProvider::new(
+                holdouts_root,
+                allow_plaintext_holdouts,
+                Arc::new(EnvKeyProvider::new()),
+            ))
         };
         let dependence_tax_multiplier = std::env::var("EVIDENCEOS_DEPENDENCE_TAX_MULTIPLIER")
             .ok()
@@ -4687,16 +4747,30 @@ mod tests {
         handle: [u8; 32],
         labels: &[u8],
         manifest_hash: [u8; 32],
+        manifest_len: usize,
+        encryption_key_id: Option<&str>,
     ) {
         let dir = root.join("holdouts").join(holdout_ref);
         std::fs::create_dir_all(&dir).expect("mkdir holdout dir");
-        std::fs::write(dir.join("labels.bin"), labels).expect("write labels");
+        #[cfg(unix)]
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let labels_name = if encryption_key_id.is_some() {
+            "labels.enc"
+        } else {
+            "labels.bin"
+        };
+        let labels_path = dir.join(labels_name);
+        std::fs::write(&labels_path, labels).expect("write labels");
+        #[cfg(unix)]
+        std::fs::set_permissions(&labels_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod file");
         let manifest = serde_json::json!({
             "holdout_handle_hex": hex::encode(handle),
-            "len": labels.len(),
+            "len": manifest_len,
             "labels_sha256_hex": hex::encode(manifest_hash),
             "created_at_unix": 1,
             "schema_version": HOLDOUT_MANIFEST_SCHEMA_VERSION,
+            "encryption_key_id": encryption_key_id,
         });
         std::fs::write(
             dir.join("manifest.json"),
@@ -4749,6 +4823,106 @@ mod tests {
     }
 
     #[test]
+    fn registry_holdout_provider_decrypts_encrypted_labels() {
+        let dir = TempDir::new().expect("tmp");
+        let holdout_ref = "holdout-enc";
+        let handle = [3u8; 32];
+        let labels = vec![0, 1, 0, 1];
+        let key_id = "dev-main";
+        std::env::set_var(
+            "EVIDENCEOS_HOLDOUT_KEY_DEV_MAIN",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let key = [0x11u8; 32];
+        let encrypted = evidenceos_core::holdout_crypto::encrypt_holdout_labels(&labels, &key)
+            .expect("encrypt");
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &encrypted,
+            sha256_bytes(&labels),
+            labels.len(),
+            Some(key_id),
+        );
+
+        let provider = RegistryHoldoutProvider::new(
+            dir.path().join("holdouts"),
+            false,
+            Arc::new(EnvKeyProvider::new()),
+        );
+        let desc = provider.resolve(holdout_ref).expect("resolve");
+        let out = provider.load_labels(&desc).expect("decrypt labels");
+        assert_eq!(out, labels);
+    }
+
+    #[test]
+    fn registry_holdout_provider_fails_closed_when_key_missing() {
+        let dir = TempDir::new().expect("tmp");
+        let holdout_ref = "holdout-missing-key";
+        let handle = [4u8; 32];
+        let labels = vec![1, 0, 1, 0];
+        let key = [0x22u8; 32];
+        let encrypted = evidenceos_core::holdout_crypto::encrypt_holdout_labels(&labels, &key)
+            .expect("encrypt");
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &encrypted,
+            sha256_bytes(&labels),
+            labels.len(),
+            Some("missing-key"),
+        );
+        std::env::remove_var("EVIDENCEOS_HOLDOUT_KEY_MISSING_KEY");
+
+        let provider = RegistryHoldoutProvider::new(
+            dir.path().join("holdouts"),
+            false,
+            Arc::new(EnvKeyProvider::new()),
+        );
+        let desc = provider.resolve(holdout_ref).expect("resolve");
+        let err = provider
+            .load_labels(&desc)
+            .expect_err("missing key must fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(err.message(), "holdout key lookup failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_holdout_provider_rejects_weak_permissions() {
+        let dir = TempDir::new().expect("tmp");
+        let holdout_ref = "holdout-perms";
+        let handle = [5u8; 32];
+        let labels = vec![0, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+        let holdout_dir = dir.path().join("holdouts").join(holdout_ref);
+        std::fs::set_permissions(&holdout_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod dir weak");
+
+        let provider = RegistryHoldoutProvider::new(
+            dir.path().join("holdouts"),
+            true,
+            Arc::new(EnvKeyProvider::new()),
+        );
+        let desc = provider.resolve(holdout_ref).expect("resolve");
+        let err = provider
+            .load_labels(&desc)
+            .expect_err("weak permissions must fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert_eq!(err.message(), "holdout directory permissions must be 0700");
+    }
+
+    #[test]
     fn vault_context_rejects_holdout_label_hash_mismatch() {
         let dir = TempDir::new().expect("tmp");
         let holdout_ref = "holdout-a";
@@ -4761,8 +4935,14 @@ mod tests {
             handle,
             &wrong_labels,
             sha256_bytes(&expected_labels),
+            expected_labels.len(),
+            None,
         );
-        let provider = RegistryHoldoutProvider::new(dir.path().join("holdouts"));
+        let provider = RegistryHoldoutProvider::new(
+            dir.path().join("holdouts"),
+            true,
+            Arc::new(EnvKeyProvider::new()),
+        );
         let claim = Claim {
             claim_id: [0; 32],
             topic_id: [0; 32],
