@@ -15,7 +15,7 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,7 +34,8 @@ const MAX_SCOPES_HEADER_LEN: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalRole {
     Operator,
-    Client,
+    Auditor,
+    Agent,
 }
 
 #[derive(Debug, Clone)]
@@ -47,12 +48,26 @@ impl CallerIdentity {
     pub fn is_operator(&self) -> bool {
         self.role == PrincipalRole::Operator
     }
+
+    pub fn is_auditor(&self) -> bool {
+        self.role == PrincipalRole::Auditor
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum AuthConfig {
     BearerToken(String),
+    BearerRoleTokens {
+        agent_tokens: HashSet<String>,
+        auditor_tokens: HashSet<String>,
+    },
     HmacKey(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthenticatedRole {
+    Auditor,
+    Agent,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +87,11 @@ impl RequestGuard {
     }
 
     #[allow(clippy::result_large_err)]
-    fn validate_auth(&self, metadata: &MetadataMap, path: &str) -> Result<(), Status> {
+    fn validate_auth(
+        &self,
+        metadata: &MetadataMap,
+        path: &str,
+    ) -> Result<AuthenticatedRole, Status> {
         match &self.auth {
             Some(AuthConfig::BearerToken(expected)) => {
                 let Some(header) = metadata.get("authorization") else {
@@ -87,7 +106,28 @@ impl RequestGuard {
                 if provided != expected {
                     return Err(Status::unauthenticated("invalid bearer token"));
                 }
-                Ok(())
+                Ok(AuthenticatedRole::Auditor)
+            }
+            Some(AuthConfig::BearerRoleTokens {
+                agent_tokens,
+                auditor_tokens,
+            }) => {
+                let Some(header) = metadata.get("authorization") else {
+                    return Err(Status::unauthenticated("missing authorization"));
+                };
+                let Ok(header) = header.to_str() else {
+                    return Err(Status::unauthenticated("invalid authorization header"));
+                };
+                let Some(provided) = header.strip_prefix("Bearer ") else {
+                    return Err(Status::unauthenticated("invalid bearer token"));
+                };
+                if auditor_tokens.contains(provided) {
+                    return Ok(AuthenticatedRole::Auditor);
+                }
+                if agent_tokens.contains(provided) {
+                    return Ok(AuthenticatedRole::Agent);
+                }
+                Err(Status::unauthenticated("invalid bearer token"))
             }
             Some(AuthConfig::HmacKey(secret)) => {
                 if path == "unknown" {
@@ -121,9 +161,9 @@ impl RequestGuard {
                 if !self.replay_cache.check_and_insert(req_id) {
                     return Err(Status::unauthenticated("replayed x-request-id"));
                 }
-                Ok(())
+                Ok(AuthenticatedRole::Agent)
             }
-            None => Ok(()),
+            None => Ok(AuthenticatedRole::Agent),
         }
     }
 
@@ -141,7 +181,16 @@ impl Interceptor for RequestGuard {
             .get::<GrpcMethod<'static>>()
             .map(|m| format!("/{}/{}", m.service(), m.method()))
             .unwrap_or_else(|| "unknown".to_string());
-        self.validate_auth(request.metadata(), &method)?;
+        let role = self.validate_auth(request.metadata(), &method)?;
+        request.metadata_mut().insert(
+            "x-evidenceos-auth-role",
+            match role {
+                AuthenticatedRole::Auditor => {
+                    tonic::metadata::MetadataValue::from_static("auditor")
+                }
+                AuthenticatedRole::Agent => tonic::metadata::MetadataValue::from_static("agent"),
+            },
+        );
 
         let req_id = read_request_id(request.metadata());
         if let Some(req_id) = req_id {
@@ -339,14 +388,30 @@ pub fn derive_caller_identity(metadata: &MetadataMap) -> CallerIdentity {
             ),
             role: if san_operator || fp_operator {
                 PrincipalRole::Operator
+            } else if san.to_ascii_lowercase().contains("role=auditor") {
+                PrincipalRole::Auditor
             } else {
-                PrincipalRole::Client
+                PrincipalRole::Agent
             },
         };
     }
 
     if let Some(v) = metadata.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(token) = v.strip_prefix("Bearer ") {
+            if let Some(role) = metadata
+                .get("x-evidenceos-auth-role")
+                .and_then(|v| v.to_str().ok())
+            {
+                let role = match role {
+                    "operator" => PrincipalRole::Operator,
+                    "auditor" => PrincipalRole::Auditor,
+                    _ => PrincipalRole::Agent,
+                };
+                return CallerIdentity {
+                    principal_id: format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes()))),
+                    role,
+                };
+            }
             let scopes_header = metadata
                 .get("x-evidenceos-token-scopes")
                 .and_then(|v| v.to_str().ok())
@@ -356,12 +421,18 @@ pub fn derive_caller_identity(metadata: &MetadataMap) -> CallerIdentity {
                 .split([',', ' '])
                 .filter(|s| !s.is_empty())
                 .any(|s| s.eq_ignore_ascii_case("operator"));
+            let is_auditor = scopes_header
+                .split([',', ' '])
+                .filter(|s| !s.is_empty())
+                .any(|s| s.eq_ignore_ascii_case("auditor"));
             return CallerIdentity {
                 principal_id: format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes()))),
                 role: if is_operator {
                     PrincipalRole::Operator
+                } else if is_auditor {
+                    PrincipalRole::Auditor
                 } else {
-                    PrincipalRole::Client
+                    PrincipalRole::Agent
                 },
             };
         }
@@ -373,13 +444,13 @@ pub fn derive_caller_identity(metadata: &MetadataMap) -> CallerIdentity {
     {
         return CallerIdentity {
             principal_id: format!("hmac:{}", hex::encode(sha256_bytes(v.as_bytes()))),
-            role: PrincipalRole::Client,
+            role: PrincipalRole::Agent,
         };
     }
 
     CallerIdentity {
         principal_id: "anonymous".to_string(),
-        role: PrincipalRole::Client,
+        role: PrincipalRole::Agent,
     }
 }
 

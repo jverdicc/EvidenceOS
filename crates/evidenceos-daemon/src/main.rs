@@ -65,6 +65,10 @@ struct Args {
     require_client_cert: bool,
     #[arg(long)]
     auth_token: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    agent_tokens: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    auditor_tokens: Vec<String>,
     #[arg(long)]
     auth_hmac_key: Option<String>,
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
@@ -260,6 +264,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
         return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());
     }
+    if args.auth_token.is_some()
+        && (!args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty())
+    {
+        return Err(
+            "--auth-token is mutually exclusive with --agent-tokens/--auditor-tokens".into(),
+        );
+    }
+    if !args.agent_tokens.is_empty() && args.auth_hmac_key.is_some() {
+        return Err("--agent-tokens and --auth-hmac-key are mutually exclusive".into());
+    }
+    if !args.auditor_tokens.is_empty() && args.auth_hmac_key.is_some() {
+        return Err("--auditor-tokens and --auth-hmac-key are mutually exclusive".into());
+    }
+    if !args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty() {
+        if args.agent_tokens.iter().any(|t| t.trim().is_empty())
+            || args.auditor_tokens.iter().any(|t| t.trim().is_empty())
+        {
+            return Err("role token lists must not contain empty entries".into());
+        }
+    }
     if args.require_client_cert && args.mtls_client_ca.is_none() {
         return Err("--require-client-cert requires --mtls-client-ca".into());
     }
@@ -267,11 +291,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--tls-cert and --tls-key must be provided together".into());
     }
 
-    let auth = match (args.auth_token.clone(), args.auth_hmac_key.clone()) {
-        (Some(token), None) => Some(AuthConfig::BearerToken(token)),
-        (None, Some(hmac)) => Some(AuthConfig::HmacKey(hmac.into_bytes())),
-        (None, None) => None,
-        (Some(_), Some(_)) => return Err("mutually exclusive auth already validated".into()),
+    let auth = if !args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty() {
+        Some(AuthConfig::BearerRoleTokens {
+            agent_tokens: args
+                .agent_tokens
+                .iter()
+                .map(|t| t.trim().to_string())
+                .collect(),
+            auditor_tokens: args
+                .auditor_tokens
+                .iter()
+                .map(|t| t.trim().to_string())
+                .collect(),
+        })
+    } else {
+        match (args.auth_token.clone(), args.auth_hmac_key.clone()) {
+            (Some(token), None) => Some(AuthConfig::BearerToken(token)),
+            (None, Some(hmac)) => Some(AuthConfig::HmacKey(hmac.into_bytes())),
+            (None, None) => None,
+            (Some(_), Some(_)) => return Err("mutually exclusive auth already validated".into()),
+        }
     };
 
     let timeout = args.rpc_timeout_ms.map(Duration::from_millis);

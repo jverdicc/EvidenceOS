@@ -90,6 +90,8 @@ const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
+const MAX_PRINCIPAL_ID_LEN: usize = 256;
+const MAX_CREDIT_REASON_LEN: usize = 256;
 const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
@@ -1616,6 +1618,24 @@ impl EvidenceOsService {
 
     fn caller_identity(metadata: &tonic::metadata::MetadataMap) -> CallerIdentity {
         derive_caller_identity(metadata)
+    }
+
+    fn principal_id_from_metadata(metadata: &tonic::metadata::MetadataMap) -> String {
+        Self::caller_identity(metadata).principal_id
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn require_auditor_role(caller: &CallerIdentity, rpc_name: &str) -> Result<(), Status> {
+        if caller.is_operator() || caller.is_auditor() {
+            return Ok(());
+        }
+        tracing::warn!(
+            target: "evidenceos.authz",
+            rpc = rpc_name,
+            caller_principal_id = %caller.principal_id,
+            "AUTHZ_AUDITOR_ROLE_REQUIRED",
+        );
+        Err(Status::permission_denied("auditor role required"))
     }
 
     #[allow(clippy::result_large_err)]
