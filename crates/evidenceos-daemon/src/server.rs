@@ -36,6 +36,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::accounting::{
+    AccessCreditPricing, AccountStore, AdmissionProvider, StaticAdmissionProvider,
+};
 use crate::auth::{derive_caller_identity, CallerIdentity};
 use crate::config::OracleTtlPolicy;
 use crate::key_management::{load_signing_key_from_kms, SigningKeySource};
@@ -780,6 +783,7 @@ struct KernelState {
     keyring: HashMap<[u8; 32], SigningKey>,
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
     operator_config: Mutex<OperatorRuntimeConfig>,
+    account_store: Mutex<AccountStore>,
     nullspec_registry_state: Mutex<NullSpecRegistryState>,
     execute_claim_v2_idempotency: Mutex<HashMap<(String, String), IdempotencyEntry>>,
 }
@@ -827,6 +831,9 @@ pub struct EvidenceOsService {
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
     domain_safety: DomainSafetyConfig,
     trial_router: Arc<TrialRouter>,
+    admission_provider: Arc<dyn AdmissionProvider>,
+    access_credit_pricing: AccessCreditPricing,
+    operator_principals: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1151,6 +1158,9 @@ impl EvidenceOsService {
             tee_attestor,
             domain_safety,
             trial_router: Arc::new(TrialRouter::new(2, true, HashMap::new())?),
+            admission_provider,
+            access_credit_pricing: AccessCreditPricing::from_env(),
+            operator_principals,
         })
     }
 
