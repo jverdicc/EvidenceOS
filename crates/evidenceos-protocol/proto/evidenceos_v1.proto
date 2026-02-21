@@ -21,10 +21,15 @@ package evidenceos.v1;
 
 service EvidenceOS {
   rpc Health(HealthRequest) returns (HealthResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
   rpc CreateClaim(CreateClaimRequest) returns (CreateClaimResponse);
   rpc CreateClaimV2(CreateClaimV2Request) returns (CreateClaimV2Response);
   rpc CommitArtifacts(CommitArtifactsRequest) returns (CommitArtifactsResponse);
+  // Deprecated alias maintained for DiscOS compatibility. Prefer FreezeGates.
+  rpc Freeze(FreezeRequest) returns (FreezeResponse);
   rpc FreezeGates(FreezeGatesRequest) returns (FreezeGatesResponse);
+  // Deprecated alias maintained for DiscOS compatibility. Prefer SealClaim.
+  rpc Seal(SealRequest) returns (SealResponse);
   rpc SealClaim(SealClaimRequest) returns (SealClaimResponse);
   rpc ExecuteClaim(ExecuteClaimRequest) returns (ExecuteClaimResponse);
   rpc ExecuteClaimV2(ExecuteClaimV2Request) returns (ExecuteClaimV2Response);
@@ -45,6 +50,27 @@ service EvidenceOS {
 message HealthRequest {}
 message HealthResponse {
   string status = 1;
+}
+
+message GetServerInfoRequest {}
+
+message FeatureFlags {
+  bool tls_enabled = 1;
+  bool mtls_enabled = 2;
+  bool oracle_registry_enabled = 3;
+  bool insecure_v1_enabled = 4;
+  bool synthetic_holdout_enabled = 5;
+  bool offline_settlement_ingest_enabled = 6;
+  bool disjointness_attestation_required = 7;
+}
+
+message GetServerInfoResponse {
+  string protocol_semver = 1;
+  string proto_hash = 2;
+  string build_git_commit = 3;
+  string build_time_utc = 4;
+  string daemon_version = 5;
+  FeatureFlags feature_flags = 6;
 }
 
 enum ClaimState {
@@ -131,7 +157,15 @@ message FreezeGatesRequest {
   bytes claim_id = 1;
 }
 
+message FreezeRequest {
+  bytes claim_id = 1;
+}
+
 message FreezeGatesResponse {
+  ClaimState state = 1;
+}
+
+message FreezeResponse {
   ClaimState state = 1;
 }
 
@@ -139,7 +173,15 @@ message SealClaimRequest {
   bytes claim_id = 1;
 }
 
+message SealRequest {
+  bytes claim_id = 1;
+}
+
 message SealClaimResponse {
+  ClaimState state = 1;
+}
+
+message SealResponse {
   ClaimState state = 1;
 }
 

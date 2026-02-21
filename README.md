@@ -324,6 +324,8 @@ EvidenceOS exposes gRPC/Protobuf APIs defined in:
 
 Versioning and deprecation policy are documented in `docs/PROTOCOL_VERSIONING.md`.
 
+Compatibility statement: DiscOS clients should call `GetServerInfo` during connect and verify both protocol major-version compatibility and `proto_hash` equality before issuing lifecycle RPCs. EvidenceOS exposes deprecated `Freeze`/`Seal` aliases that route to `FreezeGates`/`SealClaim` for backward compatibility.
+
 The [DiscOS repository](https://github.com/jverdicc/DiscOS) includes:
 
 - a Rust client
