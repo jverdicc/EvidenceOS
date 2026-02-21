@@ -239,6 +239,13 @@ A commonly reported class of incidents is high-volume prompting campaigns intend
 - **Architecture specified:** DiscOS↔EvidenceOS split, ASPEC admissibility boundary, topic-budget anti-sybil model, and lane-based settlement controls.
 - **Roadmap:** stronger production hardening around key lifecycle/rotation, expanded policy packs, and additional end-to-end adversarial simulation suites.
 
+## Implementation status (paper ↔ code)
+
+To avoid review-time ambiguity between paper artifact snapshots and current mainline code, use:
+
+- [`docs/PAPER_VS_CODE.md`](docs/PAPER_VS_CODE.md) for the living parity matrix (paper claim → repo implementation → status).
+- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for additional implementation guardrail notes.
+
 ## Verification Matrix
 
 | Use case category | Adversarial vector (high-level) | EvidenceOS mechanism(s) | Mitigation / outcome | Status | Evidence |
