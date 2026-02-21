@@ -17,7 +17,7 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -791,6 +791,79 @@ pub struct EvidenceOsService {
     require_disjointness_attestation: bool,
     enforce_operator_provenance: bool,
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
+    domain_safety: DomainSafetyConfig,
+}
+
+#[derive(Debug, Clone)]
+struct DomainSafetyConfig {
+    require_structured_outputs: bool,
+    require_structured_output_domains: HashSet<String>,
+    deny_free_text_outputs: bool,
+    force_heavy_lane_on_domain: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainSafetyDecision {
+    Allow,
+    ForceHeavyLane,
+    Reject,
+}
+
+impl DomainSafetyConfig {
+    fn from_env(production_mode: bool) -> Self {
+        Self {
+            require_structured_outputs: env_flag("EVIDENCEOS_REQUIRE_STRUCTURED_OUTPUTS", true),
+            require_structured_output_domains: env_domain_set(
+                "EVIDENCEOS_REQUIRE_STRUCTURED_OUTPUTS_DOMAINS",
+                "CBRN",
+            ),
+            deny_free_text_outputs: env_flag("EVIDENCEOS_DENY_FREE_TEXT_OUTPUTS", production_mode),
+            force_heavy_lane_on_domain: env_domain_set(
+                "EVIDENCEOS_FORCE_HEAVY_LANE_ON_DOMAIN",
+                "CBRN",
+            ),
+        }
+    }
+
+    fn decision_for(
+        &self,
+        domain: &str,
+        output_schema_id: &str,
+        lane: Lane,
+    ) -> DomainSafetyDecision {
+        let normalized_domain = domain.trim().to_ascii_uppercase();
+        if self.deny_free_text_outputs && output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
+            return DomainSafetyDecision::Reject;
+        }
+        if self.require_structured_outputs
+            && self
+                .require_structured_output_domains
+                .contains(&normalized_domain)
+            && output_schema_id != structured_claims::SCHEMA_ID
+        {
+            return DomainSafetyDecision::Reject;
+        }
+        if self.force_heavy_lane_on_domain.contains(&normalized_domain) && lane != Lane::Heavy {
+            return DomainSafetyDecision::ForceHeavyLane;
+        }
+        DomainSafetyDecision::Allow
+    }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(default)
+}
+
+fn env_domain_set(name: &str, default: &str) -> HashSet<String> {
+    std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .collect()
 }
 
 impl EvidenceOsService {
@@ -874,6 +947,7 @@ impl EvidenceOsService {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let enforce_operator_provenance = production_mode && require_disjointness_attestation;
+        let domain_safety = DomainSafetyConfig::from_env(production_mode);
 
         let operator_config = load_operator_runtime_config(&root, enforce_operator_provenance)?;
 
@@ -1016,7 +1090,39 @@ impl EvidenceOsService {
             require_disjointness_attestation,
             enforce_operator_provenance,
             tee_attestor,
+            domain_safety,
         })
+    }
+
+    fn domain_for_policy(
+        &self,
+        claim_name: &str,
+        holdout_ref: &str,
+        nullspec_id_hex: &str,
+    ) -> Result<String, Status> {
+        let nullspec_store = NullSpecStore::open(&self.state.data_path)
+            .map_err(|_| Status::internal("nullspec store init failed"))?;
+        let active_id = if nullspec_id_hex.is_empty() {
+            nullspec_store
+                .active_for(claim_name, holdout_ref)
+                .map_err(|_| Status::internal("nullspec mapping read failed"))?
+        } else {
+            let decoded = hex::decode(nullspec_id_hex)
+                .map_err(|_| Status::invalid_argument("invalid nullspec_id hex"))?;
+            Some(
+                decoded
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Status::invalid_argument("invalid nullspec_id length"))?,
+            )
+        };
+        if let Some(active_id) = active_id {
+            let contract = nullspec_store
+                .get(&active_id)
+                .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
+            return Ok(contract.domain);
+        }
+        Ok("UNSPECIFIED".to_string())
     }
 
     fn synthetic_holdout_enabled(&self) -> bool {
@@ -3508,6 +3614,23 @@ impl EvidenceOsV2 for EvidenceOsService {
             self.telemetry
                 .record_lane_escalation(Self::lane_name(requested), Self::lane_name(lane));
         }
+        let domain = self.domain_for_policy(&req.claim_name, &req.holdout_ref, &nullspec_id)?;
+        let lane = match self
+            .domain_safety
+            .decision_for(&domain, &canonical_output_schema_id, lane)
+        {
+            DomainSafetyDecision::Allow => lane,
+            DomainSafetyDecision::ForceHeavyLane => {
+                self.telemetry
+                    .record_lane_escalation(Self::lane_name(lane), Self::lane_name(Lane::Heavy));
+                Lane::Heavy
+            }
+            DomainSafetyDecision::Reject => {
+                return Err(Status::failed_precondition(
+                    "domain policy requires CBRN_SC_V1 structured outputs",
+                ));
+            }
+        };
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let claim_pln_cfg = claim_pln_config(lane, &pln_cfg)?;
         let ledger = ConservationLedger::new(alpha)
@@ -4735,6 +4858,29 @@ mod tests {
         assert!(matches!(fast.aspec_policy.lane, AspecLane::HighAssurance));
         assert!(matches!(heavy.aspec_policy.lane, AspecLane::LowAssurance));
         assert!(heavy.aspec_policy.max_loop_bound >= fast.aspec_policy.max_loop_bound);
+    }
+
+    #[test]
+    fn domain_safety_policy_rejects_unsafe_modes_for_high_risk_domain() {
+        let cfg = DomainSafetyConfig {
+            require_structured_outputs: true,
+            require_structured_output_domains: HashSet::from(["CBRN".to_string()]),
+            deny_free_text_outputs: true,
+            force_heavy_lane_on_domain: HashSet::from(["CBRN".to_string()]),
+        };
+
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::LEGACY_SCHEMA_ID, Lane::Fast),
+            DomainSafetyDecision::Reject
+        );
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::SCHEMA_ID, Lane::Fast),
+            DomainSafetyDecision::ForceHeavyLane
+        );
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::SCHEMA_ID, Lane::Heavy),
+            DomainSafetyDecision::Allow
+        );
     }
 
     #[test]
