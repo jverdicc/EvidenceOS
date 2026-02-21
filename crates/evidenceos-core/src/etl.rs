@@ -20,7 +20,7 @@ use crate::error::{EvidenceOSError, EvidenceOSResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -291,53 +291,17 @@ pub struct RevocationEntry {
     pub revoked_at_index: u64,
 }
 
-fn rebuild_revocation_closure(entries: &[Vec<u8>]) -> HashSet<String> {
-    let mut revoked_roots = Vec::new();
-    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-
-    for data in entries {
-        if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(data) {
-            if !revocation.capsule_hash_hex.is_empty() {
-                revoked_roots.push(revocation.capsule_hash_hex);
-            }
-            continue;
-        }
-        if let Ok(capsule) = serde_json::from_slice::<ClaimCapsule>(data) {
-            if let Ok(capsule_hash) = capsule.capsule_hash_hex() {
-                for parent_hash in capsule.dependency_capsule_hashes {
-                    adjacency
-                        .entry(parent_hash)
-                        .or_default()
-                        .push(capsule_hash.clone());
-                }
-            }
-        }
-    }
-
-    let mut revoked = HashSet::new();
-    let mut queue = VecDeque::new();
-    for root in revoked_roots {
-        queue.push_back(root);
-    }
-    while let Some(cur) = queue.pop_front() {
-        if !revoked.insert(cur.clone()) {
-            continue;
-        }
-        if let Some(children) = adjacency.get(&cur) {
-            for child in children {
-                queue.push_back(child.clone());
-            }
-        }
-    }
-    revoked
-}
-
 #[derive(Debug)]
 pub struct Etl {
     path: PathBuf,
+    leaf_hash_path: PathBuf,
+    levels_dir: PathBuf,
     file: File,
-    leaves: Vec<Hash32>,
     offsets: Vec<u64>,
+    tree_size: u64,
+    peaks: Vec<Option<Hash32>>,
+    adjacency: HashMap<String, Vec<String>>,
+    revoked_roots: HashSet<String>,
     revoked: HashSet<String>,
     recovered_from_partial_write: bool,
     durable: bool,
@@ -350,7 +314,100 @@ fn record_checksum(len_bytes: [u8; 4], payload: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+fn level_path(levels_dir: &Path, level: usize) -> PathBuf {
+    levels_dir.join(format!("level_{level}.bin"))
+}
+
+fn append_hash_to_file(path: &Path, hash: &Hash32) -> EvidenceOSResult<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|_| EvidenceOSError::Internal)?;
+    file.write_all(hash).map_err(|_| EvidenceOSError::Internal)
+}
+
+fn read_hash_from_file(path: &Path, index: u64) -> EvidenceOSResult<Hash32> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|_| EvidenceOSError::Internal)?;
+    file.seek(SeekFrom::Start(index.saturating_mul(32)))
+        .map_err(|_| EvidenceOSError::Internal)?;
+    let mut hash = [0u8; 32];
+    file.read_exact(&mut hash)
+        .map_err(|_| EvidenceOSError::Internal)?;
+    Ok(hash)
+}
+
+fn derived_path(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{}", path.display(), suffix))
+}
+
 impl Etl {
+    fn append_peak_hash(&mut self, leaf: Hash32) -> EvidenceOSResult<()> {
+        append_hash_to_file(&level_path(&self.levels_dir, 0), &leaf)?;
+        let mut carry = leaf;
+        let mut level = 0usize;
+        let mut n = self.tree_size;
+        while n & 1 == 1 {
+            let left = self
+                .peaks
+                .get(level)
+                .and_then(|v| *v)
+                .ok_or(EvidenceOSError::Internal)?;
+            carry = node_hash(&left, &carry);
+            self.peaks[level] = None;
+            level += 1;
+            n >>= 1;
+            append_hash_to_file(&level_path(&self.levels_dir, level), &carry)?;
+        }
+        if self.peaks.len() <= level {
+            self.peaks.resize(level + 1, None);
+        }
+        self.peaks[level] = Some(carry);
+        self.tree_size += 1;
+        Ok(())
+    }
+
+    fn record_revocation_indexes(&mut self, data: &[u8]) {
+        if let Ok(revocation) = serde_json::from_slice::<RevocationEntry>(data) {
+            if !revocation.capsule_hash_hex.is_empty() {
+                self.revoked_roots.insert(revocation.capsule_hash_hex);
+            }
+            return;
+        }
+        if let Ok(capsule) = serde_json::from_slice::<ClaimCapsule>(data) {
+            if let Ok(capsule_hash) = capsule.capsule_hash_hex() {
+                for parent_hash in capsule.dependency_capsule_hashes {
+                    self.adjacency
+                        .entry(parent_hash)
+                        .or_default()
+                        .push(capsule_hash.clone());
+                }
+            }
+        }
+    }
+
+    fn rebuild_revoked_set(&mut self) {
+        let mut revoked = HashSet::new();
+        let mut queue = VecDeque::new();
+        for root in &self.revoked_roots {
+            queue.push_back(root.clone());
+        }
+        while let Some(cur) = queue.pop_front() {
+            if !revoked.insert(cur.clone()) {
+                continue;
+            }
+            if let Some(children) = self.adjacency.get(&cur) {
+                for child in children {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+        self.revoked = revoked;
+    }
+
     pub fn open_or_create(path: impl AsRef<Path>) -> EvidenceOSResult<Self> {
         Self::open_or_create_with_options(path, false)
     }
@@ -360,16 +417,16 @@ impl Etl {
         durable: bool,
     ) -> EvidenceOSResult<Self> {
         let path = path.as_ref().to_path_buf();
+        let leaf_hash_path = derived_path(&path, ".leaves");
+        let levels_dir = derived_path(&path, ".levels");
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&path)
             .map_err(|_| EvidenceOSError::Internal)?;
-        let mut leaves = Vec::new();
-        let mut offsets = Vec::new();
+        let offsets = Vec::new();
         let mut pos = 0u64;
-        let mut all_entries = Vec::new();
         let mut recovered_from_partial_write = false;
 
         let mut reader = BufReader::new(
@@ -384,16 +441,35 @@ impl Etl {
             .map_err(|_| EvidenceOSError::Internal)?
             .len();
 
+        let _ = fs::remove_file(&leaf_hash_path);
+        let _ = fs::remove_dir_all(&levels_dir);
+        fs::create_dir_all(&levels_dir).map_err(|_| EvidenceOSError::Internal)?;
+
+        let mut etl = Self {
+            path,
+            leaf_hash_path,
+            levels_dir,
+            file,
+            offsets,
+            tree_size: 0,
+            peaks: Vec::new(),
+            adjacency: HashMap::new(),
+            revoked_roots: HashSet::new(),
+            revoked: HashSet::new(),
+            recovered_from_partial_write: false,
+            durable,
+        };
+
         loop {
             if pos >= file_len {
                 break;
             }
-            offsets.push(pos);
+            etl.offsets.push(pos);
             let mut len_bytes = [0u8; 4];
             match reader.read_exact(&mut len_bytes) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    offsets.pop();
+                    etl.offsets.pop();
                     recovered_from_partial_write = true;
                     break;
                 }
@@ -402,20 +478,20 @@ impl Etl {
             let len = u32::from_le_bytes(len_bytes) as usize;
             let record_end = pos.saturating_add(8).saturating_add(len as u64);
             if record_end > file_len {
-                offsets.pop();
+                etl.offsets.pop();
                 recovered_from_partial_write = true;
                 break;
             }
 
             let mut data = vec![0u8; len];
             if reader.read_exact(&mut data).is_err() {
-                offsets.pop();
+                etl.offsets.pop();
                 recovered_from_partial_write = true;
                 break;
             }
             let mut checksum_bytes = [0u8; 4];
             if reader.read_exact(&mut checksum_bytes).is_err() {
-                offsets.pop();
+                etl.offsets.pop();
                 recovered_from_partial_write = true;
                 break;
             }
@@ -423,31 +499,28 @@ impl Etl {
             let expected = u32::from_le_bytes(checksum_bytes);
             let actual = record_checksum(len_bytes, &data);
             if expected != actual {
-                offsets.pop();
+                etl.offsets.pop();
                 recovered_from_partial_write = true;
                 break;
             }
 
-            leaves.push(leaf_hash(&data));
-            all_entries.push(data);
+            let leaf = leaf_hash(&data);
+            append_hash_to_file(&etl.leaf_hash_path, &leaf)?;
+            etl.append_peak_hash(leaf)?;
+            etl.record_revocation_indexes(&data);
             pos = record_end;
         }
 
         if recovered_from_partial_write {
-            file.set_len(pos).map_err(|_| EvidenceOSError::Internal)?;
-            file.sync_all().map_err(|_| EvidenceOSError::Internal)?;
+            etl.file
+                .set_len(pos)
+                .map_err(|_| EvidenceOSError::Internal)?;
+            etl.file.sync_all().map_err(|_| EvidenceOSError::Internal)?;
         }
 
-        let revoked = rebuild_revocation_closure(&all_entries);
-        Ok(Self {
-            path,
-            file,
-            leaves,
-            offsets,
-            revoked,
-            recovered_from_partial_write,
-            durable,
-        })
+        etl.recovered_from_partial_write = recovered_from_partial_write;
+        etl.rebuild_revoked_set();
+        Ok(etl)
     }
 
     pub fn append(&mut self, data: &[u8]) -> EvidenceOSResult<(u64, Hash32)> {
@@ -475,8 +548,11 @@ impl Etl {
         }
         self.offsets.push(start);
         let h = leaf_hash(data);
-        let idx = self.leaves.len() as u64;
-        self.leaves.push(h);
+        let idx = self.tree_size;
+        append_hash_to_file(&self.leaf_hash_path, &h)?;
+        self.append_peak_hash(h)?;
+        self.record_revocation_indexes(data);
+        self.rebuild_revoked_set();
         Ok((idx, h))
     }
 
@@ -500,12 +576,7 @@ impl Etl {
             revoked_at_index: next_idx,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|_| EvidenceOSError::Internal)?;
-        let appended = self.append(&bytes)?;
-        self.revoked.insert(capsule_hash_hex.to_string());
-        for descendant in self.taint_descendants(capsule_hash_hex) {
-            self.revoked.insert(descendant);
-        }
-        Ok(appended)
+        self.append(&bytes)
     }
 
     pub fn is_revoked(&self, capsule_hash_hex: &str) -> bool {
@@ -513,23 +584,6 @@ impl Etl {
     }
 
     pub fn taint_descendants(&mut self, root_hash: &str) -> Vec<String> {
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-        for index in 0..self.tree_size() {
-            let Ok(entry) = self.read_entry(index) else {
-                continue;
-            };
-            let Ok(capsule) = serde_json::from_slice::<ClaimCapsule>(&entry) else {
-                continue;
-            };
-            let Ok(capsule_hash) = capsule.capsule_hash_hex() else {
-                continue;
-            };
-            for parent_hash in capsule.dependency_capsule_hashes {
-                adj.entry(parent_hash.to_string())
-                    .or_default()
-                    .push(capsule_hash.to_string());
-            }
-        }
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let mut q = VecDeque::new();
@@ -539,10 +593,9 @@ impl Etl {
                 continue;
             }
             if cur != root_hash {
-                self.revoked.insert(cur.clone());
                 out.push(cur.clone());
             }
-            if let Some(children) = adj.get(cur.as_str()) {
+            if let Some(children) = self.adjacency.get(cur.as_str()) {
                 for child in children {
                     q.push_back(child.to_string());
                 }
@@ -551,28 +604,54 @@ impl Etl {
         out
     }
 
-    pub fn tree_size(&self) -> u64 {
-        self.leaves.len() as u64
+    fn load_leaf_hashes(&self, tree_size: usize) -> EvidenceOSResult<Vec<Hash32>> {
+        if tree_size > self.tree_size as usize {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let mut f = OpenOptions::new()
+            .read(true)
+            .open(&self.leaf_hash_path)
+            .map_err(|_| EvidenceOSError::Internal)?;
+        let mut leaves = Vec::with_capacity(tree_size);
+        for _ in 0..tree_size {
+            let mut hash = [0u8; 32];
+            f.read_exact(&mut hash)
+                .map_err(|_| EvidenceOSError::Internal)?;
+            leaves.push(hash);
+        }
+        Ok(leaves)
     }
+
+    pub fn tree_size(&self) -> u64 {
+        self.tree_size
+    }
+
     pub fn root_hash(&self) -> Hash32 {
-        merkle_root(&self.leaves)
+        match self.load_leaf_hashes(self.tree_size as usize) {
+            Ok(leaves) => merkle_root_ct(&leaves),
+            Err(_) => sha256(b""),
+        }
     }
 
     pub fn root_at_size(&self, tree_size: u64) -> EvidenceOSResult<Hash32> {
-        if tree_size > self.tree_size() {
+        if tree_size > self.tree_size {
             return Err(EvidenceOSError::InvalidArgument);
         }
-        Ok(merkle_root_prefix(&self.leaves, tree_size as usize))
+        let leaves = self.load_leaf_hashes(tree_size as usize)?;
+        Ok(merkle_root_ct(&leaves))
     }
 
     pub fn root_hex(&self) -> String {
         hex::encode(self.root_hash())
     }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
+
     pub fn inclusion_proof(&self, leaf_index: u64) -> EvidenceOSResult<Vec<Hash32>> {
-        inclusion_proof_ct(&self.leaves, leaf_index as usize, self.leaves.len())
+        let leaves = self.load_leaf_hashes(self.tree_size as usize)?;
+        inclusion_proof_ct(&leaves, leaf_index as usize, leaves.len())
     }
 
     pub fn inclusion_proof_at_size(
@@ -580,18 +659,20 @@ impl Etl {
         leaf_index: u64,
         tree_size: u64,
     ) -> EvidenceOSResult<Vec<Hash32>> {
-        inclusion_proof_ct(&self.leaves, leaf_index as usize, tree_size as usize)
+        let leaves = self.load_leaf_hashes(tree_size as usize)?;
+        inclusion_proof_ct(&leaves, leaf_index as usize, tree_size as usize)
     }
 
     pub fn consistency_proof(&self, old_size: u64, new_size: u64) -> EvidenceOSResult<Vec<Hash32>> {
-        consistency_proof_ct(&self.leaves, old_size as usize, new_size as usize)
+        let leaves = self.load_leaf_hashes(new_size as usize)?;
+        consistency_proof_ct(&leaves, old_size as usize, new_size as usize)
     }
 
     pub fn leaf_hash_at(&self, leaf_index: u64) -> EvidenceOSResult<Hash32> {
-        self.leaves
-            .get(leaf_index as usize)
-            .copied()
-            .ok_or(EvidenceOSError::NotFound)
+        if leaf_index >= self.tree_size {
+            return Err(EvidenceOSError::NotFound);
+        }
+        read_hash_from_file(&self.leaf_hash_path, leaf_index)
     }
 
     pub fn read_entry(&self, index: u64) -> EvidenceOSResult<Vec<u8>> {
@@ -682,6 +763,33 @@ mod tests {
             sn_idx /= 2;
         }
         used == audit_path.len() && &hash == root
+    }
+
+    #[test]
+    fn etl_proofs_match_reference_implementation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("etl-proof-parity.log");
+        let mut etl = Etl::open_or_create(&path).expect("etl");
+        let mut leaves = Vec::new();
+        for i in 0..256u64 {
+            let payload = format!("entry-{i:04}");
+            etl.append(payload.as_bytes()).expect("append");
+            leaves.push(leaf_hash(payload.as_bytes()));
+        }
+
+        assert_eq!(etl.root_hash(), merkle_root_ct(&leaves));
+        let idx = 73usize;
+        let etl_proof = etl.inclusion_proof(idx as u64).expect("etl inclusion");
+        let ref_proof = inclusion_proof_ct(&leaves, idx, leaves.len()).expect("ref inclusion");
+        assert_eq!(etl_proof, ref_proof);
+
+        let old_size = 128usize;
+        let etl_consistency = etl
+            .consistency_proof(old_size as u64, leaves.len() as u64)
+            .expect("etl consistency");
+        let ref_consistency =
+            consistency_proof_ct(&leaves, old_size, leaves.len()).expect("ref consistency");
+        assert_eq!(etl_consistency, ref_consistency);
     }
 
     #[test]

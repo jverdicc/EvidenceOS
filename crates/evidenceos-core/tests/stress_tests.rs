@@ -170,3 +170,63 @@ fn invalid_inputs_return_graceful_errors_instead_of_panics() {
         Err(EvidenceOSError::InvalidArgument)
     ));
 }
+
+#[test]
+fn etl_million_append_memory_bound_and_proof_validation() {
+    use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
+
+    const ENTRIES: usize = 1_000_000;
+    const MEM_CAP_KB: u64 = 350_000;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("etl-million.log");
+    let mut etl = Etl::open_or_create(&path).expect("etl");
+
+    for i in 0..ENTRIES {
+        let payload = format!("entry-{i:08}");
+        etl.append(payload.as_bytes()).expect("append");
+    }
+
+    assert_eq!(etl.tree_size(), ENTRIES as u64);
+
+    let status = std::fs::read_to_string("/proc/self/status").expect("status");
+    let vmrss_line = status
+        .lines()
+        .find(|line| line.starts_with("VmRSS:"))
+        .expect("VmRSS");
+    let vmrss_kb: u64 = vmrss_line
+        .split_whitespace()
+        .nth(1)
+        .expect("vmrss value")
+        .parse()
+        .expect("parse vmrss");
+    assert!(
+        vmrss_kb <= MEM_CAP_KB,
+        "rss exceeded cap: {vmrss_kb}KB > {MEM_CAP_KB}KB"
+    );
+
+    let idx = 777_777u64;
+    let leaf = etl.leaf_hash_at(idx).expect("leaf");
+    let root = etl.root_hash();
+    let inclusion = etl.inclusion_proof(idx).expect("inclusion");
+    assert!(verify_inclusion_proof(
+        &inclusion,
+        &leaf,
+        idx as usize,
+        ENTRIES,
+        &root
+    ));
+
+    let old_size = 500_000u64;
+    let old_root = etl.root_at_size(old_size).expect("old root");
+    let consistency = etl
+        .consistency_proof(old_size, ENTRIES as u64)
+        .expect("consistency");
+    assert!(verify_consistency_proof(
+        &old_root,
+        &root,
+        old_size as usize,
+        ENTRIES,
+        &consistency
+    ));
+}
