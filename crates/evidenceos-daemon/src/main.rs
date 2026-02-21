@@ -96,6 +96,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_plaintext_holdouts: bool,
     #[arg(long)]
+    default_holdout_k_bits_budget: Option<f64>,
+    #[arg(long)]
+    default_holdout_access_credit_budget: Option<f64>,
+    #[arg(long)]
+    holdout_pool_scope: Option<String>,
+    #[arg(long)]
     import_signed_settlements_dir: Option<String>,
     #[arg(long)]
     offline_settlement_verify_key_hex: Option<String>,
@@ -159,6 +165,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(
             "insecure synthetic holdout mode enabled; do not use in production environments"
         );
+    }
+    if let Some(default_holdout_k_bits_budget) = args.default_holdout_k_bits_budget {
+        std::env::set_var(
+            "EVIDENCEOS_DEFAULT_HOLDOUT_K_BITS_BUDGET",
+            default_holdout_k_bits_budget.to_string(),
+        );
+    }
+    if let Some(default_holdout_access_credit_budget) = args.default_holdout_access_credit_budget {
+        std::env::set_var(
+            "EVIDENCEOS_DEFAULT_HOLDOUT_ACCESS_CREDIT_BUDGET",
+            default_holdout_access_credit_budget.to_string(),
+        );
+    }
+    if let Some(holdout_pool_scope) = args.holdout_pool_scope.as_ref() {
+        std::env::set_var("EVIDENCEOS_HOLDOUT_POOL_SCOPE", holdout_pool_scope);
     }
     if let Some(profile) = load_pln_profile(std::path::Path::new(&args.data_dir))? {
         tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_fuel.p99_fuel, wasm_p99=%profile.wasm_instruction_fuel.p99_fuel, "loaded PLN profile");

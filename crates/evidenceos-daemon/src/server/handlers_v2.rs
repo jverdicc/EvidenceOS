@@ -48,6 +48,8 @@ impl EvidenceOsV2 for EvidenceOsService {
         let _ = canonical_len_for_symbols(req.oracle_num_symbols)?;
         let access_credit = req.access_credit as f64;
         Self::validate_budget_value(access_credit, "access_credit")?;
+        self.admission_provider
+            .admit(&caller.principal_id, req.access_credit)?;
         let oracle_resolution = OracleResolution::new(req.oracle_num_symbols, 0.0)
             .map_err(|_| Status::invalid_argument("oracle_num_symbols must be >= 2"))?;
         let ledger = ConservationLedger::new(req.alpha)
@@ -135,6 +137,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             created_at_unix_ms: current_time_unix_ms()?,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
+            holdout_pool_scope: self.holdout_pool_scope,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -147,15 +150,21 @@ impl EvidenceOsV2 for EvidenceOsService {
                 entry.insert(pool);
             }
         }
-        self.state
-            .holdout_pools
-            .lock()
-            .entry(holdout_handle_id)
-            .or_insert(HoldoutBudgetPool::new(
-                holdout_handle_id,
-                access_credit,
-                access_credit,
-            )?);
+        {
+            let holdout_scope = self.holdout_pool_scope;
+            let holdout_keys =
+                self.holdout_pool_keys(holdout_handle_id, &caller.principal_id, holdout_scope);
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            for holdout_key in holdout_keys {
+                holdout_pools
+                    .entry(holdout_key.clone())
+                    .or_insert(HoldoutBudgetPool::new(
+                        holdout_key,
+                        self.default_holdout_k_bits_budget,
+                        self.default_holdout_access_credit_budget,
+                    )?);
+            }
+        }
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimResponse {
             claim_id: claim_id.to_vec(),
@@ -484,12 +493,19 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             {
                 let mut holdout_pools = self.state.holdout_pools.lock();
-                let pool = holdout_pools
-                    .get_mut(&claim.holdout_handle_id)
-                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
-                if pool.charge(taxed_bits, taxed_bits).is_err() {
-                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
-                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                let holdout_keys = self.holdout_pool_keys(
+                    claim.holdout_handle_id,
+                    &claim.owner_principal_id,
+                    claim.holdout_pool_scope,
+                );
+                for holdout_key in holdout_keys {
+                    let pool = holdout_pools.get_mut(&holdout_key).ok_or_else(|| {
+                        Status::failed_precondition("missing holdout budget pool")
+                    })?;
+                    if pool.charge(taxed_bits, taxed_bits).is_err() {
+                        let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                        return Err(Status::failed_precondition("holdout budget exhausted"));
+                    }
                 }
             }
             claim
@@ -842,6 +858,8 @@ impl EvidenceOsV2 for EvidenceOsService {
         let alpha = (metadata.alpha_micros as f64) / 1_000_000.0;
         let access_credit = req.access_credit as f64;
         Self::validate_budget_value(access_credit, "access_credit")?;
+        self.admission_provider
+            .admit(&caller.principal_id, req.access_credit)?;
         let requested = requested_lane(&metadata.lane)?;
         let lane = if topic.escalate_to_heavy {
             Lane::Heavy
@@ -871,7 +889,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let claim_pln_cfg = claim_pln_config(lane, &pln_cfg)?;
-        let oracle_resolution = lane_cfg.oracle_resolution;
+        let oracle_resolution = lane_cfg.oracle_resolution.clone();
 
         let mut id_payload = Vec::new();
         id_payload.extend_from_slice(&topic.topic_id);
@@ -978,10 +996,11 @@ impl EvidenceOsV2 for EvidenceOsService {
             oracle_pins: None,
             freeze_preimage: None,
             operation_id,
-            owner_principal_id: caller.principal_id,
+            owner_principal_id: caller.principal_id.clone(),
             created_at_unix_ms: current_time_unix_ms()?,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
+            holdout_pool_scope: self.holdout_scope_for(&holdout_descriptor),
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         self.state
@@ -996,15 +1015,21 @@ impl EvidenceOsV2 for EvidenceOsService {
                 )
                 .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
             );
-        self.state
-            .holdout_pools
-            .lock()
-            .entry(holdout_handle_id)
-            .or_insert(HoldoutBudgetPool::new(
-                holdout_handle_id,
-                access_credit,
-                access_credit,
-            )?);
+        {
+            let holdout_scope = self.holdout_pool_scope;
+            let holdout_keys =
+                self.holdout_pool_keys(holdout_handle_id, &caller.principal_id, holdout_scope);
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            for holdout_key in holdout_keys {
+                holdout_pools
+                    .entry(holdout_key.clone())
+                    .or_insert(HoldoutBudgetPool::new(
+                        holdout_key,
+                        self.default_holdout_k_bits_budget,
+                        self.default_holdout_access_credit_budget,
+                    )?);
+            }
+        }
         persist_all(&self.state)?;
         Ok(Response::new(pb::CreateClaimV2Response {
             claim_id: claim_id.to_vec(),
@@ -1264,18 +1289,25 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             {
                 let mut holdout_pools = self.state.holdout_pools.lock();
-                let pool = holdout_pools
-                    .get_mut(&claim.holdout_handle_id)
-                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
-                if pool
-                    .charge(
-                        taxed_bits + vault_result.kout_bits_total,
-                        taxed_bits + vault_result.kout_bits_total,
-                    )
-                    .is_err()
-                {
-                    let _ = self.record_incident(claim, "holdout_budget_exhausted");
-                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                let holdout_keys = self.holdout_pool_keys(
+                    claim.holdout_handle_id,
+                    &claim.owner_principal_id,
+                    claim.holdout_pool_scope,
+                );
+                for holdout_key in holdout_keys {
+                    let pool = holdout_pools.get_mut(&holdout_key).ok_or_else(|| {
+                        Status::failed_precondition("missing holdout budget pool")
+                    })?;
+                    if pool
+                        .charge(
+                            taxed_bits + vault_result.kout_bits_total,
+                            taxed_bits + vault_result.kout_bits_total,
+                        )
+                        .is_err()
+                    {
+                        let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                        return Err(Status::failed_precondition("holdout budget exhausted"));
+                    }
                 }
             }
             let principal_k_bits =
@@ -1966,6 +1998,100 @@ impl EvidenceOsV2 for EvidenceOsService {
         let limit = store.set_credit_limit(&req.principal_id, req.limit, default_limit)?;
         Ok(Response::new(pb::SetCreditLimitResponse {
             credit_limit: limit,
+        }))
+    }
+
+    async fn set_holdout_pool_budgets(
+        &self,
+        request: Request<pb::SetHoldoutPoolBudgetsRequest>,
+    ) -> Result<Response<pb::SetHoldoutPoolBudgetsResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
+        Self::require_auditor_role(&caller, "SetHoldoutPoolBudgets")?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.holdout_id, "holdout_id", 128)?;
+        let holdout_id = decode_hex_hash32(&req.holdout_id, "holdout_id")?;
+        let scope = HoldoutPoolScope::parse(req.scope.trim())?;
+        let next_k_bits = req.new_k_bits_budget;
+        let next_access_credit = req.new_access_credit_budget;
+        if let Some(v) = next_k_bits {
+            Self::validate_budget_value(v, "new_k_bits_budget")?;
+        }
+        if let Some(v) = next_access_credit {
+            Self::validate_budget_value(v, "new_access_credit_budget")?;
+        }
+        let mut touched = 0usize;
+        {
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            for (key, pool) in holdout_pools.iter_mut() {
+                if key.holdout_id != holdout_id {
+                    continue;
+                }
+                let scope_match = match scope {
+                    HoldoutPoolScope::Global => key.principal_id.is_none(),
+                    HoldoutPoolScope::PerPrincipal => key.principal_id.is_some(),
+                    HoldoutPoolScope::Both => true,
+                };
+                if !scope_match {
+                    continue;
+                }
+                if let Some(v) = next_k_bits {
+                    pool.k_bits_budget = v;
+                }
+                if let Some(v) = next_access_credit {
+                    pool.access_credit_budget = v;
+                }
+                if pool.k_bits_spent <= pool.k_bits_budget + f64::EPSILON
+                    && pool.access_credit_spent <= pool.access_credit_budget + f64::EPSILON
+                {
+                    pool.frozen = false;
+                }
+                touched += 1;
+            }
+        }
+        if touched == 0 {
+            return Err(Status::not_found("holdout budget pool not found"));
+        }
+        persist_all(&self.state)?;
+        Ok(Response::new(pb::SetHoldoutPoolBudgetsResponse {
+            budgets: Some(pb::HoldoutPoolBudgets {
+                holdout_id: req.holdout_id,
+                scope: req.scope,
+                k_bits_budget: next_k_bits,
+                access_credit_budget: next_access_credit,
+            }),
+        }))
+    }
+
+    async fn get_holdout_pool_budgets(
+        &self,
+        request: Request<pb::GetHoldoutPoolBudgetsRequest>,
+    ) -> Result<Response<pb::GetHoldoutPoolBudgetsResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
+        Self::require_auditor_role(&caller, "GetHoldoutPoolBudgets")?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.holdout_id, "holdout_id", 128)?;
+        let holdout_id = decode_hex_hash32(&req.holdout_id, "holdout_id")?;
+        let scope = HoldoutPoolScope::parse(req.scope.trim())?;
+        let holdout_pools = self.state.holdout_pools.lock();
+        let mut pools = holdout_pools.iter().filter(|(key, _)| {
+            key.holdout_id == holdout_id
+                && match scope {
+                    HoldoutPoolScope::Global => key.principal_id.is_none(),
+                    HoldoutPoolScope::PerPrincipal => key.principal_id.is_some(),
+                    HoldoutPoolScope::Both => true,
+                }
+        });
+        let first = pools
+            .next()
+            .map(|(_, pool)| pool)
+            .ok_or_else(|| Status::not_found("holdout budget pool not found"))?;
+        Ok(Response::new(pb::GetHoldoutPoolBudgetsResponse {
+            budgets: Some(pb::HoldoutPoolBudgets {
+                holdout_id: req.holdout_id,
+                scope: req.scope,
+                k_bits_budget: Some(first.k_bits_budget),
+                access_credit_budget: Some(first.access_credit_budget),
+            }),
         }))
     }
 
