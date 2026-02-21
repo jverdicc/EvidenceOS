@@ -11,6 +11,7 @@ Key starting points:
 - [ETL FAQ (why append-only transparency log, not blockchain)](ETL_FAQ.md)
 - [ETL indexer (SQLite analytics acceleration)](ETL_INDEXER.md)
 - [Epistemic trial harness (units, endpoints, competing risks)](EPISTEMIC_TRIAL_HARNESS.md)
+- [Clinical trials framework quickstart (workflow + examples)](integrations/fda_clinical_trials.md)
 - [Oracle design and controls](ORACLES.md)
 - [Testing evidence](TEST_EVIDENCE.md)
 - [Coverage matrix](TEST_COVERAGE_MATRIX.md)
