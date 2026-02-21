@@ -1,0 +1,4 @@
+{"participant_id":"p1","arm":"control","duration_days":10,"event_type":"primary","covariates":{"age":61,"bmi":28.1},"consort_status":"analyzed"}
+{"participant_id":"p2","arm":"control","duration_days":12,"event_type":"censored","covariates":{"age":55,"bmi":25.0},"consort_status":"followup_complete"}
+{"participant_id":"p3","arm":"treated","duration_days":7,"event_type":"competing","covariates":{"age":70,"bmi":31.2},"consort_status":"received_intervention"}
+{"participant_id":"p4","arm":"treated","duration_days":14,"event_type":"primary","covariates":{"age":49,"bmi":23.4},"consort_status":"analyzed"}
