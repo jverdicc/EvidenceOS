@@ -22,7 +22,7 @@
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
 use evidenceos_attest::{load_policy, verify_attestation_blob};
-use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
+use evidenceos_core::aspec::AspecPolicy;
 use evidenceos_core::oracle_registry::OracleRegistry;
 use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
 use std::net::SocketAddr;
@@ -168,10 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.nullspec_registry_dir.as_deref(),
         args.nullspec_authority_keys_dir.as_deref(),
     )?;
-    let oracle_aspec_policy = AspecPolicy {
-        float_policy: FloatPolicy::Allow,
-        ..AspecPolicy::default()
-    };
+    let oracle_aspec_policy = AspecPolicy::oracle_v1();
     let registry = OracleRegistry::load_from_dir(
         &oracle_cfg.oracle_dir,
         &oracle_cfg.trusted_authorities,

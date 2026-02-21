@@ -1,5 +1,5 @@
 use ed25519_dalek::{Signer, SigningKey};
-use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
+use evidenceos_core::aspec::AspecPolicy;
 use evidenceos_core::oracle::{EValueFn, NullSpec, OracleResolution};
 use evidenceos_core::oracle_bundle::{
     Capability, OracleBundleManifestV1, TrustedOracleAuthorities,
@@ -12,10 +12,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 
 fn oracle_aspec_policy() -> AspecPolicy {
-    AspecPolicy {
-        float_policy: FloatPolicy::Allow,
-        ..AspecPolicy::default()
-    }
+    AspecPolicy::oracle_v1()
 }
 
 fn build_wasm_fraction() -> Vec<u8> {
@@ -161,7 +158,6 @@ fn fail_closed_nan_and_trap_and_fuel() {
     .unwrap_or_else(|_| unreachable!());
     let sandbox = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(
         &wasm_nan,
-        &oracle_aspec_policy(),
         WasmOracleSandboxPolicy::default(),
     )
     .unwrap_or_else(|_| unreachable!());
@@ -176,7 +172,6 @@ fn fail_closed_nan_and_trap_and_fuel() {
     .unwrap_or_else(|_| unreachable!());
     let sandbox_trap = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(
         &wasm_trap,
-        &oracle_aspec_policy(),
         WasmOracleSandboxPolicy::default(),
     )
     .unwrap_or_else(|_| unreachable!());
@@ -191,7 +186,6 @@ fn fail_closed_nan_and_trap_and_fuel() {
     .unwrap_or_else(|_| unreachable!());
     let sandbox_loop = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(
         &wasm_loop,
-        &oracle_aspec_policy(),
         WasmOracleSandboxPolicy {
             max_memory_bytes: 1 << 20,
             max_fuel: 100,
@@ -214,7 +208,6 @@ proptest! {
     fn random_wasm_loader_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..1024)) {
         let _ = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(
             &bytes,
-            &oracle_aspec_policy(),
             WasmOracleSandboxPolicy::default(),
         );
     }
@@ -223,11 +216,7 @@ proptest! {
     fn random_preds_rejected_when_invalid(preds in prop::collection::vec(0u8..4u8, 0..32)) {
         let wasm = wat::parse_str("(module (memory (export \"memory\") 1) (func (export \"oracle_query\") (param i32 i32) (result f64) f64.const 0.0))")
             .unwrap_or_else(|_| unreachable!());
-        let sandbox = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(
-            &wasm,
-            &oracle_aspec_policy(),
-            WasmOracleSandboxPolicy::default(),
-        ).unwrap_or_else(|_| unreachable!());
+        let sandbox = evidenceos_core::oracle_wasm::WasmOracleSandbox::new(&wasm, WasmOracleSandboxPolicy::default()).unwrap_or_else(|_| unreachable!());
         let result = sandbox.query_raw_metric(&preds);
         let is_valid = !preds.is_empty() && preds.iter().all(|p| *p <= 1);
         if is_valid {
