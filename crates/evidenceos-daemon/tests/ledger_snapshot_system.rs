@@ -33,6 +33,8 @@ fn req(name: &str, access_credit: u64, oracle_num_symbols: u32) -> pb::CreateCla
         epoch_size: 8,
         oracle_num_symbols,
         access_credit,
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
     }
 }
 

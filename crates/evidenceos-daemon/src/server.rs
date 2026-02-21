@@ -306,6 +306,10 @@ struct Claim {
     #[serde(default)]
     metadata_locked: bool,
     claim_name: String,
+    #[serde(default)]
+    oracle_id: String,
+    #[serde(default)]
+    nullspec_id: String,
     output_schema_id: String,
     phys_hir_hash: [u8; 32],
     #[serde(default)]
@@ -1162,7 +1166,7 @@ impl EvidenceOsService {
         let bit_width = canonical_len_for_symbols(claim.oracle_num_symbols)? as u32 * 8;
         let pinned_epoch = self.current_epoch_for_claim(claim)?;
         let ttl_epochs = self.oracle_ttl_for_claim(claim);
-        let oracle_id = claim.claim_name.clone();
+        let oracle_id = claim.oracle_id.clone();
         let calibration_hash = {
             let operator_config = self.state.operator_config.lock();
             match operator_config.oracle_calibration_hash.get(&oracle_id) {
@@ -2493,6 +2497,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             holdout_len: req.epoch_size,
             metadata_locked: false,
             claim_name: "legacy-v1".to_string(),
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             semantic_hash: [0u8; 32],
@@ -3045,6 +3051,24 @@ impl EvidenceOsV2 for EvidenceOsService {
         let principal_id = Self::principal_id_from_metadata(request.metadata());
         let req = request.into_inner();
         validate_required_str_field(&req.claim_name, "claim_name", 128)?;
+        let oracle_id = if req.oracle_id.trim().is_empty() {
+            "builtin.accuracy".to_string()
+        } else {
+            req.oracle_id.trim().to_string()
+        };
+        validate_required_str_field(&oracle_id, "oracle_id", 128)?;
+        {
+            let operator_config = self.state.operator_config.lock();
+            if !operator_config.oracle_ttl_epochs.is_empty()
+                && !operator_config.oracle_ttl_epochs.contains_key(&oracle_id)
+            {
+                return Err(Status::invalid_argument("unknown oracle_id"));
+            }
+        }
+        let nullspec_id = req.nullspec_id.trim().to_string();
+        if !nullspec_id.is_empty() {
+            validate_required_str_field(&nullspec_id, "nullspec_id", 128)?;
+        }
         if req.epoch_size == 0 {
             return Err(Status::invalid_argument("epoch_size must be > 0"));
         }
@@ -3185,6 +3209,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             holdout_len: holdout_descriptor.len as u64,
             metadata_locked: false,
             claim_name: req.claim_name,
+            oracle_id,
+            nullspec_id,
             output_schema_id: canonical_output_schema_id,
             phys_hir_hash: phys,
             semantic_hash,
@@ -3315,15 +3341,24 @@ impl EvidenceOsV2 for EvidenceOsService {
             )?;
             let nullspec_store = NullSpecStore::open(&self.state.data_path)
                 .map_err(|_| Status::internal("nullspec store init failed"))?;
-            let active_id = match nullspec_store
-                .active_for(&claim.claim_name, &claim.holdout_ref)
-                .map_err(|_| Status::internal("nullspec mapping read failed"))?
-            {
-                Some(id) => id,
-                None => {
-                    self.record_incident(claim, "nullspec_missing")?;
-                    return Err(Status::failed_precondition("missing active nullspec"));
+            let active_id = if claim.nullspec_id.is_empty() {
+                match nullspec_store
+                    .active_for(&claim.claim_name, &claim.holdout_ref)
+                    .map_err(|_| Status::internal("nullspec mapping read failed"))?
+                {
+                    Some(id) => id,
+                    None => {
+                        self.record_incident(claim, "nullspec_missing")?;
+                        return Err(Status::failed_precondition("missing active nullspec"));
+                    }
                 }
+            } else {
+                let decoded = hex::decode(&claim.nullspec_id)
+                    .map_err(|_| Status::invalid_argument("invalid nullspec_id hex"))?;
+                decoded
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Status::invalid_argument("invalid nullspec_id length"))?
             };
             let contract = nullspec_store
                 .get(&active_id)
@@ -4435,6 +4470,8 @@ mod tests {
             epoch_size: 10,
             oracle_num_symbols: 4,
             access_credit: 32,
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         }
     }
 
@@ -4482,6 +4519,8 @@ mod tests {
             holdout_len: 4,
             metadata_locked: false,
             claim_name: "c".to_string(),
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
@@ -4535,6 +4574,8 @@ mod tests {
             holdout_len: 4,
             metadata_locked: false,
             claim_name: "c".to_string(),
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],

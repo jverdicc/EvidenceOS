@@ -73,6 +73,9 @@ async fn execute_once(
             epoch_size: 10,
             oracle_num_symbols: 4,
             access_credit: 128,
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         })
         .await
         .expect("create")

@@ -42,6 +42,8 @@ fn create_claim_req() -> pb::CreateClaimV2Request {
         epoch_size: 4,
         oracle_num_symbols: 8,
         access_credit: 64,
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
     }
 }
 
