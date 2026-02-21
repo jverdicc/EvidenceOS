@@ -44,7 +44,9 @@ use tonic::{Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::canary::{CanaryConfig, CanaryState};
-use evidenceos_core::capsule::{ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry};
+use evidenceos_core::capsule::{
+    ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry, TopicOracleReceiptLike,
+};
 use evidenceos_core::crypto_transcripts::{revocations_snapshot_digest, sth_signature_digest};
 use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
 use evidenceos_core::eprocess::DirichletMixtureEProcess;
@@ -75,6 +77,8 @@ const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
+const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
+const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
 const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BURN_WASM_MODULE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
@@ -294,6 +298,28 @@ struct FreezePreimage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct TopicManifestForHash {
+    claim_name: String,
+    epoch_config_ref: String,
+    output_schema_id: String,
+    holdout_ref: String,
+    holdout_handle_hex: String,
+    nullspec_id_hex: Option<String>,
+    wasm_code_hash_hex: String,
+    oracle_num_symbols: u32,
+    epoch_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TopicOracleReceipt {
+    claim_manifest_hash: [u8; 32],
+    semantic_hash: [u8; 32],
+    model_id: String,
+    timestamp_unix: u64,
+    signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Claim {
     claim_id: [u8; 32],
     topic_id: [u8; 32],
@@ -310,6 +336,8 @@ struct Claim {
     phys_hir_hash: [u8; 32],
     #[serde(default)]
     semantic_hash: [u8; 32],
+    #[serde(default)]
+    topic_oracle_receipt: Option<TopicOracleReceipt>,
     #[serde(default)]
     output_schema_id_hash: [u8; 32],
     #[serde(default)]
@@ -1259,19 +1287,6 @@ impl EvidenceOsService {
         }
         "anonymous".to_string()
     }
-
-    fn probe_semantic_hash(signals: Option<&pb::TopicSignalsV2>) -> String {
-        if let Some(sig) = signals {
-            if sig.semantic_hash.len() == 32 {
-                return hex::encode(&sig.semantic_hash);
-            }
-            if sig.phys_hir_signature_hash.len() == 32 {
-                return hex::encode(&sig.phys_hir_signature_hash);
-            }
-        }
-        "none".to_string()
-    }
-
     fn observe_probe(
         &self,
         principal_id: String,
@@ -1561,6 +1576,52 @@ fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
     let mut out = [0u8; 32];
     out.copy_from_slice(bytes);
     Ok(out)
+}
+
+fn compute_topic_manifest_hash(manifest: &TopicManifestForHash) -> Result<[u8; 32], Status> {
+    let canonical = serde_json::to_vec(manifest)
+        .map_err(|_| Status::internal("topic manifest serialization failed"))?;
+    Ok(sha256_domain(DOMAIN_TOPIC_MANIFEST_HASH_V1, &canonical))
+}
+
+fn derive_server_topic_semantic_hash(manifest_hash: [u8; 32]) -> [u8; 32] {
+    hash_signal(b"evidenceos/topic_semantic", &manifest_hash)
+}
+
+fn derive_server_topic_physhir_hash(
+    claim_manifest_hash: [u8; 32],
+    output_schema_id: &str,
+) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&claim_manifest_hash);
+    payload.extend_from_slice(output_schema_id.as_bytes());
+    hash_signal(b"evidenceos/topic_physhir", &payload)
+}
+
+fn build_topic_oracle_receipt(
+    signing_key: &SigningKey,
+    claim_manifest_hash: [u8; 32],
+    semantic_hash: [u8; 32],
+    model_id: &str,
+) -> TopicOracleReceipt {
+    let timestamp_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&claim_manifest_hash);
+    payload.extend_from_slice(&semantic_hash);
+    payload.extend_from_slice(model_id.as_bytes());
+    payload.extend_from_slice(&timestamp_unix.to_be_bytes());
+    let digest = sha256_domain(DOMAIN_TOPIC_ORACLE_RECEIPT_V1, &payload);
+    let signature = sign_payload(signing_key, &digest);
+    TopicOracleReceipt {
+        claim_manifest_hash,
+        semantic_hash,
+        model_id: model_id.to_string(),
+        timestamp_unix,
+        signature: signature.to_vec(),
+    }
 }
 
 fn decode_hex_hash32(value: &str, field: &str) -> Result<[u8; 32], Status> {
@@ -2496,6 +2557,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash,
             semantic_hash: [0u8; 32],
+            topic_oracle_receipt: None,
             output_schema_id_hash: hash_signal(b"evidenceos/schema_id", b"legacy/v1"),
             holdout_handle_hash: hash_signal(b"evidenceos/holdout_handle", &holdout_handle_id),
             lineage_root_hash: topic_id,
@@ -2942,6 +3004,17 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule.disagreement_score = Some(claim.disagreement_score);
             capsule.semantic_physhir_distance_bits = Some(claim.semantic_physhir_distance_bits);
             capsule.escalate_to_heavy = Some(claim.escalate_to_heavy);
+            capsule.topic_oracle_receipt =
+                claim
+                    .topic_oracle_receipt
+                    .as_ref()
+                    .map(|receipt| TopicOracleReceiptLike {
+                        claim_manifest_hash_hex: hex::encode(receipt.claim_manifest_hash),
+                        semantic_hash_hex: hex::encode(receipt.semantic_hash),
+                        model_id: receipt.model_id.clone(),
+                        timestamp_unix: receipt.timestamp_unix,
+                        signature_hex: hex::encode(&receipt.signature),
+                    });
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -3073,37 +3146,59 @@ impl EvidenceOsV2 for EvidenceOsService {
             )
                 })?
                 .to_string();
-        let signals = req
-            .signals
-            .ok_or_else(|| Status::invalid_argument("signals are required"))?;
-        if signals.phys_hir_signature_hash.len() != 32 {
-            return Err(Status::invalid_argument(
-                "signals.phys_hir_signature_hash must be 32 bytes",
-            ));
+        let signals_hint = req.signals.as_ref();
+        if let Some(signals) = signals_hint {
+            if !signals.phys_hir_signature_hash.is_empty()
+                && signals.phys_hir_signature_hash.len() != 32
+            {
+                return Err(Status::invalid_argument(
+                    "signals.phys_hir_signature_hash must be 0 or 32 bytes",
+                ));
+            }
+            if !signals.semantic_hash.is_empty() && signals.semantic_hash.len() != 32 {
+                return Err(Status::invalid_argument(
+                    "signals.semantic_hash must be 0 or 32 bytes",
+                ));
+            }
+            if !signals.dependency_merkle_root.is_empty()
+                && signals.dependency_merkle_root.len() != 32
+            {
+                return Err(Status::invalid_argument(
+                    "signals.dependency_merkle_root must be 0 or 32 bytes",
+                ));
+            }
         }
-        let semantic_hash = if signals.semantic_hash.len() == 32 {
-            let mut b = [0u8; 32];
-            b.copy_from_slice(&signals.semantic_hash);
-            b
-        } else {
-            return Err(Status::invalid_argument(
-                "signals.semantic_hash must be 32 bytes",
-            ));
-        };
-        let dependency_merkle_root = if signals.dependency_merkle_root.is_empty() {
-            None
-        } else if signals.dependency_merkle_root.len() == 32 {
-            let mut b = [0u8; 32];
-            b.copy_from_slice(&signals.dependency_merkle_root);
-            Some(b)
-        } else {
-            return Err(Status::invalid_argument(
-                "signals.dependency_merkle_root must be 0 or 32 bytes",
-            ));
-        };
-        let mut phys = [0u8; 32];
-        phys.copy_from_slice(&signals.phys_hir_signature_hash);
+        let dependency_merkle_root = signals_hint.and_then(|signals| {
+            if signals.dependency_merkle_root.len() == 32 {
+                let mut b = [0u8; 32];
+                b.copy_from_slice(&signals.dependency_merkle_root);
+                Some(b)
+            } else {
+                None
+            }
+        });
         let holdout_handle_id = holdout_descriptor.handle;
+        let topic_manifest = TopicManifestForHash {
+            claim_name: req.claim_name.clone(),
+            epoch_config_ref: epoch_config_ref.clone(),
+            output_schema_id: canonical_output_schema_id.clone(),
+            holdout_ref: req.holdout_ref.clone(),
+            holdout_handle_hex: hex::encode(holdout_handle_id),
+            nullspec_id_hex: None,
+            wasm_code_hash_hex: hex::encode([0u8; 32]),
+            oracle_num_symbols: req.oracle_num_symbols,
+            epoch_size: dlc_cfg.epoch_size,
+        };
+        let claim_manifest_hash = compute_topic_manifest_hash(&topic_manifest)?;
+        let semantic_hash = derive_server_topic_semantic_hash(claim_manifest_hash);
+        let phys =
+            derive_server_topic_physhir_hash(claim_manifest_hash, &canonical_output_schema_id);
+        let topic_oracle_receipt = build_topic_oracle_receipt(
+            self.active_signing_key()?,
+            claim_manifest_hash,
+            semantic_hash,
+            "deterministic.manifest.v1",
+        );
         let output_schema_id_hash = hash_signal(
             b"evidenceos/schema_id",
             canonical_output_schema_id.as_bytes(),
@@ -3173,7 +3268,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             principal_id,
             operation_id.clone(),
             hex::encode(topic.topic_id),
-            Self::probe_semantic_hash(Some(&signals)),
+            hex::encode(semantic_hash),
         )?;
         let claim = Claim {
             claim_id,
@@ -3188,6 +3283,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             output_schema_id: canonical_output_schema_id,
             phys_hir_hash: phys,
             semantic_hash,
+            topic_oracle_receipt: Some(topic_oracle_receipt),
             output_schema_id_hash,
             holdout_handle_hash,
             lineage_root_hash,
@@ -3700,6 +3796,17 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule.disagreement_score = Some(claim.disagreement_score);
             capsule.semantic_physhir_distance_bits = Some(claim.semantic_physhir_distance_bits);
             capsule.escalate_to_heavy = Some(claim.escalate_to_heavy);
+            capsule.topic_oracle_receipt =
+                claim
+                    .topic_oracle_receipt
+                    .as_ref()
+                    .map(|receipt| TopicOracleReceiptLike {
+                        claim_manifest_hash_hex: hex::encode(receipt.claim_manifest_hash),
+                        semantic_hash_hex: hex::encode(receipt.semantic_hash),
+                        model_id: receipt.model_id.clone(),
+                        timestamp_unix: receipt.timestamp_unix,
+                        signature_hex: hex::encode(&receipt.signature),
+                    });
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -4485,6 +4592,7 @@ mod tests {
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
+            topic_oracle_receipt: None,
             output_schema_id_hash: [0; 32],
             holdout_handle_hash: [0; 32],
             lineage_root_hash: [0; 32],
@@ -4538,6 +4646,7 @@ mod tests {
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
+            topic_oracle_receipt: None,
             output_schema_id_hash: [0; 32],
             holdout_handle_hash: [0; 32],
             lineage_root_hash: [0; 32],
@@ -4733,6 +4842,60 @@ mod tests {
 
         std::env::remove_var("EVIDENCEOS_TEE_BACKEND");
         std::env::remove_var("EVIDENCEOS_TEE_ALLOW_NOOP");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_claim_v2_ignores_client_topic_signal_hints_for_topic_pooling() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock");
+
+        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let mut req_a = claim_request("synthetic-holdout");
+        req_a.claim_name = "pool-claim".to_string();
+        req_a.signals.as_mut().expect("signals").semantic_hash = vec![7; 32];
+
+        let mut req_b = claim_request("synthetic-holdout");
+        req_b.claim_name = "pool-claim".to_string();
+        req_b.signals.as_mut().expect("signals").semantic_hash = vec![201; 32];
+
+        let created_a =
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_a))
+                .await
+                .expect("create a")
+                .into_inner();
+        let created_b =
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_b))
+                .await
+                .expect("create b")
+                .into_inner();
+
+        assert_eq!(created_a.topic_id, created_b.topic_id);
+        assert_eq!(svc.state.topic_pools.lock().len(), 1);
+
+        let claims = svc.state.claims.lock();
+        let claim_a = claims
+            .get(&parse_hash32(&created_a.claim_id, "claim_id").expect("claim id"))
+            .expect("claim a present");
+        let claim_b = claims
+            .get(&parse_hash32(&created_b.claim_id, "claim_id").expect("claim id"))
+            .expect("claim b present");
+        assert_eq!(claim_a.semantic_hash, claim_b.semantic_hash);
+        assert!(claim_a.topic_oracle_receipt.is_some());
+
+        std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
     }
 
     #[allow(clippy::await_holding_lock)]
