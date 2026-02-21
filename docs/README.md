@@ -9,6 +9,7 @@ Key starting points:
 - [Dual-Use and Misuse Policy](DUAL_USE_AND_MISUSE.md)
 - [Architecture Diagrams](ARCHITECTURE_DIAGRAMS.md)
 - [ETL FAQ (why append-only transparency log, not blockchain)](ETL_FAQ.md)
+- [ETL indexer (SQLite analytics acceleration)](ETL_INDEXER.md)
 - [Oracle design and controls](ORACLES.md)
 - [Testing evidence](TEST_EVIDENCE.md)
 - [Coverage matrix](TEST_COVERAGE_MATRIX.md)

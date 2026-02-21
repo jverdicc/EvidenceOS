@@ -993,6 +993,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidenceos-etl-indexer"
+version = "0.1.0-alpha"
+dependencies = [
+ "clap",
+ "crc32fast",
+ "evidenceos-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "evidenceos-guest-abi"
 version = "0.1.0-alpha"
 dependencies = [
