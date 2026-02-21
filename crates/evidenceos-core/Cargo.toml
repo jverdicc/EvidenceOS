@@ -7,6 +7,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+trial-harness = []
+
 [dependencies]
 evidenceos-protocol = { path = "../evidenceos-protocol" }
 evidenceos-verifier = { path = "../evidenceos-verifier", version = "0.1.0" }
