@@ -46,6 +46,9 @@ async fn probing_detection_grades_response_and_emits_evidence() {
                 phys_hir_signature_hash: hash32(7),
                 dependency_merkle_root: vec![],
             }),
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         };
         let mut request = Request::new(req);
         request.metadata_mut().insert(

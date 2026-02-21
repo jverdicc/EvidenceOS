@@ -94,6 +94,9 @@ async fn daemon_enforces_max_request_size() {
         epoch_size: 1,
         oracle_num_symbols: 2,
         access_credit: 1,
+
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
     });
     req.metadata_mut().insert(
         "authorization",

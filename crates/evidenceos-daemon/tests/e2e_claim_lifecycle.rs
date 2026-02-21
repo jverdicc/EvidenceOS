@@ -154,6 +154,9 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
         epoch_size: 10,
         oracle_num_symbols: 4,
         access_credit: 64,
+
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
     })
     .await
     .expect("create claim v2")
@@ -257,6 +260,9 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
             epoch_size: 1,
             oracle_num_symbols: 2,
             access_credit: 1,
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         })
         .await
         .expect_err("empty claim_name rejected");
@@ -280,6 +286,9 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
             epoch_size: 1,
             oracle_num_symbols: 2,
             access_credit: 1,
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         })
         .await
         .expect_err("empty metadata.epoch_config_ref rejected");
@@ -303,6 +312,9 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
             epoch_size: 1,
             oracle_num_symbols: 2,
             access_credit: 1,
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         })
         .await
         .expect_err("empty metadata.output_schema_id rejected");
@@ -440,6 +452,9 @@ async fn topic_budget_is_shared_across_claims() {
         epoch_size: 10,
         oracle_num_symbols: 4,
         access_credit: 16,
+
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
     };
 
     let claim_a = c

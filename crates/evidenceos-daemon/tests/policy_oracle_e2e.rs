@@ -114,6 +114,9 @@ async fn run_lifecycle(c: &mut EvidenceOsClient<Channel>) -> (Vec<u8>, pb::Execu
             epoch_size: 30,
             oracle_num_symbols: 4,
             access_credit: 64,
+
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
         })
         .await
         .expect("create")

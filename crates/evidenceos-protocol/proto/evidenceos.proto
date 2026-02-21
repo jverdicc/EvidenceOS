@@ -130,6 +130,8 @@ message CreateClaimV2Request {
   uint64 epoch_size = 5;
   uint32 oracle_num_symbols = 6;
   uint64 access_credit = 7;
+  string oracle_id = 8;
+  string nullspec_id = 9;
 }
 
 message CreateClaimV2Response {
