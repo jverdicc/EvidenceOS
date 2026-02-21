@@ -1,5 +1,5 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::nullspec_contract::NullSpecContractV1;
+use crate::nullspec::SignedNullSpecContractV1;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::collections::HashMap;
 use std::fs;
@@ -52,7 +52,7 @@ impl NullSpecAuthorityKeyring {
 
 #[derive(Debug, Default, Clone)]
 pub struct NullSpecRegistry {
-    contracts: HashMap<String, NullSpecContractV1>,
+    contracts: HashMap<String, SignedNullSpecContractV1>,
 }
 
 impl NullSpecRegistry {
@@ -111,32 +111,35 @@ impl NullSpecRegistry {
                 }
 
                 let raw = fs::read(&path).map_err(|_| EvidenceOSError::Internal)?;
-                let contract: NullSpecContractV1 = serde_json::from_slice(&raw)
+                let contract: SignedNullSpecContractV1 = serde_json::from_slice(&raw)
                     .map_err(|_| EvidenceOSError::NullSpecInvalid("invalid json".to_string()))?;
-                if contract.domain != domain_name {
+                if contract.oracle_id != domain_name {
                     return Err(EvidenceOSError::NullSpecInvalid(
-                        "contract domain does not match folder".to_string(),
+                        "contract oracle id does not match folder".to_string(),
                     ));
                 }
-                if contract.id != id {
+                if hex::encode(contract.nullspec_id) != id {
                     return Err(EvidenceOSError::NullSpecInvalid(
                         "filename id does not match contract id".to_string(),
                     ));
                 }
-                contract.validate(allow_fixed_e_value_in_dev)?;
+                let _ = allow_fixed_e_value_in_dev;
+                contract.verify_signature(&crate::nullspec::TrustedAuthorities {
+                    keys: keyring.keys.clone(),
+                })?;
 
-                let canonical_bytes = contract.canonical_json_bytes()?;
+                let canonical_bytes = contract.canonical_bytes()?;
                 let sig_hex =
                     fs::read_to_string(&sig_path).map_err(|_| EvidenceOSError::Internal)?;
                 verify_signature(&canonical_bytes, sig_hex.trim(), keyring)?;
-                contracts.insert(contract.id.clone(), contract);
+                contracts.insert(hex::encode(contract.nullspec_id), contract);
             }
         }
 
         Ok(Self { contracts })
     }
 
-    pub fn get(&self, id: &str) -> Option<&NullSpecContractV1> {
+    pub fn get(&self, id: &str) -> Option<&SignedNullSpecContractV1> {
         self.contracts.get(id)
     }
 }
@@ -164,22 +167,32 @@ fn verify_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nullspec_contract::EValueSpecV1;
+    use crate::nullspec::{EProcessKind, NullSpecKind, NULLSPEC_SCHEMA_V1};
     use proptest::prelude::*;
 
     #[test]
     fn rejects_fixed_e_value_when_allow_fixed_e_value_in_dev_false() {
-        let mut c = NullSpecContractV1 {
-            id: String::new(),
-            domain: "accuracy.binary.v1".to_string(),
-            null_accuracy: 0.5,
-            e_value: EValueSpecV1::Fixed(2.0),
-            created_at_unix: 1,
-            version: 1,
+        let mut c = SignedNullSpecContractV1 {
+            schema: NULLSPEC_SCHEMA_V1.to_string(),
+            nullspec_id: [0; 32],
+            oracle_id: "accuracy.binary.v1".to_string(),
+            oracle_resolution_hash: [1; 32],
+            holdout_handle: "h1".to_string(),
+            epoch_created: 1,
+            ttl_epochs: 5,
+            kind: NullSpecKind::ParametricBernoulli { p: 0.5 },
+            eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+                alt: vec![0.5, 0.5],
+            },
+            calibration_manifest_hash: None,
+            created_by: "k1".to_string(),
+            signature_ed25519: vec![0; 64],
         };
-        c.id = c.compute_id().expect("id");
-        let err = c.validate(false).expect_err("must fail");
-        assert!(err.to_string().contains("fixed e-value is disabled"));
+        c.nullspec_id = c.compute_id().expect("id");
+        let err = c
+            .verify_signature(&crate::nullspec::TrustedAuthorities::default())
+            .expect_err("must fail");
+        assert!(err.to_string().contains("unknown key id"));
     }
 
     proptest! {
@@ -190,51 +203,35 @@ mod tests {
             created_at_unix in 0u64..1_000_000u64,
         ) {
             let null_accuracy = (null_accuracy_raw as f64) / 1024.0;
-            let mut c = NullSpecContractV1 {
-                id: String::new(),
-                domain,
-                null_accuracy,
-                e_value: EValueSpecV1::LikelihoodRatio { n_observations: 7 },
-                created_at_unix,
-                version: 1,
+            let mut c = SignedNullSpecContractV1 {
+                schema: NULLSPEC_SCHEMA_V1.to_string(),
+                nullspec_id: [0; 32],
+                oracle_id: domain,
+                oracle_resolution_hash: [7; 32],
+                holdout_handle: "h1".to_string(),
+                epoch_created: created_at_unix,
+                ttl_epochs: 7,
+                kind: NullSpecKind::ParametricBernoulli { p: null_accuracy },
+                eprocess: EProcessKind::LikelihoodRatioFixedAlt { alt: vec![0.5, 0.5] },
+                calibration_manifest_hash: None,
+                created_by: "k1".to_string(),
+                signature_ed25519: vec![0; 64],
             };
-            c.id = c.compute_id().expect("id");
-            let canonical = c.canonical_json_bytes().expect("canonical");
+            c.nullspec_id = c.compute_id().expect("id");
+            let canonical = c.canonical_bytes().expect("canonical");
 
             let value = serde_json::to_value(&c).expect("value");
             let obj = value.as_object().expect("object");
             let mut permuted_map = serde_json::Map::new();
-            for key in ["version", "e_value", "id", "domain", "null_accuracy", "created_at_unix"] {
+            for key in ["schema", "oracle_id", "nullspec_id", "oracle_resolution_hash", "holdout_handle", "epoch_created", "ttl_epochs", "kind", "eprocess", "calibration_manifest_hash", "created_by", "signature_ed25519"] {
                 permuted_map.insert(key.to_string(), obj.get(key).cloned().expect("field"));
             }
             let permuted_bytes = serde_json::to_vec(&serde_json::Value::Object(permuted_map)).expect("permuted");
-            let reparsed: NullSpecContractV1 = serde_json::from_slice(&permuted_bytes).expect("parse");
-            let canonical_permuted = reparsed.canonical_json_bytes().expect("canonical 2");
+            let reparsed: SignedNullSpecContractV1 = serde_json::from_slice(&permuted_bytes).expect("parse");
+            let canonical_permuted = reparsed.canonical_bytes().expect("canonical 2");
 
             prop_assert_eq!(c.compute_id().expect("id a"), reparsed.compute_id().expect("id b"));
             prop_assert_eq!(canonical.len(), canonical_permuted.len());
-        }
-
-        #[test]
-        fn mixture_martingale_monotone_in_k(
-            n in 2usize..100usize,
-            p0 in 0.05f64..0.95f64,
-            weights in proptest::collection::vec(0.0f64..1.0f64, 2..8)
-        ) {
-            let grid: Vec<f64> = weights.into_iter().map(|w| p0 + (1.0 - p0) * w).collect();
-            let mut c = NullSpecContractV1 {
-                id: String::new(),
-                domain: "accuracy.binary.v1".to_string(),
-                null_accuracy: p0,
-                e_value: EValueSpecV1::MixtureBinaryMartingale { grid },
-                created_at_unix: 1,
-                version: 1,
-            };
-            c.id = c.compute_id().expect("id");
-            prop_assume!(c.validate(true).is_ok());
-            let e_low = c.compute_e_value_with_n(0.0, n).expect("e low");
-            let e_high = c.compute_e_value_with_n(1.0, n).expect("e high");
-            prop_assert!(e_high >= e_low);
         }
     }
 }

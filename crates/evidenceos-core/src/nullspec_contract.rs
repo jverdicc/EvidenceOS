@@ -12,7 +12,7 @@ pub enum EValueSpecV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NullSpecContractV1 {
+pub struct DraftNullSpecContractV1 {
     pub id: String,
     pub domain: String,
     pub null_accuracy: f64,
@@ -21,7 +21,7 @@ pub struct NullSpecContractV1 {
     pub version: u32,
 }
 
-impl NullSpecContractV1 {
+impl DraftNullSpecContractV1 {
     pub fn compute_id(&self) -> EvidenceOSResult<String> {
         let mut unsigned = self.clone();
         unsigned.id.clear();
