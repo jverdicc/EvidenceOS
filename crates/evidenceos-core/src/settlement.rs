@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,7 +40,25 @@ pub struct SignedSettlementRecord {
 }
 
 fn signing_payload(proposal: &UnsignedSettlementProposal) -> Result<Vec<u8>, &'static str> {
-    serde_json::to_vec(proposal).map_err(|_| "proposal serialization failed")
+    let value = serde_json::to_value(proposal).map_err(|_| "proposal serialization failed")?;
+    let sorted = sort_json(value);
+    serde_json::to_vec(&sorted).map_err(|_| "proposal serialization failed")
+}
+
+fn sort_json(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut sorted = Map::new();
+            for (k, val) in entries {
+                sorted.insert(k, sort_json(val));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(sort_json).collect()),
+        other => other,
+    }
 }
 
 pub fn sign_settlement_proposal(
@@ -75,6 +94,7 @@ pub fn verify_signed_settlement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[7u8; 32])
@@ -109,5 +129,34 @@ mod tests {
         let mut record = sign_settlement_proposal(proposal, &key).expect("sign");
         record.proposal.claim_state = "REVOKED".to_string();
         assert!(verify_signed_settlement(&record, &key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn canonical_payload_stable_across_json_key_order() {
+        let ordered = json!({
+            "schema_version": 1,
+            "claim_id_hex": "ef".repeat(32),
+            "claim_state": "SETTLED",
+            "epoch": 99,
+            "capsule_bytes": [99, 97, 112, 115, 117, 108, 101],
+            "capsule_hash_hex": hex::encode(Sha256::digest(b"capsule"))
+        });
+        let reordered = json!({
+            "capsule_hash_hex": ordered["capsule_hash_hex"],
+            "epoch": ordered["epoch"],
+            "claim_state": ordered["claim_state"],
+            "capsule_bytes": ordered["capsule_bytes"],
+            "schema_version": ordered["schema_version"],
+            "claim_id_hex": ordered["claim_id_hex"]
+        });
+
+        let ordered_proposal: UnsignedSettlementProposal =
+            serde_json::from_value(ordered).expect("ordered parse");
+        let reordered_proposal: UnsignedSettlementProposal =
+            serde_json::from_value(reordered).expect("reordered parse");
+
+        let ordered_payload = signing_payload(&ordered_proposal).expect("ordered payload");
+        let reordered_payload = signing_payload(&reordered_proposal).expect("reordered payload");
+        assert_eq!(ordered_payload, reordered_payload);
     }
 }
