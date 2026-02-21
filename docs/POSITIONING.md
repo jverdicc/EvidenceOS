@@ -57,11 +57,22 @@ The authors acknowledge this reality. We note that deployment in high-risk domai
 
 ---
 
-## Section 4: Connection to Active Research
+## Section 4: Connection to Active Research (Capability Spillover)
 
-The **Capability Spillover** vector mapped above is the focus of active, global research programs (such as SPAR) studying how highly capable AI systems might accumulate disproportionate influence or forbidden knowledge through incremental, individually innocuous steps.
+**What is Capability Spillover?**
+Global AI safety programs (such as SPAR) are actively researching a threat known as "Capability Spillover." This occurs when a highly advanced AI system pieces together dangerous or forbidden knowledge (like biological synthesis pathways or zero-day cyber-attack vectors) through a long sequence of tiny, seemingly innocent interactions. 
 
-EvidenceOS addresses this gap at the protocol level: rather than attempting to detect spillover behaviorally *after* the fact, it meters cumulative adaptivity leakage ($k$) as a physically conserved resource. By enforcing a hard boundary, it makes capability spillover mathematically expensive and ultimately impossible to execute past the predefined budget, shifting the paradigm from behavioral detection to architectural prevention.
+Think of it like an adversary collecting puzzle pieces. No single question the AI asks is flagged as dangerous by a standard safety filter, but over thousands of interactions, the AI connects the dots and "spills over" into possessing a restricted capability.
+
+**The Failure of Behavioral Detection:**
+Current industry guardrails attempt to stop this *behaviorally*—by evaluating each prompt in isolation and asking, "Is this specific request dangerous?" Because each individual step in a spillover attack looks entirely benign, traditional safety filters let them pass. The system is completely blind to the threat because it ignores the context of the aggregate transcript. 
+
+**The EvidenceOS Solution (Architectural Prevention):**
+EvidenceOS addresses this gap at the foundational protocol level. Instead of trying to guess if a seemingly safe question is actually part of a larger, hidden puzzle, EvidenceOS meters the *total amount of information* the AI is allowed to extract. 
+
+It tracks cumulative adaptivity leakage (k) as a finite physical resource. Every interaction, no matter how safe it looks, costs a fraction of the budget. By enforcing a hard mathematical boundary on the total transcript, EvidenceOS makes it physically impossible for the AI to collect enough pieces to execute a spillover attack. 
+
+We shift the paradigm from trying to detect bad behavior *after* the fact, to making the acquisition of dangerous capabilities architecturally impossible by cutting off the data supply.
 
 ---
 
