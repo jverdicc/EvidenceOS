@@ -229,6 +229,8 @@ See [docs/POSITIONING.md in DiscOS](link) for a full capability and risk matrix.
 | ETL tamper attempt | Bad inclusion/consistency proof or fork-history claim | ETL Merkle inclusion/consistency verification + signed tree heads | REJECT / incident | `crates/evidenceos-daemon/tests/etl_verification_system.rs`, `crates/evidenceos-daemon/tests/etl_proofs_system.rs` |
 | Sealed-vault escape attempts | Excess oracle calls, oversized output, forbidden runtime behavior (and float-op policy rejection where configured) | Sealed vault limits + ASPEC policy + lane controls + deterministic settlement checks | THROTTLE/REJECT/FROZEN depending on violation | `crates/evidenceos-daemon/tests/vault_execution.rs`, `crates/evidenceos-daemon/tests/aspec_rejections.rs`, `fuzz/fuzz_targets/fuzz_aspec_verify.rs` |
 
+For domain-specific integration guides showing how UVP maps onto electronic trading, FDA submissions, disease surveillance, and other high-stakes systems, see [docs/INTEGRATION_PATTERNS.md](docs/INTEGRATION_PATTERNS.md).
+
 ### Case study: distillation-style probing (public reporting)
 
 A commonly reported class of incidents is high-volume prompting campaigns intended to clone model behavior and coerce internal reasoning traces. EvidenceOS treats this as an operation-level security event at the verifier boundary: it detects high-volume/high-diversity probing patterns in real time, applies graded response (THROTTLE, then ESCALATE, then FROZEN/REJECT), and records auditable ETL evidence that the response occurred.

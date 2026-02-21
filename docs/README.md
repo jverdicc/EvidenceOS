@@ -14,3 +14,24 @@ Key starting points:
 - [Testing evidence](TEST_EVIDENCE.md)
 - [Coverage matrix](TEST_COVERAGE_MATRIX.md)
 - [LangChain preflight wrapper configuration](LANGCHAIN_WRAPPER.md)
+
+## Integration Guides
+Domain-specific guides showing how UVP maps onto high-stakes 
+production systems:
+
+- [Electronic Trading](integrations/electronic_trading.md) — 
+  strategy drawdown limits, signal decay, FIX engine boundary
+- [FDA Clinical Trials](integrations/fda_clinical_trials.md) — 
+  regulatory submission gateway, SAP as NullSpec
+- [Disease Surveillance](integrations/disease_surveillance.md) — 
+  outbreak alert gateway, PII protection via joint entropy
+- [Electrical Grid / SCADA](integrations/electrical_grid_scada.md) — 
+  control command admissibility, ASPEC whitelisting
+- [Climate Modeling](integrations/climate_modeling.md) — 
+  CMIP/IPCC assessment gateway, ensemble cherry-pick prevention
+- [AI Leaderboards](integrations/ai_leaderboards.md) — 
+  benchmark gaming prevention, topic budget depletion
+- [Pharmaceutical Synthesis](integrations/pharmaceutical_synthesis.md) — 
+  lab automation gateway, PhysHIR molar quantity checks
+- [Autonomous Vehicles](integrations/autonomous_vehicles.md) — 
+  OTA deployment gateway, edge case holdout protection
