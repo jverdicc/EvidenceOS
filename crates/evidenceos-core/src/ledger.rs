@@ -296,14 +296,33 @@ impl CanaryPulse {
 /// The Conservation Ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConservationLedger {
+    alpha: f64,
+    k_bits_total: f64,
+    epsilon_total: f64,
+    delta_total: f64,
+    access_credit_spent: f64,
+    wealth: f64,
+    w_max: f64,
+    events: Vec<LedgerEvent>,
+    k_bits_budget: Option<f64>,
+    access_credit_budget: Option<f64>,
+    frozen: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LedgerSnapshot {
     pub alpha: f64,
+    pub log_alpha_target: f64,
+    pub alpha_prime: f64,
+    pub log_alpha_prime: f64,
     pub k_bits_total: f64,
+    pub barrier_threshold: f64,
+    pub barrier: f64,
+    pub wealth: f64,
+    pub w_max: f64,
     pub epsilon_total: f64,
     pub delta_total: f64,
     pub access_credit_spent: f64,
-    pub wealth: f64,
-    pub w_max: f64,
-    pub events: Vec<LedgerEvent>,
     pub k_bits_budget: Option<f64>,
     pub access_credit_budget: Option<f64>,
     pub frozen: bool,
@@ -359,6 +378,55 @@ impl ConservationLedger {
     }
     pub fn barrier(&self) -> f64 {
         certification_barrier(self.alpha, self.k_bits_total)
+    }
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+    pub fn k_bits_total(&self) -> f64 {
+        self.k_bits_total
+    }
+    pub fn epsilon_total(&self) -> f64 {
+        self.epsilon_total
+    }
+    pub fn delta_total(&self) -> f64 {
+        self.delta_total
+    }
+    pub fn access_credit_spent(&self) -> f64 {
+        self.access_credit_spent
+    }
+    pub fn wealth(&self) -> f64 {
+        self.wealth
+    }
+    pub fn k_bits_budget(&self) -> Option<f64> {
+        self.k_bits_budget
+    }
+    pub fn access_credit_budget(&self) -> Option<f64> {
+        self.access_credit_budget
+    }
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+    pub fn events(&self) -> &[LedgerEvent] {
+        &self.events
+    }
+    pub fn snapshot(&self) -> LedgerSnapshot {
+        LedgerSnapshot {
+            alpha: self.alpha,
+            log_alpha_target: self.log_alpha_target(),
+            alpha_prime: self.alpha_prime(),
+            log_alpha_prime: self.log_alpha_prime(),
+            k_bits_total: self.k_bits_total,
+            barrier_threshold: self.barrier_threshold(),
+            barrier: self.barrier(),
+            wealth: self.wealth,
+            w_max: self.w_max,
+            epsilon_total: self.epsilon_total,
+            delta_total: self.delta_total,
+            access_credit_spent: self.access_credit_spent,
+            k_bits_budget: self.k_bits_budget,
+            access_credit_budget: self.access_credit_budget,
+            frozen: self.frozen,
+        }
     }
     pub fn certification_guard_failure(&self) -> Option<&'static str> {
         if !(self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0) {

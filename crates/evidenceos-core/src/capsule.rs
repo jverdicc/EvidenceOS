@@ -82,19 +82,20 @@ pub struct LedgerSnapshot {
 
 impl LedgerSnapshot {
     pub fn from_ledger(l: &ConservationLedger) -> Self {
+        let snapshot = l.snapshot();
         Self {
-            alpha: l.alpha,
-            log_alpha_target: l.log_alpha_target(),
-            alpha_prime: l.alpha_prime(),
-            log_alpha_prime: l.log_alpha_prime(),
-            k_bits_total: l.k_bits_total,
-            barrier_threshold: l.barrier_threshold(),
-            barrier: l.barrier(),
-            wealth: l.wealth,
-            w_max: l.w_max,
-            epsilon_total: l.epsilon_total,
-            delta_total: l.delta_total,
-            access_credit_spent: l.access_credit_spent,
+            alpha: snapshot.alpha,
+            log_alpha_target: snapshot.log_alpha_target,
+            alpha_prime: snapshot.alpha_prime,
+            log_alpha_prime: snapshot.log_alpha_prime,
+            k_bits_total: snapshot.k_bits_total,
+            barrier_threshold: snapshot.barrier_threshold,
+            barrier: snapshot.barrier,
+            wealth: snapshot.wealth,
+            w_max: snapshot.w_max,
+            epsilon_total: snapshot.epsilon_total,
+            delta_total: snapshot.delta_total,
+            access_credit_spent: snapshot.access_credit_spent,
             compute_fuel_spent: 0.0,
         }
     }
