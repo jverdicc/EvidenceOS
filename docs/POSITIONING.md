@@ -38,9 +38,20 @@ The enforcement of a Conservation Ledger introduces novel defensive capabilities
 
 ---
 
-## Section 3: Dual-Use Acknowledgment
+## Section 3: Dual-Use Acknowledgment (The Optimization Risk)
 
-EvidenceOS is inherently dual-use. Any mechanism that mathematically meters and bounds information extraction can be inverted to optimize extraction right up to that boundary. A DiscOS agent operating under a Conservation Ledger could, in principle, be used to guarantee its own probing stays beneath network anomaly detection thresholds rather than to prevent probing.
+EvidenceOS is inherently dual-use. Any mechanism that mathematically meters and bounds information extraction can be inverted by an adversary to optimize extraction right up to that boundary. 
+
+**The "Knapsack" Optimization Problem:**
+In an unbounded system, a malicious agent might probe messily, eventually tripping heuristic anomaly detectors due to noisy, high-volume requests. However, an agent operating under EvidenceOS that knows its exact leakage budget (e.g., k = 32 bits) will stop being noisy. It treats the budget as a strict resource constraint, internally simulating the mathematically optimal sequence of queries to extract the 32 absolute most valuable bits of the holdout dataset without wasting a single query on low-value information. 
+
+**The Stealth Factor:**
+This introduces the risk of perfect stealth. If an adversary or compromised agent knows the exact boundary where EvidenceOS transitions to a `HEAVY` or `FROZEN` state, they can mathematically guarantee their probing stays beneath standard Security Operations Center (SOC) anomaly detection thresholds. They can execute a slow, highly optimized extraction campaign with 100% certainty that they will not trigger the alarm.
+
+**The Architectural Trade-off:**
+While this creates a perfectly optimized environment for bounded extraction, it is an explicit and necessary systems engineering trade-off. 
+* Without EvidenceOS, an adversary can extract *unbounded* information silently. 
+* With EvidenceOS, an adversary is forced to spend immense compute just to perfectly optimize the extraction of a *strictly finite* and quantifiable fragment of information. We trade infinite, unknown risk for finite, mathematically bounded risk.
 
 The authors acknowledge this reality. We note that deployment in high-risk domains requires strict governance controls outside the protocol itself—specifically NullSpec pre-commitment, operator key management, and cryptographic audit transparency—to close the dual-use gap. This open-source release is intended to advance foundational defensive systems research, not to provide a blueprint for offensive use.
 
