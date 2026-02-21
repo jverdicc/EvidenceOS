@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 pub const ABI_FINGERPRINT: &str =
-    "d0da6d7860987b893d7ce3e083b4977546a595074ef10f05d85b2ee7792cdffe";
+    "db8793ff74221f40caef0efedb443e703c066441a10bc07ec7628f4ccc5a0ff4";
 
 pub const MODULE_ENV: &str = "env";
 pub const MODULE_KERNEL_ALIAS: &str = "kernel";
@@ -11,8 +11,6 @@ pub const MODULE_KERNEL_ALIAS: &str = "kernel";
 pub const IMPORT_ORACLE_QUERY: &str = "oracle_query";
 pub const IMPORT_ORACLE_BUCKET_ALIAS: &str = "oracle_bucket";
 pub const IMPORT_EMIT_STRUCTURED_CLAIM: &str = "emit_structured_claim";
-pub const IMPORT_DP_LAPLACE_I64: &str = "dp_laplace_i64";
-pub const IMPORT_DP_GAUSSIAN_F64: &str = "dp_gaussian_f64";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
@@ -31,22 +29,8 @@ pub struct ImportSpec {
 
 const ORACLE_PARAMS: &[ValueType] = &[ValueType::I32, ValueType::I32];
 const EMIT_PARAMS: &[ValueType] = &[ValueType::I32, ValueType::I32];
-const DP_LAPLACE_PARAMS: &[ValueType] = &[
-    ValueType::I64,
-    ValueType::F64,
-    ValueType::F64,
-    ValueType::F64,
-];
-const DP_GAUSSIAN_PARAMS: &[ValueType] = &[
-    ValueType::F64,
-    ValueType::F64,
-    ValueType::F64,
-    ValueType::F64,
-];
 const ORACLE_RESULTS: &[ValueType] = &[ValueType::I32];
 const EMIT_RESULTS: &[ValueType] = &[ValueType::I32];
-const DP_LAPLACE_RESULTS: &[ValueType] = &[ValueType::I64];
-const DP_GAUSSIAN_RESULTS: &[ValueType] = &[ValueType::F64];
 
 pub const REQUIRED_IMPORTS: &[ImportSpec] = &[
     ImportSpec {
@@ -63,20 +47,7 @@ pub const REQUIRED_IMPORTS: &[ImportSpec] = &[
     },
 ];
 
-pub const OPTIONAL_IMPORTS: &[ImportSpec] = &[
-    ImportSpec {
-        module: MODULE_ENV,
-        name: IMPORT_DP_LAPLACE_I64,
-        params: DP_LAPLACE_PARAMS,
-        results: DP_LAPLACE_RESULTS,
-    },
-    ImportSpec {
-        module: MODULE_ENV,
-        name: IMPORT_DP_GAUSSIAN_F64,
-        params: DP_GAUSSIAN_PARAMS,
-        results: DP_GAUSSIAN_RESULTS,
-    },
-];
+pub const OPTIONAL_IMPORTS: &[ImportSpec] = &[];
 
 pub const BACKCOMPAT_IMPORT_ALIASES: &[ImportSpec] = &[
     ImportSpec {
@@ -102,18 +73,6 @@ pub const BACKCOMPAT_IMPORT_ALIASES: &[ImportSpec] = &[
         name: IMPORT_EMIT_STRUCTURED_CLAIM,
         params: EMIT_PARAMS,
         results: EMIT_RESULTS,
-    },
-    ImportSpec {
-        module: MODULE_KERNEL_ALIAS,
-        name: IMPORT_DP_LAPLACE_I64,
-        params: DP_LAPLACE_PARAMS,
-        results: DP_LAPLACE_RESULTS,
-    },
-    ImportSpec {
-        module: MODULE_KERNEL_ALIAS,
-        name: IMPORT_DP_GAUSSIAN_F64,
-        params: DP_GAUSSIAN_PARAMS,
-        results: DP_GAUSSIAN_RESULTS,
     },
 ];
 
