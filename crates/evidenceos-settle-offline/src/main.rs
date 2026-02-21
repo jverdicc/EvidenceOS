@@ -65,7 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
 
     #[test]
     fn format_roundtrip() {
@@ -74,8 +73,11 @@ mod tests {
             claim_id_hex: "01".repeat(32),
             claim_state: "SETTLED".into(),
             epoch: 1,
-            capsule_bytes: b"abc".to_vec(),
-            capsule_hash_hex: hex::encode(Sha256::digest(b"abc")),
+            etl_index: 9,
+            sth_hash_hex: "ab".repeat(32),
+            decision: 1,
+            reason_codes: vec![9202],
+            capsule_hash_hex: "cd".repeat(32),
         };
         let payload = serde_json::to_vec(&proposal).expect("serialize");
         let parsed: UnsignedSettlementProposal = serde_json::from_slice(&payload).expect("parse");

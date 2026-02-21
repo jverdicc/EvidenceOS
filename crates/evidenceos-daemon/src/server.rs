@@ -82,6 +82,7 @@ const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
+const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
@@ -740,6 +741,22 @@ const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
 const MAGNITUDE_ENVELOPE_REASON_CODE: u32 = 9205;
 const LEDGER_NUMERIC_GUARD_REASON_CODE: u32 = 9206;
 
+#[derive(Debug, Clone)]
+struct IdempotencyCachedResponse {
+    response: pb::ExecuteClaimV2Response,
+}
+
+#[derive(Debug, Clone)]
+enum IdempotencyEntry {
+    InFlight {
+        expires_at: Instant,
+    },
+    Ready {
+        expires_at: Instant,
+        cached: IdempotencyCachedResponse,
+    },
+}
+
 #[derive(Debug)]
 struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
@@ -755,6 +772,7 @@ struct KernelState {
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
     operator_config: Mutex<OperatorRuntimeConfig>,
     nullspec_registry_state: Mutex<NullSpecRegistryState>,
+    execute_claim_v2_idempotency: Mutex<HashMap<(String, String), IdempotencyEntry>>,
 }
 
 #[derive(Debug)]
@@ -1020,6 +1038,7 @@ impl EvidenceOsService {
                 last_reload_attempt: Instant::now(),
                 reload_interval: nullspec_config.reload_interval,
             }),
+            execute_claim_v2_idempotency: Mutex::new(HashMap::new()),
         });
         recover_pending_mutation(&state)?;
         persist_all(&state)?;
@@ -1231,13 +1250,7 @@ impl EvidenceOsService {
             .map_err(|_| Status::failed_precondition("invalid signed settlement file"))?;
         let mut applied = 0usize;
         for record in records {
-            let etl_index = {
-                let mut etl = self.state.etl.lock();
-                let (idx, _) = etl
-                    .append(&record.proposal.capsule_bytes)
-                    .map_err(|_| Status::internal("etl append failed"))?;
-                idx
-            };
+            let etl_index = record.proposal.etl_index;
             if let Ok(claim_id) = decode_hex_hash32(&record.proposal.claim_id_hex, "claim_id") {
                 if let Some(claim) = self.state.claims.lock().get_mut(&claim_id) {
                     claim.etl_index = Some(etl_index);
@@ -1569,6 +1582,66 @@ impl EvidenceOsService {
             "AUTHZ_CLAIM_OWNER_MISMATCH: caller does not own claim",
         ))
     }
+
+    fn request_id_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Result<String, Status> {
+        let Some(raw) = metadata.get("x-request-id") else {
+            return Err(Status::invalid_argument("missing x-request-id"));
+        };
+        let req_id = raw
+            .to_str()
+            .map_err(|_| Status::invalid_argument("invalid x-request-id"))?
+            .trim();
+        if req_id.is_empty() || req_id.len() > 128 {
+            return Err(Status::invalid_argument("invalid x-request-id"));
+        }
+        Ok(req_id.to_string())
+    }
+
+    fn idempotency_lookup_execute_claim_v2(
+        &self,
+        principal_id: &str,
+        request_id: &str,
+    ) -> Result<Option<pb::ExecuteClaimV2Response>, Status> {
+        let now = Instant::now();
+        let mut cache = self.state.execute_claim_v2_idempotency.lock();
+        cache.retain(|_, entry| match entry {
+            IdempotencyEntry::InFlight { expires_at } => *expires_at > now,
+            IdempotencyEntry::Ready { expires_at, .. } => *expires_at > now,
+        });
+        let key = (principal_id.to_string(), request_id.to_string());
+        if let Some(entry) = cache.get(&key) {
+            return match entry {
+                IdempotencyEntry::Ready { cached, .. } => Ok(Some(cached.response.clone())),
+                IdempotencyEntry::InFlight { .. } => Err(Status::aborted(
+                    "request with x-request-id already in progress",
+                )),
+            };
+        }
+        cache.insert(
+            key,
+            IdempotencyEntry::InFlight {
+                expires_at: now + IDEMPOTENCY_TTL,
+            },
+        );
+        Ok(None)
+    }
+
+    fn idempotency_store_execute_claim_v2(
+        &self,
+        principal_id: String,
+        request_id: String,
+        response: pb::ExecuteClaimV2Response,
+    ) {
+        let mut cache = self.state.execute_claim_v2_idempotency.lock();
+        cache.insert(
+            (principal_id, request_id),
+            IdempotencyEntry::Ready {
+                expires_at: Instant::now() + IDEMPOTENCY_TTL,
+                cached: IdempotencyCachedResponse { response },
+            },
+        );
+    }
+
     fn observe_probe(
         &self,
         principal_id: String,
@@ -3822,7 +3895,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimV2Request>,
     ) -> Result<Response<pb::ExecuteClaimV2Response>, Status> {
-        let caller = Self::caller_identity(request.metadata());
+        let principal_id = Self::principal_id_from_metadata(request.metadata());
+        let request_id = Self::request_id_from_metadata(request.metadata())?;
+        if let Some(cached) =
+            self.idempotency_lookup_execute_claim_v2(&principal_id, &request_id)?
+        {
+            return Ok(Response::new(cached));
+        }
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         let (
@@ -4313,12 +4392,18 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "capsule_hash",
             )?;
             let etl_index = if self.offline_settlement_ingest {
+                let etl = self.state.etl.lock();
+                let sth_hash_hex = hex::encode(etl.root_hash());
+                drop(etl);
                 let proposal = UnsignedSettlementProposal {
                     schema_version: 1,
                     claim_id_hex: hex::encode(claim.claim_id),
                     claim_state: Self::state_name(claim.state).to_string(),
                     epoch: claim.epoch_counter,
-                    capsule_bytes: capsule_bytes.clone(),
+                    etl_index: 0,
+                    sth_hash_hex,
+                    decision,
+                    reason_codes: reason_codes.clone(),
                     capsule_hash_hex: hex::encode(capsule_hash),
                 };
                 write_unsigned_proposal(&self.state.data_path, &proposal)
@@ -4368,7 +4453,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_all(&self.state)?;
         clear_pending_mutation(&self.state)?;
 
-        Ok(Response::new(pb::ExecuteClaimV2Response {
+        let response = pb::ExecuteClaimV2Response {
             state: state.to_proto(),
             decision,
             reason_codes,
@@ -4377,7 +4462,13 @@ impl EvidenceOsV2 for EvidenceOsService {
             certified,
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
-        }))
+        };
+        self.idempotency_store_execute_claim_v2(
+            principal_id.clone(),
+            request_id.clone(),
+            response.clone(),
+        );
+        Ok(Response::new(response))
     }
 
     async fn get_capsule(
@@ -5175,6 +5266,68 @@ mod tests {
         .expect_err("unknown holdout should fail");
         assert_eq!(err.code(), Code::InvalidArgument);
         assert_eq!(err.message(), "unknown holdout_ref");
+    }
+
+    #[test]
+    fn execute_claim_v2_idempotency_returns_cached_response_for_same_request_id() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let principal_id = "principal-a";
+        let request_id = "req-1";
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
+            .expect("lookup")
+            .is_none());
+
+        let response = pb::ExecuteClaimV2Response {
+            state: pb::ClaimState::Settled as i32,
+            decision: pb::Decision::Approve as i32,
+            reason_codes: vec![1, 2],
+            canonical_output: vec![9],
+            e_value: 0.25,
+            certified: false,
+            capsule_hash: vec![7; 32],
+            etl_index: 10,
+        };
+        svc.idempotency_store_execute_claim_v2(
+            principal_id.to_string(),
+            request_id.to_string(),
+            response.clone(),
+        );
+
+        let cached = svc
+            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
+            .expect("cached lookup")
+            .expect("cached response");
+        assert_eq!(cached, response);
+    }
+
+    #[test]
+    fn execute_claim_v2_idempotency_tracks_distinct_request_ids_independently() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2("principal-a", "req-a")
+            .expect("lookup req-a")
+            .is_none());
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2("principal-a", "req-b")
+            .expect("lookup req-b")
+            .is_none());
     }
 
     #[test]
