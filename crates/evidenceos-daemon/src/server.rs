@@ -29,6 +29,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::PermissionsExt;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use getrandom::getrandom;
 use parking_lot::Mutex;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,7 @@ use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracl
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
+use crate::trial::{validate_and_build_delta, StratumKey, TrialAssignment, TrialRouter};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -86,6 +88,7 @@ const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
+const TRIAL_NONCE_LEN: usize = 16;
 const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BURN_WASM_MODULE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
@@ -448,6 +451,8 @@ struct Claim {
     owner_principal_id: String,
     #[serde(default)]
     created_at_unix_ms: u64,
+    #[serde(default)]
+    trial_assignment: Option<TrialAssignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -817,6 +822,7 @@ pub struct EvidenceOsService {
     enforce_operator_provenance: bool,
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
     domain_safety: DomainSafetyConfig,
+    trial_router: Arc<TrialRouter>,
 }
 
 #[derive(Debug, Clone)]
@@ -879,6 +885,12 @@ fn env_flag(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(default)
+}
+
+fn generate_trial_nonce() -> Result<[u8; TRIAL_NONCE_LEN], Status> {
+    let mut nonce = [0_u8; TRIAL_NONCE_LEN];
+    getrandom(&mut nonce).map_err(|_| Status::internal("trial nonce generation failed"))?;
+    Ok(nonce)
 }
 
 fn env_domain_set(name: &str, default: &str) -> HashSet<String> {
@@ -1134,6 +1146,7 @@ impl EvidenceOsService {
             enforce_operator_provenance,
             tee_attestor,
             domain_safety,
+            trial_router: Arc::new(TrialRouter::new(2, true, HashMap::new())?),
         })
     }
 
@@ -3081,6 +3094,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
 
+        if let Some(existing) = self.state.claims.lock().get(&claim_id).cloned() {
+            return Ok(Response::new(pb::CreateClaimResponse {
+                claim_id: claim_id.to_vec(),
+                state: existing.state.to_proto(),
+            }));
+        }
+
         let operation_id = build_operation_id(
             topic_id,
             None,
@@ -3088,6 +3108,17 @@ impl EvidenceOsV2 for EvidenceOsService {
             "create_claim_v1",
             Some(phys_hir_hash),
         );
+        let trial_nonce = generate_trial_nonce()?;
+        let trial_assignment = self.trial_router.assign(
+            trial_nonce,
+            &StratumKey::new(
+                "fast",
+                "legacy-v1",
+                &hex::encode(holdout_handle_id),
+                "builtin.accuracy",
+                "",
+            ),
+        )?;
         let claim = Claim {
             claim_id,
             topic_id,
@@ -3135,6 +3166,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             operation_id,
             owner_principal_id: caller.principal_id.clone(),
             created_at_unix_ms: current_time_unix_ms()?,
+            trial_assignment: Some(trial_assignment),
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -3858,15 +3890,6 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let claim_pln_cfg = claim_pln_config(lane, &pln_cfg)?;
-        let ledger = ConservationLedger::new(alpha)
-            .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
-            .map(|l| {
-                l.with_budgets(
-                    Some(lane_cfg.k_bits_budget),
-                    Some(lane_cfg.access_credit_budget),
-                )
-            })?;
-
         let oracle_resolution = lane_cfg.oracle_resolution;
 
         let mut id_payload = Vec::new();
@@ -3876,6 +3899,46 @@ impl EvidenceOsV2 for EvidenceOsService {
         id_payload.extend_from_slice(&dlc_cfg.epoch_size.to_be_bytes());
         id_payload.extend_from_slice(&oracle_resolution.num_symbols.to_be_bytes());
         let claim_id = sha256_domain(DOMAIN_CLAIM_ID, &id_payload);
+
+        if let Some(existing) = self.state.claims.lock().get(&claim_id).cloned() {
+            return Ok(Response::new(pb::CreateClaimV2Response {
+                claim_id: claim_id.to_vec(),
+                topic_id: existing.topic_id.to_vec(),
+                state: existing.state.to_proto(),
+            }));
+        }
+
+        let trial_nonce = generate_trial_nonce()?;
+        let trial_assignment = self.trial_router.assign(
+            trial_nonce,
+            &StratumKey::new(
+                Self::lane_name(lane),
+                req.claim_name.clone(),
+                &req.holdout_ref,
+                oracle_id.clone(),
+                nullspec_id.clone(),
+            ),
+        )?;
+        let intervention_delta =
+            validate_and_build_delta(&self.trial_router.intervention_actions(&trial_assignment)?)?;
+        let adjusted_alpha = (alpha * f64::from(intervention_delta.alpha_scale_ppm)) / 1_000_000.0;
+        let adjusted_access_credit =
+            (access_credit * f64::from(intervention_delta.access_credit_scale_ppm)) / 1_000_000.0;
+        Self::validate_budget_value(adjusted_access_credit, "adjusted_access_credit")?;
+
+        let mut lane_cfg = lane_cfg;
+        lane_cfg.access_credit_budget = adjusted_access_credit;
+        lane_cfg.k_bits_budget =
+            (lane_cfg.k_bits_budget * f64::from(intervention_delta.k_bits_scale_ppm)) / 1_000_000.0;
+        Self::validate_budget_value(lane_cfg.k_bits_budget, "adjusted_k_bits_budget")?;
+        let ledger = ConservationLedger::new(adjusted_alpha)
+            .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
+            .map(|l| {
+                l.with_budgets(
+                    Some(lane_cfg.k_bits_budget),
+                    Some(lane_cfg.access_credit_budget),
+                )
+            })?;
 
         let operation_id = build_operation_id(
             topic.topic_id,
@@ -3937,6 +4000,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             operation_id,
             owner_principal_id: caller.principal_id,
             created_at_unix_ms: current_time_unix_ms()?,
+            trial_assignment: Some(trial_assignment),
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         self.state
@@ -5424,6 +5488,64 @@ mod tests {
         assert_eq!(err.message(), "unknown holdout_ref");
     }
 
+    #[tokio::test]
+    async fn create_claim_v2_stores_trial_assignment_once() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-a";
+        let handle = [7u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let response = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            Request::new(claim_request(holdout_ref)),
+        )
+        .await
+        .expect("create");
+        assert_eq!(response.get_ref().topic_id.len(), 32);
+
+        let claim_id = parse_hash32(&response.get_ref().claim_id, "claim_id").expect("claim id");
+        let first_assignment = {
+            let claims = svc.state.claims.lock();
+            claims
+                .get(&claim_id)
+                .and_then(|claim| claim.trial_assignment.clone())
+                .expect("trial assignment")
+        };
+
+        let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            Request::new(claim_request(holdout_ref)),
+        )
+        .await
+        .expect("create duplicate");
+
+        let second_assignment = {
+            let claims = svc.state.claims.lock();
+            claims
+                .get(&claim_id)
+                .and_then(|claim| claim.trial_assignment.clone())
+                .expect("trial assignment")
+        };
+        assert_eq!(first_assignment, second_assignment);
+    }
+
     #[test]
     fn execute_claim_v2_idempotency_returns_cached_response_for_same_request_id() {
         let dir = TempDir::new().expect("tmp");
@@ -5654,6 +5776,7 @@ mod tests {
             operation_id: "op".to_string(),
             owner_principal_id: "test-owner".to_string(),
             created_at_unix_ms: 1,
+            trial_assignment: None,
         };
         let err = vault_context(
             &claim,
@@ -5713,6 +5836,7 @@ mod tests {
             operation_id: "op".to_string(),
             owner_principal_id: "test-owner".to_string(),
             created_at_unix_ms: 1,
+            trial_assignment: None,
         }
     }
 

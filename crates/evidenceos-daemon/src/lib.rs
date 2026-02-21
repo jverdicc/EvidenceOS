@@ -27,6 +27,7 @@ pub mod probe;
 pub mod server;
 pub mod settlement;
 pub mod telemetry;
+pub mod trial;
 pub mod vault;
 pub mod wasm_config;
 
