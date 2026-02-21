@@ -1,0 +1,110 @@
+# Epistemic Trial Harness (DiscOS/EvidenceOS)
+
+This document specifies how to run and analyze "trial-like" experiments against the DiscOS + EvidenceOS blackbox interface **without relying on implementation internals**. It aligns statistical claims with what ETL currently records.
+
+## 1) Trial unit definition
+
+The harness supports three analysis units. Pick one before analysis and keep it fixed in the protocol.
+
+- **Claim-level unit (default):** one analyzed row per `claim_id_hex` (or `participant_id` when present).
+- **Session-level unit:** one analyzed row per session/principal/topic window (derived externally from ETL context).
+- **Cluster-level unit:** a grouped randomization unit (for example shared operation key or deployment shard) analyzed with cluster-robust methods.
+
+### Why this matters
+
+Interference can occur when multiple requests share budgets, lineage, or operation/topic pools. If units are not isolated, IID assumptions are violated. Use cluster-aware analysis or isolate pools per arm.
+
+## 2) Endpoints and ETL semantics
+
+The harness uses mutually exclusive endpoint classes per trial unit:
+
+1. **Adversary success endpoint** (primary): the unit reaches an accepted terminal outcome (typically `CERTIFIED`; protocol may pre-register inclusion of `SETTLED`).
+2. **Freeze endpoint** (competing): the unit reaches containment/denial outcomes (`FREEZE`, optionally `REVOKED`/`TAINTED` if pre-registered as policy failure).
+3. **Incident endpoint** (competing): policy/security incident evidence is observed (for example `probe_event` with `action=FREEZE` or `canary_incident`).
+
+`analysis/trial_dataframe.py` expects explicit event coding in exported JSON rows:
+
+- `event_code=0` or `event_type="censored"`
+- `event_code=1` or `event_type="primary"`
+- `event_code=2` or `event_type="competing"`
+
+EvidenceOS ETL indexer semantics used for mapping:
+
+- claim `state` values are mapped to outcomes (`CERTIFIED`, `SETTLED`, `REVOKED`, `TAINTED`, `FREEZE`, `STALE`),
+- incident records are emitted as `probe_event` and `canary_incident` entries.
+
+> Important: do **not** assume "W hits zero ⇒ `FROZEN`" unless the run configuration actually enforces a freeze transition and ETL records it.
+
+## 3) Competing-risks model requirements
+
+### Required reporting
+
+For endpoints where freeze/incident can preclude adversary success:
+
+- report **cause-specific Cox PH** estimates for each cause,
+- report **cumulative incidence functions (CIF)** (Aalen-Johansen / Fine-Gray-compatible interpretation),
+- do not interpret 1−KM as cause probability when competing events are present.
+
+### What `analysis.survival` currently computes
+
+- `cox_summary.csv`: cause-specific Cox for primary and competing causes.
+- `cif_primary_by_arm.png`: Aalen-Johansen CIF for primary event.
+- `km_by_arm.png`: all-cause failure KM (descriptive only unless censoring assumptions are justified).
+
+KM is only valid for a specific cause if competing events are independent censoring for that cause; this is typically not a safe default for this harness.
+
+## 4) Allocation concealment guarantees and limits
+
+### Guarantees (from current implementation)
+
+- Trial assignment fields (`trial_arm_id`, `trial_intervention_id`) are carried in claim capsules and persisted in ETL-derived settlements.
+- ETL records are append-only and checksum-validated, supporting post-hoc auditability.
+
+### Limits
+
+- Concealment is a protocol/ops property, not a cryptographic guarantee from ETL alone.
+- Shared topic/budget pools can leak cross-arm signal (interference) unless arms are isolated.
+- Sessionized analysis can still be biased if one actor spans multiple identities/topics.
+
+## 5) CONSORT-style accounting for AI safety studies
+
+For legibility and reproducibility, publish:
+
+- screened/eligible/randomized/received/followup/analyzed counts (`analysis/consort.py` flow),
+- unit definition and randomization scope,
+- endpoint mapping table from ETL fields to event codes,
+- assumptions for censoring and interference handling.
+
+## 6) Blackbox worked example (I/O only)
+
+The example below is intentionally implementation-agnostic and uses only exported trial rows.
+
+**Input (`trial_rows.jsonl`):**
+
+```json
+{"participant_id":"u-001","arm":"control","duration_days":8,"event_type":"competing","consort_status":"analyzed"}
+{"participant_id":"u-002","arm":"control","duration_days":10,"event_type":"censored","consort_status":"followup_complete"}
+{"participant_id":"u-101","arm":"treatment","duration_days":6,"event_type":"primary","consort_status":"analyzed"}
+{"participant_id":"u-102","arm":"treatment","duration_days":7,"event_type":"competing","consort_status":"received_intervention"}
+```
+
+**Command:**
+
+```bash
+python -m analysis.survival --etl path/to/etl.log --out out_dir/
+```
+
+**Outputs (interpretable without Rust internals):**
+
+- `out_dir/cif_primary_by_arm.png`: primary-endpoint incidence under competing risks.
+- `out_dir/cox_summary.csv`: hazard ratios for primary vs competing causes.
+- `out_dir/consort.dot` (`consort.png` when graphviz is available): participant flow.
+
+## 7) Pre-registration checklist
+
+Before running a trial harness report, lock:
+
+- trial unit (claim/session/cluster),
+- endpoint mapping (which ETL outcomes map to primary/competing/censoring),
+- interference mitigation plan (isolation vs cluster-robust analysis),
+- censoring assumptions and sensitivity analyses.
