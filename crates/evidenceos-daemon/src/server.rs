@@ -738,6 +738,7 @@ type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
 const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
 const MAGNITUDE_ENVELOPE_REASON_CODE: u32 = 9205;
+const LEDGER_NUMERIC_GUARD_REASON_CODE: u32 = 9206;
 
 #[derive(Debug)]
 struct KernelState {
@@ -2317,6 +2318,9 @@ fn policy_oracle_input_json(
 ) -> Result<Vec<u8>, Status> {
     let payload = serde_json::json!({
         "alpha_micros": (ledger.alpha * 1_000_000.0).round() as u32,
+        "log_alpha_target": ledger.log_alpha_target(),
+        "log_alpha_prime": ledger.log_alpha_prime(),
+        "barrier_threshold": ledger.barrier_threshold(),
         "canonical_output_len": canonical_output.len() as u32,
         "canonical_output_sha256": hex::encode(sha256_bytes(canonical_output)),
         "claim_id": hex::encode(claim.claim_id),
@@ -4109,8 +4113,10 @@ impl EvidenceOsV2 for EvidenceOsService {
                 e_value,
                 None,
             )?;
+            let ledger_numeric_guard_failure = claim.ledger.certification_guard_failure();
             let can_certify = claim.ledger.can_certify();
             let mut decision = if claim.ledger.frozen
+                || ledger_numeric_guard_failure.is_some()
                 || claim.lane == Lane::Heavy
                 || physhir_mismatch
                 || magnitude_envelope_violation
@@ -4149,6 +4155,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             if magnitude_envelope_violation {
                 reason_codes.push(MAGNITUDE_ENVELOPE_REASON_CODE);
+            }
+            if ledger_numeric_guard_failure.is_some() {
+                reason_codes.push(LEDGER_NUMERIC_GUARD_REASON_CODE);
             }
             let oracle_input = policy_oracle_input_json(
                 claim,

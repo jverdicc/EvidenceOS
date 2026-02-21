@@ -64,8 +64,14 @@ impl ClaimState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LedgerSnapshot {
     pub alpha: f64,
+    #[serde(default)]
+    pub log_alpha_target: f64,
     pub alpha_prime: f64,
+    #[serde(default)]
+    pub log_alpha_prime: f64,
     pub k_bits_total: f64,
+    #[serde(default)]
+    pub barrier_threshold: f64,
     pub barrier: f64,
     pub wealth: f64,
     pub w_max: f64,
@@ -79,8 +85,11 @@ impl LedgerSnapshot {
     pub fn from_ledger(l: &ConservationLedger) -> Self {
         Self {
             alpha: l.alpha,
+            log_alpha_target: l.log_alpha_target(),
             alpha_prime: l.alpha_prime(),
+            log_alpha_prime: l.log_alpha_prime(),
             k_bits_total: l.k_bits_total,
+            barrier_threshold: l.barrier_threshold(),
             barrier: l.barrier(),
             wealth: l.wealth,
             w_max: l.w_max,
