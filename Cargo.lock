@@ -715,10 +715,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidenceos-attest"
+version = "0.1.0-alpha"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "evidenceos-core",
+ "serde_json",
+]
+
+[[package]]
 name = "evidenceos-core"
 version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
+ "base64",
  "crc32fast",
  "ed25519-dalek",
  "evidenceos-protocol",
