@@ -733,6 +733,7 @@ dependencies = [
  "base64",
  "crc32fast",
  "ed25519-dalek",
+ "evidenceos-guest-abi",
  "evidenceos-protocol",
  "hex",
  "parking_lot",
@@ -767,6 +768,7 @@ dependencies = [
  "criterion",
  "ed25519-dalek",
  "evidenceos-core",
+ "evidenceos-guest-abi",
  "evidenceos-protocol",
  "getrandom 0.2.17",
  "hex",
@@ -789,6 +791,14 @@ dependencies = [
  "tracing-subscriber",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "evidenceos-guest-abi"
+version = "0.1.0-alpha"
+dependencies = [
+ "hex",
+ "sha2",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 evidenceos-core = { path = "../evidenceos-core" }
 evidenceos-protocol = { path = "../evidenceos-protocol" }
+evidenceos-guest-abi = { path = "../evidenceos-guest-abi" }
 
 anyhow = "1"
 thiserror = "1"

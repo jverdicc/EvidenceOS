@@ -23,6 +23,10 @@ use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, StoreLimits, Store
 use evidenceos_core::nullspec_contract::NullSpecContractV1;
 use evidenceos_core::oracle::{AccuracyOracleState, HoldoutLabels, NullSpec, OracleResolution};
 use evidenceos_core::structured_claims;
+use evidenceos_guest_abi::{
+    IMPORT_DP_GAUSSIAN_F64, IMPORT_DP_LAPLACE_I64, IMPORT_EMIT_STRUCTURED_CLAIM,
+    IMPORT_ORACLE_BUCKET_ALIAS, IMPORT_ORACLE_QUERY, MODULE_ENV, MODULE_KERNEL_ALIAS,
+};
 
 use crate::wasm_config::deterministic_wasmtime_config;
 
@@ -278,11 +282,11 @@ impl VaultEngine {
     }
 
     fn define_imports(&self, linker: &mut Linker<VaultHostState>) -> Result<(), VaultError> {
-        for module in ["env", "kernel"] {
+        for module in [MODULE_ENV, MODULE_KERNEL_ALIAS] {
             linker
                 .func_wrap(
                     module,
-                    "oracle_bucket",
+                    IMPORT_ORACLE_QUERY,
                     |mut caller: Caller<'_, VaultHostState>,
                      pred_ptr: i32,
                      pred_len: i32|
@@ -329,7 +333,54 @@ impl VaultEngine {
             linker
                 .func_wrap(
                     module,
-                    "emit_structured_claim",
+                    IMPORT_ORACLE_BUCKET_ALIAS,
+                    |mut caller: Caller<'_, VaultHostState>,
+                     pred_ptr: i32,
+                     pred_len: i32|
+                     -> anyhow::Result<i32> {
+                        let preds = read_guest_memory(&mut caller, pred_ptr, pred_len)?;
+                        let host = caller.data_mut();
+                        host.oracle_calls = host.oracle_calls.saturating_add(1);
+                        if host.oracle_calls > host.config.max_oracle_calls {
+                            host.host_error = Some(VaultError::OracleCallLimitExceeded);
+                            return Err(anyhow::anyhow!("oracle call limit exceeded"));
+                        }
+                        if preds.len() != host.holdout_len || preds.iter().any(|b| *b > 1) {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            return Err(anyhow::anyhow!("invalid oracle input"));
+                        }
+
+                        let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            anyhow::anyhow!("oracle query failed")
+                        })?;
+                        host.leakage_bits += oracle_result.k_bits;
+                        if oracle_result.e_value == 0.0 {
+                            host.has_zero_e_value = true;
+                            host.accumulated_log_e_value = f64::NEG_INFINITY;
+                        } else if oracle_result.e_value.is_finite() && oracle_result.e_value > 0.0 {
+                            if !host.has_zero_e_value {
+                                host.accumulated_log_e_value += oracle_result.e_value.ln();
+                            }
+                        } else {
+                            host.host_error = Some(VaultError::InvalidOracleInput);
+                            return Err(anyhow::anyhow!("invalid oracle e-value"));
+                        }
+                        let mut input_digest = [0_u8; 32];
+                        input_digest.copy_from_slice(&Sha256::digest(&preds));
+                        host.call_trace.push(HostCallRecord::OracleBucket {
+                            input_digest,
+                            bucket: oracle_result.bucket,
+                        });
+                        Ok(oracle_result.bucket as i32)
+                    },
+                )
+                .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
+
+            linker
+                .func_wrap(
+                    module,
+                    IMPORT_EMIT_STRUCTURED_CLAIM,
                     |mut caller: Caller<'_, VaultHostState>,
                      ptr: i32,
                      len: i32|
@@ -379,7 +430,7 @@ impl VaultEngine {
             linker
                 .func_wrap(
                     module,
-                    "dp_laplace_i64",
+                    IMPORT_DP_LAPLACE_I64,
                     |mut caller: Caller<'_, VaultHostState>,
                      value: i64,
                      scale: f64,
@@ -428,7 +479,7 @@ impl VaultEngine {
             linker
                 .func_wrap(
                     module,
-                    "dp_gaussian_f64",
+                    IMPORT_DP_GAUSSIAN_F64,
                     |mut caller: Caller<'_, VaultHostState>,
                      value: f64,
                      sigma: f64,
@@ -706,7 +757,7 @@ mod tests {
     fn dp_primitive_consumes_budget() {
         let wasm = wat::parse_str(
             r#"(module
-                (import "env" "dp_laplace_i64" (func $dp_laplace_i64 (param i64 f64 f64 f64) (result i64)))
+                (import "env" IMPORT_DP_LAPLACE_I64 (func $dp_laplace_i64 (param i64 f64 f64 f64) (result i64)))
                 (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
                 (memory (export "memory") 1)
                 (data (i32.const 0) "\01")
@@ -736,7 +787,7 @@ mod tests {
     fn dp_budget_exceeded_fails_closed() {
         let wasm = wat::parse_str(
             r#"(module
-                (import "env" "dp_laplace_i64" (func $dp_laplace_i64 (param i64 f64 f64 f64) (result i64)))
+                (import "env" IMPORT_DP_LAPLACE_I64 (func $dp_laplace_i64 (param i64 f64 f64 f64) (result i64)))
                 (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
                 (memory (export "memory") 1)
                 (data (i32.const 0) "\01")

@@ -21,11 +21,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use wasmparser::{Operator, Parser, Payload, TypeRef};
 
-const REQUIRED_OUTPUT_IMPORTS: [(&str, &str); 2] = [
-    ("env", "emit_structured_claim"),
-    ("kernel", "emit_structured_claim"),
-];
+use evidenceos_guest_abi::{
+    allowed_import_pairs, IMPORT_EMIT_STRUCTURED_CLAIM, MODULE_ENV, MODULE_KERNEL_ALIAS,
+};
+
 const ALLOWED_EXPORTS: [&str; 2] = ["run", "memory"];
+
+fn is_required_output_import(module: &str, name: &str) -> bool {
+    (module == MODULE_ENV || module == MODULE_KERNEL_ALIAS) && name == IMPORT_EMIT_STRUCTURED_CLAIM
+}
 
 #[derive(Debug, Clone)]
 struct Cfg {
@@ -112,11 +116,9 @@ pub struct AspecPolicy {
 
 impl Default for AspecPolicy {
     fn default() -> Self {
-        let mut allowed = HashSet::new();
-        allowed.insert(("env".to_string(), "oracle_bucket".to_string()));
-        allowed.insert(("kernel".to_string(), "oracle_bucket".to_string()));
-        allowed.insert(("env".to_string(), "emit_structured_claim".to_string()));
-        allowed.insert(("kernel".to_string(), "emit_structured_claim".to_string()));
+        let allowed = allowed_import_pairs()
+            .map(|(module, name)| (module.to_string(), name.to_string()))
+            .collect();
         Self {
             lane: AspecLane::HighAssurance,
             allowed_imports: allowed,
@@ -178,10 +180,7 @@ fn is_forbidden_output_import(module: &str, name: &str) -> bool {
     lowered.contains("fd_write")
         || lowered.contains("console")
         || lowered.contains("stdout")
-        || lowered.contains("output")
-            && !REQUIRED_OUTPUT_IMPORTS
-                .iter()
-                .any(|(m, n)| module == *m && name == *n)
+        || lowered.contains("output") && !is_required_output_import(module, name)
 }
 
 fn compute_control_metadata(ops: &[Operator<'_>]) -> Result<ControlMetadata, String> {
@@ -476,10 +475,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                     import.module, import.name
                                 ));
                             }
-                            if REQUIRED_OUTPUT_IMPORTS
-                                .iter()
-                                .any(|(m, n)| import.module == *m && import.name == *n)
-                            {
+                            if is_required_output_import(import.module, import.name) {
                                 has_output_import = true;
                             }
                             if is_forbidden_output_import(import.module, import.name) {
