@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use evidenceos_core::nullspec_contract::{EValueSpecV1, NullSpecContractV1};
+use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
 use evidenceos_daemon::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 
 fn config() -> VaultConfig {
@@ -24,8 +24,8 @@ fn config() -> VaultConfig {
     }
 }
 
-fn test_nullspec() -> NullSpecContractV1 {
-    let mut spec = NullSpecContractV1 {
+fn test_nullspec() -> DraftNullSpecContractV1 {
+    let mut spec = DraftNullSpecContractV1 {
         id: String::new(),
         domain: "sealed-vault".to_string(),
         null_accuracy: 0.5,

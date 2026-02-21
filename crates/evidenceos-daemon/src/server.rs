@@ -57,7 +57,7 @@ use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl
 use evidenceos_core::holdout_crypto::{decrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
-use evidenceos_core::nullspec_contract::NullSpecContractV1 as RegistryNullSpecContractV1;
+use evidenceos_core::nullspec_contract::DraftNullSpecContractV1 as RegistryNullSpecContractV1;
 use evidenceos_core::nullspec_registry::{NullSpecAuthorityKeyring, NullSpecRegistry};
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
@@ -2648,7 +2648,7 @@ fn oracle_resolution_hash(resolution: &OracleResolution) -> Result<[u8; 32], Sta
 }
 
 fn compute_nullspec_e_value(
-    contract: &evidenceos_core::nullspec::NullSpecContractV1,
+    contract: &evidenceos_core::nullspec::SignedNullSpecContractV1,
     oracle_buckets: &[u32],
 ) -> Result<(f64, String), Status> {
     match (&contract.kind, &contract.eprocess) {
@@ -4069,7 +4069,10 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule.nullspec_id_hex = Some(hex::encode(contract.nullspec_id));
             capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
             capsule.eprocess_kind = Some(eprocess_kind_id);
-            capsule.nullspec_contract_hash_hex = Some(hex::encode(contract.compute_id()));
+            capsule.nullspec_contract_hash_hex =
+                Some(hex::encode(contract.compute_id().map_err(|_| {
+                    Status::internal("nullspec id compute failed")
+                })?));
             capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
             capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
             capsule.lineage_root_hash_hex = Some(hex::encode(claim.lineage_root_hash));
