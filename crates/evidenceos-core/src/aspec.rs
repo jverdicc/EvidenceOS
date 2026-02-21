@@ -16,6 +16,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! ASPEC-like verifier for restricted WebAssembly modules.
+//! In `LowAssurance`, loops are only admissible when a structural bounded-loop
+//! pattern is detected: compile-time counter initialization, `+1` counter step,
+//! constant bound compare, and `br_if 0` back-edge.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -106,7 +109,7 @@ pub struct AspecPolicy {
     pub max_cyclomatic_complexity: u64,
     /// §A.1 P_io max output bytes proxy.
     pub max_output_bytes: u32,
-    /// §A.1 P_loops loop bound cap.
+    /// §A.1 P_loops loop bound cap for structurally verified bounded loops.
     pub max_loop_bound: u64,
     /// §A.1 six-sigma Kolmogorov proxy cap.
     pub kolmogorov_proxy_cap: u64,
@@ -161,18 +164,6 @@ fn has_compression_magic(data: &[u8]) -> bool {
         &[0xfd, 0x2f, 0xb5, 0x28],
     ];
     MAGIC.iter().any(|m| data.windows(m.len()).any(|w| w == *m))
-}
-
-fn parse_loop_bounds(payload: &[u8], out: &mut VecDeque<u64>) {
-    let text = String::from_utf8_lossy(payload);
-    for tok in text.split_whitespace() {
-        if let Some(raw) = tok.strip_prefix("loop_bound:") {
-            let digits: String = raw.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(v) = digits.parse::<u64>() {
-                out.push_back(v);
-            }
-        }
-    }
 }
 
 fn is_forbidden_output_import(module: &str, name: &str) -> bool {
@@ -426,6 +417,115 @@ fn analyze_function(ops: &[Operator<'_>]) -> Result<FunctionSummary, String> {
     })
 }
 
+fn verify_bounded_loops(
+    ops: &[Operator<'_>],
+    matching_end: &[Option<usize>],
+    max_loop_bound: u64,
+) -> Result<Vec<u64>, String> {
+    let mut bounds_used = Vec::new();
+
+    for (loop_idx, _) in ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| matches!(op, Operator::Loop { .. }))
+    {
+        let Some(loop_end) = matching_end[loop_idx] else {
+            return Err(format!(
+                "loop at instruction {loop_idx} has no matching end"
+            ));
+        };
+
+        if loop_end <= loop_idx + 8 {
+            return Err(format!(
+                "loop at instruction {loop_idx} missing canonical counter pattern"
+            ));
+        }
+
+        let mut found_pattern = None;
+        for pos in loop_idx + 1..=loop_end.saturating_sub(7) {
+            let Some(Operator::LocalGet {
+                local_index: counter_local,
+            }) = ops.get(pos)
+            else {
+                continue;
+            };
+            if !matches!(ops.get(pos + 1), Some(Operator::I32Const { value: 1 })) {
+                continue;
+            }
+            if !matches!(ops.get(pos + 2), Some(Operator::I32Add)) {
+                continue;
+            }
+
+            let mut counter_update_ok = false;
+            match ops.get(pos + 3) {
+                Some(Operator::LocalSet { local_index })
+                | Some(Operator::LocalTee { local_index })
+                    if local_index == counter_local =>
+                {
+                    counter_update_ok = true
+                }
+                _ => {}
+            }
+            if !counter_update_ok {
+                continue;
+            }
+
+            if !matches!(
+                ops.get(pos + 4),
+                Some(Operator::LocalGet { local_index }) if local_index == counter_local
+            ) {
+                continue;
+            }
+
+            let bound = match ops.get(pos + 5) {
+                Some(Operator::I32Const { value }) if *value >= 0 => *value as u64,
+                _ => continue,
+            };
+
+            if !matches!(ops.get(pos + 6), Some(Operator::I32LtU | Operator::I32LtS)) {
+                continue;
+            }
+            if !matches!(ops.get(pos + 7), Some(Operator::BrIf { relative_depth: 0 })) {
+                continue;
+            }
+
+            let mut init_seen = false;
+            for init_pos in 0..loop_idx {
+                if let Some(Operator::I32Const { .. }) = ops.get(init_pos) {
+                    if matches!(
+                        ops.get(init_pos + 1),
+                        Some(Operator::LocalSet { local_index })
+                            if local_index == counter_local
+                    ) {
+                        init_seen = true;
+                        break;
+                    }
+                }
+            }
+            if !init_seen {
+                return Err(format!(
+                    "loop at instruction {loop_idx} missing compile-time counter init"
+                ));
+            }
+
+            found_pattern = Some(bound);
+            break;
+        }
+
+        let Some(bound) = found_pattern else {
+            return Err(format!(
+                "loop at instruction {loop_idx} missing canonical counter pattern"
+            ));
+        };
+        if bound > max_loop_bound {
+            return Err(format!("loop bound {bound} exceeds cap {max_loop_bound}"));
+        }
+        bounds_used.push(bound);
+    }
+
+    Ok(bounds_used)
+}
+
 /// Verify a Wasm module against ASPEC predicates (§A.1).
 pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut reasons: Vec<String> = Vec::new();
@@ -439,7 +539,6 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut next_defined_func_index: u32 = 0;
     let mut data_segment_bytes: u64 = 0;
     let mut data_bytes: Vec<u8> = Vec::new();
-    let mut loop_bounds: VecDeque<u64> = VecDeque::new();
     let mut exported_names = Vec::new();
     let mut has_run_export = false;
     let mut has_output_import = false;
@@ -535,9 +634,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                     data_bytes.extend_from_slice(bytes);
                 }
             }
-            Payload::CustomSection(reader) => {
-                parse_loop_bounds(reader.data(), &mut loop_bounds);
-            }
+            Payload::CustomSection(_) => {}
             Payload::FunctionSection(s) => defined_funcs = s.count(),
             Payload::CodeSectionStart { .. } => next_defined_func_index = 0,
             Payload::CodeSectionEntry(body) => {
@@ -566,22 +663,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                 AspecLane::HighAssurance => {
                                     reasons.push("loops are banned in HighAssurance".to_string())
                                 }
-                                AspecLane::LowAssurance => {
-                                    if let Some(bound) = loop_bounds.pop_front() {
-                                        if bound > policy.max_loop_bound {
-                                            reasons.push(format!(
-                                                "loop bound {} exceeds cap {}",
-                                                bound, policy.max_loop_bound
-                                            ));
-                                        }
-                                        bounds_used.push(bound);
-                                    } else {
-                                        reasons.push(
-                                            "LowAssurance loop missing loop_bound:<n> marker"
-                                                .to_string(),
-                                        );
-                                    }
-                                }
+                                AspecLane::LowAssurance => {}
                             }
                         }
                         Operator::BrTable { .. } => reasons
@@ -697,6 +779,20 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
 
                 match analyze_function(&ops) {
                     Ok(summary) => {
+                        if matches!(policy.lane, AspecLane::LowAssurance) {
+                            let Ok((matching_end, _, _)) = compute_control_metadata(&ops) else {
+                                reasons.push(format!(
+                                    "failed loop metadata for function {func_index}"
+                                ));
+                                continue;
+                            };
+                            match verify_bounded_loops(&ops, &matching_end, policy.max_loop_bound) {
+                                Ok(mut bounds) => bounds_used.append(&mut bounds),
+                                Err(err) => reasons.push(format!(
+                                    "function {func_index} violates bounded-loop admissibility: {err}"
+                                )),
+                            }
+                        }
                         if !is_reducible_cfg(&summary.cfg) {
                             reasons.push(format!("irreducible CFG in function {func_index}"));
                         }
@@ -862,74 +958,12 @@ mod tests {
         }
     }
 
-    fn encode_u32_leb(mut value: u32, out: &mut Vec<u8>) {
-        loop {
-            let mut byte = (value & 0x7f) as u8;
-            value >>= 7;
-            if value != 0 {
-                byte |= 0x80;
-            }
-            out.push(byte);
-            if value == 0 {
-                break;
-            }
-        }
-    }
-
-    fn decode_u32_leb(bytes: &[u8], at: &mut usize) -> Option<u32> {
-        let mut value = 0u32;
-        let mut shift = 0;
-        while *at < bytes.len() && shift < 35 {
-            let b = bytes[*at];
-            *at += 1;
-            value |= u32::from(b & 0x7f) << shift;
-            if b & 0x80 == 0 {
-                return Some(value);
-            }
-            shift += 7;
-        }
-        None
-    }
-
-    fn insert_meta_before_code_section(wasm: &[u8], payload: &str) -> Vec<u8> {
-        let mut out = Vec::with_capacity(wasm.len() + payload.len() + 32);
-        out.extend_from_slice(&wasm[..8]);
-
-        let mut i = 8usize;
-        let mut inserted = false;
-        while i < wasm.len() {
-            let section_id = wasm[i];
-            i += 1;
-            let mut leb_at = i;
-            let Some(size) = decode_u32_leb(wasm, &mut leb_at) else {
-                return wasm.to_vec();
-            };
-            let header = &wasm[i..leb_at];
-            i = leb_at;
-            let end = i.saturating_add(size as usize);
-            if end > wasm.len() {
-                return wasm.to_vec();
-            }
-
-            if !inserted && section_id == 10 {
-                let mut custom_payload = Vec::new();
-                encode_u32_leb(4, &mut custom_payload);
-                custom_payload.extend_from_slice(b"meta");
-                custom_payload.extend_from_slice(payload.as_bytes());
-                out.push(0);
-                let mut sz = Vec::new();
-                encode_u32_leb(custom_payload.len() as u32, &mut sz);
-                out.extend_from_slice(&sz);
-                out.extend_from_slice(&custom_payload);
-                inserted = true;
-            }
-
-            out.push(section_id);
-            out.extend_from_slice(header);
-            out.extend_from_slice(&wasm[i..end]);
-            i = end;
-        }
-        out
+    fn canonical_bounded_loop(bound: u32) -> String {
+        format!(
+            "(local $i i32) i32.const 0 local.set $i loop \
+             local.get $i i32.const 1 i32.add local.set $i \
+             local.get $i i32.const {bound} i32.lt_u br_if 0 end"
+        )
     }
 
     #[test]
@@ -1020,22 +1054,37 @@ mod tests {
         let mut policy = low_policy();
         policy.max_loop_bound = 1;
 
-        let missing = base_module("(loop nop)");
-        assert!(!verify_aspec(&missing, &policy).ok);
-
-        let exact = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:1");
+        let exact = base_module(&canonical_bounded_loop(1));
         assert!(verify_aspec(&exact, &policy).ok);
 
-        let over = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:2");
+        let over = base_module(&canonical_bounded_loop(2));
         assert!(!verify_aspec(&over, &policy).ok);
+    }
 
-        let two_loops = base_module("(loop nop) (loop nop)");
-        let two_one_bound = insert_meta_before_code_section(&two_loops, "loop_bound:1");
-        assert!(!verify_aspec(&two_one_bound, &policy).ok);
+    #[test]
+    fn p_loops_low_assurance_reject_data_dependent_bound() {
+        let mut policy = low_policy();
+        policy.max_loop_bound = 100;
 
-        let two_two_bounds =
-            insert_meta_before_code_section(&two_loops, "loop_bound:1 loop_bound:0");
-        assert!(verify_aspec(&two_two_bounds, &policy).ok);
+        let wasm = base_module(
+            "(local $i i32) (local $b i32) i32.const 0 local.set $i i32.const 3 local.set $b loop \
+             local.get $i i32.const 1 i32.add local.set $i \
+             local.get $i local.get $b i32.lt_u br_if 0 end",
+        );
+        assert!(!verify_aspec(&wasm, &policy).ok);
+    }
+
+    #[test]
+    fn p_loops_low_assurance_reject_noncanonical_counter_pattern() {
+        let mut policy = low_policy();
+        policy.max_loop_bound = 10;
+
+        let wasm = base_module(
+            "(local $i i32) i32.const 0 local.set $i loop \
+             local.get $i i32.const 2 i32.add local.set $i \
+             local.get $i i32.const 8 i32.lt_u br_if 0 end",
+        );
+        assert!(!verify_aspec(&wasm, &policy).ok);
     }
 
     #[test]
@@ -1237,67 +1286,12 @@ mod prop_tests {
         wat::parse_str(&wat).expect("wat")
     }
 
-    fn insert_meta_before_code_section(wasm: &[u8], payload: &str) -> Vec<u8> {
-        fn enc(mut v: u32, out: &mut Vec<u8>) {
-            loop {
-                let mut b = (v & 0x7f) as u8;
-                v >>= 7;
-                if v != 0 {
-                    b |= 0x80;
-                }
-                out.push(b);
-                if v == 0 {
-                    break;
-                }
-            }
-        }
-        fn dec(bytes: &[u8], at: &mut usize) -> Option<u32> {
-            let (mut v, mut s) = (0u32, 0);
-            while *at < bytes.len() {
-                let b = bytes[*at];
-                *at += 1;
-                v |= u32::from(b & 0x7f) << s;
-                if b & 0x80 == 0 {
-                    return Some(v);
-                }
-                s += 7;
-                if s > 28 {
-                    break;
-                }
-            }
-            None
-        }
-        let mut out = wasm[..8].to_vec();
-        let mut i = 8;
-        let mut inserted = false;
-        while i < wasm.len() {
-            let id = wasm[i];
-            i += 1;
-            let mut j = i;
-            let Some(sz) = dec(wasm, &mut j) else {
-                return wasm.to_vec();
-            };
-            let hdr = &wasm[i..j];
-            i = j;
-            let end = i + sz as usize;
-            if !inserted && id == 10 {
-                let mut cp = Vec::new();
-                enc(4, &mut cp);
-                cp.extend_from_slice(b"meta");
-                cp.extend_from_slice(payload.as_bytes());
-                out.push(0);
-                let mut sh = Vec::new();
-                enc(cp.len() as u32, &mut sh);
-                out.extend_from_slice(&sh);
-                out.extend_from_slice(&cp);
-                inserted = true;
-            }
-            out.push(id);
-            out.extend_from_slice(hdr);
-            out.extend_from_slice(&wasm[i..end]);
-            i = end;
-        }
-        out
+    fn canonical_bounded_loop(bound: u32) -> String {
+        format!(
+            "(local $i i32) i32.const 0 local.set $i loop \
+             local.get $i i32.const 1 i32.add local.set $i \
+             local.get $i i32.const {bound} i32.lt_u br_if 0 end"
+        )
     }
 
     proptest! {
@@ -1305,19 +1299,17 @@ mod prop_tests {
 
         #[test]
         fn prop_lane_controls_fp_and_loop_rules(use_fp in any::<bool>(), use_loop in any::<bool>()) {
-            let mut body = String::from("nop");
+            let mut body = if use_loop {
+                canonical_bounded_loop(1)
+            } else {
+                String::from("nop")
+            };
             if use_fp { body.push_str(" f32.const 1.0 drop"); }
-            if use_loop { body.push_str(" (loop nop)"); }
             let mut high = AspecPolicy::default();
             let low = AspecPolicy { lane: AspecLane::LowAssurance, float_policy: FloatPolicy::Allow, ..AspecPolicy::default() };
             high.max_loop_bound = 1;
             let high_ok = verify_aspec(&base_module(&body, None), &high).ok;
-            let low_ok = if use_loop {
-                let m = insert_meta_before_code_section(&base_module(&body, None), "loop_bound:1");
-                verify_aspec(&m, &low).ok
-            } else {
-                verify_aspec(&base_module(&body, None), &low).ok
-            };
+            let low_ok = verify_aspec(&base_module(&body, None), &low).ok;
             if use_fp || use_loop { prop_assert!(low_ok || !high_ok); }
         }
 
@@ -1366,10 +1358,10 @@ mod prop_tests {
         }
 
         #[test]
-        fn prop_loop_bound_enforced_when_marker_present(bound in 0u64..4u64, cap in 0u64..4u64) {
+        fn prop_loop_bound_enforced_for_canonical_loops(bound in 0u64..4u64, cap in 0u64..4u64) {
             let mut p = AspecPolicy { lane: AspecLane::LowAssurance, float_policy: FloatPolicy::Allow, max_loop_bound: cap, ..AspecPolicy::default() };
             p.max_output_bytes = 1024;
-            let m = insert_meta_before_code_section(&base_module("(loop nop)", None), &format!("loop_bound:{}", bound));
+            let m = base_module(&canonical_bounded_loop(bound as u32), None);
             let ok = verify_aspec(&m, &p).ok;
             prop_assert_eq!(ok, bound <= cap);
         }
