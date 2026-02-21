@@ -1,0 +1,9 @@
+{
+  "description": "Known-bad SEV-SNP fixture placeholder (tampered signature/report_data mismatch).",
+  "bundle_schema": {
+    "report_b64": "<tampered base64 SNP attestation report>",
+    "vcek_pem": "<PEM cert>",
+    "ask_pem": "<PEM cert>",
+    "ark_pem": "<PEM cert>"
+  }
+}

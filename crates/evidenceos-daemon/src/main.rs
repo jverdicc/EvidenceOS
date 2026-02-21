@@ -21,6 +21,7 @@
 
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
+use evidenceos_attest::{load_policy, verify_attestation_blob};
 use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
 use evidenceos_core::oracle_registry::OracleRegistry;
 use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
@@ -73,6 +74,10 @@ struct Args {
     oracle_dir: String,
     #[arg(long)]
     trusted_oracle_keys: Option<String>,
+    #[arg(long, default_value_t = false)]
+    require_attestation: bool,
+    #[arg(long)]
+    attestation_policy: Option<String>,
     #[arg(long)]
     nullspec_registry_dir: Option<String>,
     #[arg(long)]
@@ -177,6 +182,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             reload_interval: Duration::from_secs(30),
         },
     )?;
+
+    if args.require_attestation {
+        let policy_path = args
+            .attestation_policy
+            .as_ref()
+            .ok_or("--require-attestation requires --attestation-policy")?;
+        let policy_bytes = std::fs::read(policy_path)?;
+        let policy = load_policy(&policy_bytes)?;
+        let startup_measurement = std::env::var("EVIDENCEOS_STARTUP_TEE_MEASUREMENT_HEX")?;
+        let startup_blob = std::env::var("EVIDENCEOS_STARTUP_TEE_ATTESTATION_BLOB_B64")?;
+        let startup_backend = std::env::var("EVIDENCEOS_STARTUP_TEE_BACKEND")
+            .unwrap_or_else(|_| "amd-sev-snp".to_string());
+        verify_attestation_blob(
+            &startup_backend,
+            &startup_measurement,
+            &startup_blob,
+            &policy,
+        )?;
+        tracing::info!("startup attestation verification succeeded");
+    }
 
     if let Some(import_dir) = args.import_signed_settlements_dir.as_ref() {
         let key_hex = args.offline_settlement_verify_key_hex.as_ref().ok_or(
