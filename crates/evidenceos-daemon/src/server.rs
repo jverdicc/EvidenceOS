@@ -46,7 +46,9 @@ use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracl
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
-use crate::trial::{validate_and_build_delta, StratumKey, TrialAssignment, TrialRouter};
+use crate::trial::{
+    validate_and_build_delta, BaselineCovariates, StratumKey, TrialAssignment, TrialRouter,
+};
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -3147,13 +3149,12 @@ impl EvidenceOsV2 for EvidenceOsService {
         let trial_nonce = generate_trial_nonce()?;
         let trial_assignment = self.trial_router.assign(
             trial_nonce,
-            &StratumKey::new(
-                "fast",
-                "legacy-v1",
-                &hex::encode(holdout_handle_id),
-                "builtin.accuracy",
-                "",
-            ),
+            &StratumKey::from_baseline(BaselineCovariates {
+                lane: "fast".to_string(),
+                holdout_ref: hex::encode(holdout_handle_id),
+                oracle_id: "builtin.accuracy".to_string(),
+                nullspec_id: String::new(),
+            }),
         )?;
         let claim = Claim {
             claim_id,
@@ -3961,13 +3962,12 @@ impl EvidenceOsV2 for EvidenceOsService {
         let trial_nonce = generate_trial_nonce()?;
         let trial_assignment = self.trial_router.assign(
             trial_nonce,
-            &StratumKey::new(
-                Self::lane_name(lane),
-                req.claim_name.clone(),
-                &req.holdout_ref,
-                oracle_id.clone(),
-                nullspec_id.clone(),
-            ),
+            &StratumKey::from_baseline(BaselineCovariates {
+                lane: Self::lane_name(lane).to_string(),
+                holdout_ref: req.holdout_ref.clone(),
+                oracle_id: oracle_id.clone(),
+                nullspec_id: nullspec_id.clone(),
+            }),
         )?;
         let intervention_delta =
             validate_and_build_delta(&self.trial_router.intervention_actions(&trial_assignment)?)?;
