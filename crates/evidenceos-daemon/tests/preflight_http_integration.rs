@@ -52,6 +52,7 @@ async fn preflight_http_allows_then_escalates() {
 
     let first = client
         .post(&url)
+        .header("x-request-id", "req-1")
         .json(&payload)
         .send()
         .await
@@ -66,7 +67,13 @@ async fn preflight_http_allows_then_escalates() {
 
     let mut seen_transition = false;
     for _ in 0..5 {
-        let resp = client.post(&url).json(&payload).send().await.expect("resp");
+        let resp = client
+            .post(&url)
+            .header("x-request-id", "req-loop")
+            .json(&payload)
+            .send()
+            .await
+            .expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
         let v: serde_json::Value = resp.json().await.expect("json");
         let decision = v["decision"].as_str().unwrap_or_default();

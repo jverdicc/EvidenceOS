@@ -215,6 +215,7 @@ pub async fn preflight_tool_call_impl(
         ));
     }
     validate_authorization(headers, &state.cfg)?;
+    let request_id = validate_request_id(headers)?;
     enforce_rate_limit(state)?;
 
     let value: Value = serde_json::from_slice(body)
@@ -235,7 +236,7 @@ pub async fn preflight_tool_call_impl(
     let params_hash = stable_params_hash(&req.params)
         .map_err(|_| HttpErr::invalid_argument("invalid params object", "params_hash"))?;
 
-    let principal = req.agentId.clone().unwrap_or_else(|| "anon".to_string());
+    let principal = principal_id_from_auth(headers);
     let operation = req
         .sessionId
         .clone()
@@ -257,9 +258,11 @@ pub async fn preflight_tool_call_impl(
 
     let mut response = map_probe_verdict(&probe_verdict, &snapshot, state.hard_freeze_ops);
     tracing::info!(
+        request_id = %request_id,
         tool_name = %req.toolName,
-        agent_id = %principal,
+        principal_id = %principal,
         session_id = %operation,
+        agent_id = ?req.agentId,
         params_hash = %params_hash,
         decision = %response.decision,
         reason_code = %response.reasonCode,
@@ -294,12 +297,25 @@ pub async fn preflight_tool_call_impl(
     }
 
     tracing::info!(
+        request_id = %request_id,
         tool_name = %req.toolName,
-        agent_id = %principal,
+        principal_id = %principal,
         session_id = %operation,
+        agent_id = ?req.agentId,
         decision = %response.decision,
         reason_code = %response.reasonCode,
         "preflight decision"
+    );
+    tracing::info!(
+        target: "evidenceos.preflight.audit",
+        request_id = %request_id,
+        principal_id = %principal,
+        tool_name = %req.toolName,
+        session_id = ?req.sessionId,
+        agent_id = ?req.agentId,
+        decision = %response.decision,
+        reason_code = %response.reasonCode,
+        "preflight audit event"
     );
     Ok(response)
 }
@@ -448,6 +464,62 @@ fn validate_authorization(headers: &HeaderMap, cfg: &DaemonConfig) -> Result<(),
         return Err(HttpErr::unauthorized());
     }
     Ok(())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_request_id(headers: &HeaderMap) -> Result<String, HttpErr> {
+    let Some(value) = headers.get("x-request-id") else {
+        return Err(HttpErr::invalid_argument(
+            "missing x-request-id header",
+            "missing_request_id",
+        ));
+    };
+    let request_id = value
+        .to_str()
+        .map_err(|_| HttpErr::invalid_argument("invalid x-request-id", "invalid_request_id"))?;
+    if request_id.is_empty() || request_id.len() > 128 {
+        return Err(HttpErr::invalid_argument(
+            "invalid x-request-id",
+            "invalid_request_id",
+        ));
+    }
+    if request_id
+        .bytes()
+        .any(|b| !(0x21..=0x7e).contains(&b) || b == b':')
+    {
+        return Err(HttpErr::invalid_argument(
+            "invalid x-request-id",
+            "invalid_request_id",
+        ));
+    }
+    Ok(request_id.to_string())
+}
+
+fn principal_id_from_auth(headers: &HeaderMap) -> String {
+    if let Some(v) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        if let Some(token) = v.strip_prefix("Bearer ") {
+            return format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes())));
+        }
+    }
+    if let Some(v) = headers
+        .get("x-evidenceos-signature")
+        .and_then(|v| v.to_str().ok())
+    {
+        return format!("hmac:{}", hex::encode(sha256_bytes(v.as_bytes())));
+    }
+    if let Some(v) = headers
+        .get("x-client-cert-fp")
+        .and_then(|v| v.to_str().ok())
+    {
+        return format!("mtls:{}", hex::encode(sha256_bytes(v.as_bytes())));
+    }
+    "anonymous".to_string()
+}
+
+fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    hasher.finalize().into()
 }
 
 #[allow(clippy::result_large_err)]

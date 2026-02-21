@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue};
 use parking_lot::Mutex;
 use proptest::prelude::*;
 use serde_json::{json, Map, Value};
@@ -37,12 +37,21 @@ fn state(cfg: DaemonConfig) -> HttpPreflightState {
     }
 }
 
+fn request_headers(request_id: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-request-id",
+        HeaderValue::from_str(request_id).expect("request id"),
+    );
+    headers
+}
+
 #[tokio::test]
 async fn invalid_tool_name_rejected() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
     let body = json!({"toolName":"","params":{}}).to_string();
-    let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
+    let err = preflight_tool_call_impl(&st, &request_headers("req-1"), body.as_bytes())
         .await
         .expect_err("must reject");
     assert_eq!(err.response.reasonCode, "InvalidArgument");
@@ -53,7 +62,7 @@ async fn params_not_object_rejected() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
     let body = json!({"toolName":"exec","params":[]}).to_string();
-    let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
+    let err = preflight_tool_call_impl(&st, &request_headers("req-2"), body.as_bytes())
         .await
         .expect_err("must reject");
     assert_eq!(err.response.reasonCode, "InvalidArgument");
@@ -67,7 +76,7 @@ async fn body_too_large_rejected() {
     };
     let st = state(cfg);
     let body = json!({"toolName":"exec","params":{"x":"123456789"}}).to_string();
-    let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
+    let err = preflight_tool_call_impl(&st, &request_headers("req-3"), body.as_bytes())
         .await
         .expect_err("must reject");
     assert_eq!(err.response.reasonCode, "InvalidArgument");
@@ -81,7 +90,7 @@ async fn requires_bearer_token_when_configured() {
     };
     let st = state(cfg);
     let body = json!({"toolName":"exec","params":{}}).to_string();
-    let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
+    let err = preflight_tool_call_impl(&st, &request_headers("req-4"), body.as_bytes())
         .await
         .expect_err("must reject");
     assert_eq!(err.response.reasonCode, "Unauthorized");
@@ -92,7 +101,7 @@ async fn probe_freeze_after_threshold() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
     let body = json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"a"}).to_string();
-    let headers = HeaderMap::new();
+    let headers = request_headers("req-freeze");
 
     let mut final_decision = String::new();
     for _ in 0..5 {
@@ -102,6 +111,47 @@ async fn probe_freeze_after_threshold() {
         final_decision = resp.decision;
     }
     assert_eq!(final_decision, "DENY");
+}
+
+#[tokio::test]
+async fn requires_request_id_header() {
+    let cfg = DaemonConfig::default();
+    let st = state(cfg);
+    let body = json!({"toolName":"exec","params":{}}).to_string();
+    let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
+        .await
+        .expect_err("must reject");
+    assert_eq!(err.response.reasonCode, "InvalidArgument");
+    assert_eq!(
+        err.response.reasonDetail.as_deref(),
+        Some("missing x-request-id header")
+    );
+}
+
+#[tokio::test]
+async fn principal_comes_from_auth_not_agent_id() {
+    let cfg = DaemonConfig {
+        preflight_require_bearer_token: Some("secret".to_string()),
+        ..DaemonConfig::default()
+    };
+    let st = state(cfg);
+    let body_a =
+        json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"agent-a"}).to_string();
+    let body_b =
+        json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"agent-b"}).to_string();
+
+    let mut headers = request_headers("req-auth");
+    headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+
+    let first = preflight_tool_call_impl(&st, &headers, body_a.as_bytes())
+        .await
+        .expect("response");
+    let second = preflight_tool_call_impl(&st, &headers, body_b.as_bytes())
+        .await
+        .expect("response");
+
+    assert_eq!(first.decision, "ALLOW");
+    assert_eq!(second.decision, "DOWNGRADE");
 }
 
 proptest! {

@@ -294,6 +294,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         grpc.await.map_err(|e| e.to_string())
     })];
 
+    if daemon_cfg.preflight_http_listen.is_some()
+        && daemon_cfg.preflight_require_bearer_token.is_none()
+    {
+        tracing::warn!("preflight HTTP auth is not configured (preflight_require_bearer_token is unset); endpoint is insecure");
+    }
+
     if let Some(http_listen) = daemon_cfg.preflight_http_listen.clone() {
         let listener = http_preflight::bind_listener(&http_listen).await?;
         let mut http_shutdown_rx = shutdown_tx.subscribe();
