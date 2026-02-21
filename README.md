@@ -24,6 +24,8 @@ The result is a verification system with explicit risk posture, deterministic se
 3. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
 4. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 
+> 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
+
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
 This repository contains:
