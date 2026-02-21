@@ -127,6 +127,15 @@ pub struct PolicyOracleReceiptLike {
     pub reason_code: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TopicOracleReceiptLike {
+    pub claim_manifest_hash_hex: String,
+    pub semantic_hash_hex: String,
+    pub model_id: String,
+    pub timestamp_unix: u64,
+    pub signature_hex: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimCapsule {
     pub schema: String,
@@ -166,6 +175,8 @@ pub struct ClaimCapsule {
     pub escalate_to_heavy: Option<bool>,
     #[serde(default)]
     pub policy_oracle_receipts: Vec<PolicyOracleReceiptLike>,
+    #[serde(default)]
+    pub topic_oracle_receipt: Option<TopicOracleReceiptLike>,
     #[serde(default)]
     pub nullspec_id_hex: Option<String>,
     #[serde(default)]
@@ -342,6 +353,7 @@ impl ClaimCapsule {
             semantic_physhir_distance_bits: None,
             escalate_to_heavy: None,
             policy_oracle_receipts,
+            topic_oracle_receipt: None,
             nullspec_id_hex: None,
             oracle_resolution_hash_hex: None,
             eprocess_kind: None,
