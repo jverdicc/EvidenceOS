@@ -89,6 +89,7 @@ const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
 const TRIAL_NONCE_LEN: usize = 16;
+const TRIAL_COMMITMENT_SCHEMA_VERSION: u8 = 1;
 const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BURN_WASM_MODULE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
@@ -353,6 +354,7 @@ struct FreezePreimage {
     dependency_merkle_root: [u8; 32],
     holdout_ref_hash: [u8; 32],
     oracle_hash: [u8; 32],
+    trial_commitment_hash: [u8; 32],
     sealed_preimage_hash: [u8; 32],
 }
 
@@ -453,6 +455,8 @@ struct Claim {
     created_at_unix_ms: u64,
     #[serde(default)]
     trial_assignment: Option<TrialAssignment>,
+    #[serde(default)]
+    trial_commitment_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1537,6 +1541,7 @@ impl EvidenceOsService {
             oracle_resolution_hash: resolution_hash,
         };
         let oracle_hash = oracle_pins_hash(&oracle_pins);
+        let trial_commitment_hash = trial_commitment_hash(claim.trial_assignment.as_ref());
 
         let mut preimage_payload = Vec::new();
         preimage_payload.extend_from_slice(&artifacts_hash);
@@ -1544,6 +1549,7 @@ impl EvidenceOsService {
         preimage_payload.extend_from_slice(&dependency_merkle_root);
         preimage_payload.extend_from_slice(&holdout_ref_hash);
         preimage_payload.extend_from_slice(&oracle_hash);
+        preimage_payload.extend_from_slice(&trial_commitment_hash);
         let sealed_preimage_hash = sha256_bytes(&preimage_payload);
 
         claim.oracle_pins = Some(oracle_pins);
@@ -1553,8 +1559,10 @@ impl EvidenceOsService {
             dependency_merkle_root,
             holdout_ref_hash,
             oracle_hash,
+            trial_commitment_hash,
             sealed_preimage_hash,
         });
+        claim.trial_commitment_hash = trial_commitment_hash;
         claim.metadata_locked = true;
         Self::transition_claim_internal(claim, ClaimState::Sealed)
     }
@@ -2226,6 +2234,23 @@ fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
     let mut digest = [0u8; 32];
     digest.copy_from_slice(&out);
     digest
+}
+
+fn trial_commitment_hash(assignment: Option<&TrialAssignment>) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.push(TRIAL_COMMITMENT_SCHEMA_VERSION);
+    match assignment {
+        Some(assignment) => {
+            payload.extend_from_slice(&assignment.arm_id.to_be_bytes());
+            payload.extend_from_slice(assignment.intervention_id.as_bytes());
+            payload.extend_from_slice(&assignment.trial_nonce);
+        }
+        None => {
+            payload.extend_from_slice(&0u16.to_be_bytes());
+            payload.extend_from_slice(&[0u8; TRIAL_NONCE_LEN]);
+        }
+    }
+    sha256_bytes(&payload)
 }
 
 fn artifacts_commitment(artifacts: &[([u8; 32], String)]) -> [u8; 32] {
@@ -3167,6 +3192,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             owner_principal_id: caller.principal_id.clone(),
             created_at_unix_ms: current_time_unix_ms()?,
             trial_assignment: Some(trial_assignment),
+            trial_commitment_hash: [0u8; 32],
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -3633,6 +3659,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                         timestamp_unix: receipt.timestamp_unix,
                         signature_hex: hex::encode(&receipt.signature),
                     });
+            capsule.trial_commitment_hash_hex = Some(hex::encode(claim.trial_commitment_hash));
+            if let Some(assignment) = claim.trial_assignment.as_ref() {
+                capsule.trial_commitment_schema_version =
+                    Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
+                capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
+                capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
+                capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+            }
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -4001,6 +4035,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             owner_principal_id: caller.principal_id,
             created_at_unix_ms: current_time_unix_ms()?,
             trial_assignment: Some(trial_assignment),
+            trial_commitment_hash: [0u8; 32],
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         self.state
@@ -4540,6 +4575,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                         timestamp_unix: receipt.timestamp_unix,
                         signature_hex: hex::encode(&receipt.signature),
                     });
+            capsule.trial_commitment_hash_hex = Some(hex::encode(claim.trial_commitment_hash));
+            if let Some(assignment) = claim.trial_assignment.as_ref() {
+                capsule.trial_commitment_schema_version =
+                    Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
+                capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
+                capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
+                capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+            }
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
             } else {
@@ -5777,6 +5820,7 @@ mod tests {
             owner_principal_id: "test-owner".to_string(),
             created_at_unix_ms: 1,
             trial_assignment: None,
+            trial_commitment_hash: [0u8; 32],
         };
         let err = vault_context(
             &claim,
@@ -5837,6 +5881,7 @@ mod tests {
             owner_principal_id: "test-owner".to_string(),
             created_at_unix_ms: 1,
             trial_assignment: None,
+            trial_commitment_hash: [0u8; 32],
         }
     }
 

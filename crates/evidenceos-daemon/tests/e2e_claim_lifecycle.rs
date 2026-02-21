@@ -21,6 +21,7 @@ use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,6 +39,20 @@ fn sha256(payload: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(payload);
     hasher.finalize().to_vec()
+}
+
+fn trial_commitment_hash_from_fields(
+    schema_version: u8,
+    arm_id: u16,
+    intervention_id: &str,
+    trial_nonce: [u8; 16],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update([schema_version]);
+    hasher.update(arm_id.to_be_bytes());
+    hasher.update(intervention_id.as_bytes());
+    hasher.update(trial_nonce);
+    hex::encode(hasher.finalize())
 }
 
 fn valid_wasm() -> Vec<u8> {
@@ -214,6 +229,83 @@ async fn full_lifecycle_v2_through_tonic_server() {
     assert!(capsule.signed_tree_head.is_some());
     assert!(capsule.inclusion_proof.is_some());
     assert!(capsule.consistency_proof.is_some());
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn freeze_trial_commitment_hash_is_bound_into_capsule() {
+    let dir = TempDir::new().expect("tmp");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
+    let mut c = client(addr).await;
+
+    let claim_id = create_claim_v2(&mut c, 11).await;
+    commit_freeze_seal(&mut c, claim_id.clone(), valid_wasm()).await;
+
+    c.execute_claim_v2(pb::ExecuteClaimV2Request {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("execute");
+
+    let capsule = c
+        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .await
+        .expect("fetch")
+        .into_inner();
+    let json: Value = serde_json::from_slice(&capsule.capsule_bytes).expect("capsule json");
+
+    let hash_hex = json["trial_commitment_hash_hex"]
+        .as_str()
+        .expect("trial commitment hash");
+    let schema_version = json["trial_commitment_schema_version"]
+        .as_u64()
+        .expect("trial schema") as u8;
+    let arm_id = json["trial_arm_id"].as_u64().expect("trial arm") as u16;
+    let intervention_id = json["trial_intervention_id"]
+        .as_str()
+        .expect("trial intervention id");
+    let trial_nonce_hex = json["trial_nonce_hex"].as_str().expect("trial nonce hex");
+    let trial_nonce_vec = hex::decode(trial_nonce_hex).expect("decode nonce");
+    let trial_nonce: [u8; 16] = trial_nonce_vec
+        .try_into()
+        .expect("nonce has expected length");
+
+    let recomputed =
+        trial_commitment_hash_from_fields(schema_version, arm_id, intervention_id, trial_nonce);
+    assert_eq!(hash_hex, recomputed);
+
+    let changed_arm = trial_commitment_hash_from_fields(
+        schema_version,
+        arm_id.wrapping_add(1),
+        intervention_id,
+        trial_nonce,
+    );
+    assert_ne!(hash_hex, changed_arm);
+
+    let changed_intervention = trial_commitment_hash_from_fields(
+        schema_version,
+        arm_id,
+        &(intervention_id.to_string() + "-tampered"),
+        trial_nonce,
+    );
+    assert_ne!(hash_hex, changed_intervention);
+
+    let mut changed_nonce = trial_nonce;
+    changed_nonce[0] ^= 0x01;
+    let changed_nonce_hash =
+        trial_commitment_hash_from_fields(schema_version, arm_id, intervention_id, changed_nonce);
+    assert_ne!(hash_hex, changed_nonce_hash);
+
+    let changed_schema = trial_commitment_hash_from_fields(
+        schema_version.wrapping_add(1),
+        arm_id,
+        intervention_id,
+        trial_nonce,
+    );
+    assert_ne!(hash_hex, changed_schema);
 
     handle.abort();
 }

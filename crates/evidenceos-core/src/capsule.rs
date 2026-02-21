@@ -194,6 +194,16 @@ pub struct ClaimCapsule {
     pub eprocess_kind: Option<String>,
     #[serde(default)]
     pub nullspec_contract_hash_hex: Option<String>,
+    #[serde(default)]
+    pub trial_commitment_schema_version: Option<u32>,
+    #[serde(default)]
+    pub trial_arm_id: Option<u32>,
+    #[serde(default)]
+    pub trial_intervention_id: Option<String>,
+    #[serde(default)]
+    pub trial_nonce_hex: Option<String>,
+    #[serde(default)]
+    pub trial_commitment_hash_hex: Option<String>,
     pub environment_attestations: EnvironmentAttestations,
     pub state: ClaimState,
 }
@@ -349,6 +359,11 @@ impl ClaimCapsule {
             oracle_resolution_hash_hex: None,
             eprocess_kind: None,
             nullspec_contract_hash_hex: None,
+            trial_commitment_schema_version: None,
+            trial_arm_id: None,
+            trial_intervention_id: None,
+            trial_nonce_hex: None,
+            trial_commitment_hash_hex: None,
             environment_attestations: EnvironmentAttestations {
                 runtime_version,
                 aspec_version,
