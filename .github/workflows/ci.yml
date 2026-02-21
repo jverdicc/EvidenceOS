@@ -34,6 +34,12 @@ jobs:
       - name: Unit test coverage policy checker
         run: python -m unittest scripts.tests.test_check_coverage_policy
 
+      - name: Check implementation status guards
+        run: ./scripts/check_impl_status_guards.py
+
+      - name: Unit test implementation guard checker
+        run: python -m unittest scripts.tests.test_check_impl_status_guards
+
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 
