@@ -1,0 +1,9 @@
+{
+  "description": "Known-good SEV-SNP fixture placeholder. Real deployments should replace with platform-captured report/cert chain.",
+  "bundle_schema": {
+    "report_b64": "<base64 SNP attestation report>",
+    "vcek_pem": "<PEM cert>",
+    "ask_pem": "<PEM cert>",
+    "ark_pem": "<PEM cert>"
+  }
+}
