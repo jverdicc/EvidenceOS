@@ -50,7 +50,7 @@ EvidenceOS operationalizes the envelope with several primitives:
 
 • Sybil resistance via topic budgeting. Per-account limits are breakable by identity rotation; UVP charges a shared topic pool (TopicHash / MultiSignalTopicID) so extraction does not scale with identities.
 
-• Non-bypassable admissibility (ASPEC). ASPEC is a decidable admissibility profile for claim Wasm that forbids ambient capabilities (time, randomness, network, files), enforces static resource bounds, and prevents hidden internal search. This ensures hypothesis selection happens through metered oracle calls, not inside submitted code.
+• Non-bypassable admissibility (ASPEC). ASPEC is a decidable admissibility profile for claim Wasm that forbids ambient capabilities (time, randomness, network, files), forbids guest DP syscalls (`dp_laplace_i64`, `dp_gaussian_i64`) in sealed/high-assurance operation, enforces static resource bounds, and prevents hidden internal search. This ensures hypothesis selection happens through metered oracle calls, not inside submitted code.
 
 • Deterministic, auditable settlement. A Deterministic Logical Clock (DLC) and epoch settlement reduce timing leakage. The Evidence Transparency Log (ETL) is an append-only Merkle log that publishes signed tree heads, supports inclusion/consistency proofs, and feeds revocations. Claims form a lineage DAG; recursive revocation taints descendants when a root is slashed.
 
