@@ -74,6 +74,28 @@ It tracks cumulative adaptivity leakage (k) as a finite physical resource. Every
 
 We shift the paradigm from trying to detect bad behavior *after* the fact, to making the acquisition of dangerous capabilities architecturally impossible by cutting off the data supply.
 
+### 4.1 How EvidenceOS Stops Distributed Spillover (Swarms & Time-Shifted Attacks)
+
+A standard critique of leakage-budgeting is that an adversary can simply distribute their attack. If an AI agent needs 100 puzzle pieces, the operator might spin up 100 different dummy accounts (a Sybil attack), query five different APIs, or spread the queries out over six months to evade rate limits. 
+
+EvidenceOS defeats this because it is a **stateful kernel**. Traditional APIs track the *identity of the requester*. EvidenceOS tracks the *information being requested*.
+
+
+
+Here is how EvidenceOS physically enforces the budget across distributed boundaries:
+
+* **Across Different Users (TopicHash Budgeting):** When multiple agents ask questions, EvidenceOS does not just check their individual account limits. The kernel hashes the *semantic topic* and the *target holdout dataset* of the claim into a `TopicHash`. If 1,000 different agent identities ask for pieces of the same restricted biological sequence, the kernel maps them all to the same `TopicHash`. All 1,000 identities are charged against one single, shared leakage pool. Once the topic budget is saturated, the entire swarm is locked out.
+  
+* **Across Sessions and Variable Time (The Persistent Ledger):**
+  Standard API rate limits reset at midnight or when a session token expires. EvidenceOS budgets do not reset with time. Every query's budget consumption is written to the **Conservation Ledger** and permanently anchored in the append-only Evidence Transparency Log (ETL). If an adversary asks one question today, disconnects, and comes back three months later with a new session ID to ask the second question, the ledger simply resumes the math from where it left off. 
+
+
+
+* **Across Different Channels (Joint-Interface Accounting):**
+  An advanced adversary might try to extract the puzzle by attacking different systems—asking the "Accuracy Oracle" a few questions, then pivoting to the "Safety Oracle" to ask a few more, hoping the different endpoints don't talk to each other. EvidenceOS uses Joint-Interface Accounting. If two different oracles touch the same underlying holdout dataset, their leakage is pooled into a joint budget. An attacker cannot bypass the math by arbitraging different endpoints.
+
+By tying the budget to the *data lineage* rather than the *agent's identity or session*, EvidenceOS binds the adversary regardless of how they slice their attack across time, space, or identity.
+
 ---
 
 ## Section 5: Detailed Use Cases (Defense + Dual-Use)
