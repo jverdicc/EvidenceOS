@@ -1,5 +1,5 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::magnitude_envelope::{EnvelopeRegistry, EnvelopeViolation};
+use crate::magnitude_envelope::{active_registry, EnvelopeViolation};
 use crate::physhir::{check_dimension, parse_quantity, quantity_from_parts, Dimension, Quantity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -407,7 +407,7 @@ pub fn validate_and_canonicalize(
     if canonical_bytes.len() > schema.max_total_bytes {
         return Err(EvidenceOSError::InvalidArgument);
     }
-    let envelope_registry = EnvelopeRegistry::with_defaults();
+    let envelope_registry = active_registry();
     let envelope_violation = envelope_registry.validate_claim(&claim).err().map(|v| *v);
     Ok(StructuredClaimValidation {
         kout_bits_upper_bound: kout_bits_upper_bound(&canonical_bytes),
