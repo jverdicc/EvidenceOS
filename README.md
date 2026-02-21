@@ -238,6 +238,7 @@ A commonly reported class of incidents is high-volume prompting campaigns intend
 - **Sim-tested (repo evidence):** deterministic behavior, ledger transitions, ETL proofs/consistency, gRPC lifecycle paths, and fuzzed parser/state surfaces.
 - **Architecture specified:** DiscOS↔EvidenceOS split, ASPEC admissibility boundary, topic-budget anti-sybil model, and lane-based settlement controls.
 - **Roadmap:** stronger production hardening around key lifecycle/rotation, expanded policy packs, and additional end-to-end adversarial simulation suites.
+- **PLN implementation scope:** current production PLN is runtime fuel normalization + deterministic epoch rounding; compile-time CFG branch equalization is not yet implemented (see `docs/PLN_PRODUCTION_PROFILE.md`).
 
 ## Implementation status (paper ↔ code)
 
