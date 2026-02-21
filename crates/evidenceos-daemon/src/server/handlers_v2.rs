@@ -623,9 +623,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                     Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
+                capsule.trial_intervention_version = Some(assignment.intervention_version.clone());
+                capsule.trial_arm_parameters_hash_hex =
+                    Some(hex::encode(assignment.arm_parameters_hash));
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
                 capsule.trial = Some(TrialMetadata {
                     intervention_id: Some(assignment.intervention_id.clone()),
+                    intervention_version: Some(assignment.intervention_version.clone()),
+                    arm_parameters_hash_hex: Some(hex::encode(assignment.arm_parameters_hash)),
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
                 });
@@ -1563,9 +1568,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                     Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
+                capsule.trial_intervention_version = Some(assignment.intervention_version.clone());
+                capsule.trial_arm_parameters_hash_hex =
+                    Some(hex::encode(assignment.arm_parameters_hash));
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
                 capsule.trial = Some(TrialMetadata {
                     intervention_id: Some(assignment.intervention_id.clone()),
+                    intervention_version: Some(assignment.intervention_version.clone()),
+                    arm_parameters_hash_hex: Some(hex::encode(assignment.arm_parameters_hash)),
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
                 });

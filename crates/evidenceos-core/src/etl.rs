@@ -34,6 +34,10 @@ pub struct ClaimSettlementEvent {
     #[serde(default)]
     pub intervention_id: Option<String>,
     #[serde(default)]
+    pub intervention_version: Option<String>,
+    #[serde(default)]
+    pub arm_parameters_hash: Option<String>,
+    #[serde(default)]
     pub trial_nonce: Option<String>,
     #[serde(default)]
     pub arm_assigned_at: Option<u64>,
@@ -665,6 +669,8 @@ mod tests {
             outcome: "FROZEN".to_string(),
             k_bits_total: 64,
             intervention_id: Some("classical-support-bound".to_string()),
+            intervention_version: Some("v1".to_string()),
+            arm_parameters_hash: Some("00".repeat(32)),
             trial_nonce: Some("aabbccdd".to_string()),
             arm_assigned_at: Some(11),
         };
