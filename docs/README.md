@@ -12,3 +12,4 @@ Key starting points:
 - [Oracle design and controls](ORACLES.md)
 - [Testing evidence](TEST_EVIDENCE.md)
 - [Coverage matrix](TEST_COVERAGE_MATRIX.md)
+- [LangChain preflight wrapper configuration](LANGCHAIN_WRAPPER.md)
