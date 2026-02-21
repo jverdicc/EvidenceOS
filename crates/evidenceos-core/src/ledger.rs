@@ -568,6 +568,26 @@ impl ConservationLedger {
             .push(LedgerEvent::wealth(kind.to_string(), e_value, meta));
         Ok(())
     }
+
+    pub fn scale_wealth(&mut self, scale: f64) -> EvidenceOSResult<()> {
+        if self.frozen {
+            return Err(EvidenceOSError::Frozen);
+        }
+        if !scale.is_finite() || scale < 0.0 {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        self.wealth *= scale;
+        if !self.wealth.is_finite() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        Ok(())
+    }
+
+    pub fn freeze(&mut self, kind: &str, meta: Value) {
+        self.frozen = true;
+        self.events
+            .push(LedgerEvent::leak(kind.to_string(), 0.0, meta));
+    }
 }
 
 #[cfg(test)]

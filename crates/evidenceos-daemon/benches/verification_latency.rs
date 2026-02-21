@@ -82,7 +82,11 @@ fn bench_ledger_update_latency(c: &mut Criterion) {
                                 json!({"e_value": e_value, "mode": "w/k"}),
                             )
                             .expect("settle");
-                        criterion::black_box((ledger.k_bits_total, ledger.wealth, ledger.w_max));
+                        criterion::black_box((
+                            ledger.k_bits_total(),
+                            ledger.wealth(),
+                            ledger.w_max(),
+                        ));
                     },
                     criterion::BatchSize::SmallInput,
                 );
