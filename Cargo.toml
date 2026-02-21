@@ -5,6 +5,7 @@
 resolver = "2"
 members = [
   "crates/evidenceos-protocol",
+  "crates/evidenceos-verifier",
   "crates/evidenceos-core",
   "crates/evidenceos-guest-abi",
   "crates/evidenceos-attest",
