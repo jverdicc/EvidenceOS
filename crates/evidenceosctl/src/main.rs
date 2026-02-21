@@ -722,7 +722,7 @@ fn sign_governance_event(
         key_id,
         payload: payload.clone(),
     };
-    let signing_payload = serde_json::to_vec(&to_sign).map_err(|e| e.to_string())?;
+    let signing_payload = canonical_json(&to_sign).map_err(|e| e.to_string())?;
     let sig = signing.sign(&signing_payload).to_bytes();
     Ok(SignedGovernanceEvent {
         event_id: sha256_hex(&signing_payload),
