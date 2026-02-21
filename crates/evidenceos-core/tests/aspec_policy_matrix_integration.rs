@@ -4,67 +4,12 @@ fn base_module(body: &str) -> Vec<u8> {
     wat::parse_str(format!("(module (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32))) (func (export \"run\") {body}))")).expect("wat")
 }
 
-fn insert_meta_before_code_section(wasm: &[u8], payload: &str) -> Vec<u8> {
-    fn enc(mut v: u32, out: &mut Vec<u8>) {
-        loop {
-            let mut b = (v & 0x7f) as u8;
-            v >>= 7;
-            if v != 0 {
-                b |= 0x80;
-            }
-            out.push(b);
-            if v == 0 {
-                break;
-            }
-        }
-    }
-    fn dec(bytes: &[u8], at: &mut usize) -> Option<u32> {
-        let (mut v, mut s) = (0u32, 0);
-        while *at < bytes.len() {
-            let b = bytes[*at];
-            *at += 1;
-            v |= u32::from(b & 0x7f) << s;
-            if b & 0x80 == 0 {
-                return Some(v);
-            }
-            s += 7;
-            if s > 28 {
-                break;
-            }
-        }
-        None
-    }
-    let mut out = wasm[..8].to_vec();
-    let mut i = 8;
-    let mut inserted = false;
-    while i < wasm.len() {
-        let id = wasm[i];
-        i += 1;
-        let mut j = i;
-        let Some(sz) = dec(wasm, &mut j) else {
-            return wasm.to_vec();
-        };
-        let hdr = &wasm[i..j];
-        i = j;
-        let end = i + sz as usize;
-        if !inserted && id == 10 {
-            let mut cp = Vec::new();
-            enc(4, &mut cp);
-            cp.extend_from_slice(b"meta");
-            cp.extend_from_slice(payload.as_bytes());
-            out.push(0);
-            let mut sh = Vec::new();
-            enc(cp.len() as u32, &mut sh);
-            out.extend_from_slice(&sh);
-            out.extend_from_slice(&cp);
-            inserted = true;
-        }
-        out.push(id);
-        out.extend_from_slice(hdr);
-        out.extend_from_slice(&wasm[i..end]);
-        i = end;
-    }
-    out
+fn canonical_bounded_loop(bound: u32) -> String {
+    format!(
+        "(local $i i32) i32.const 0 local.set $i loop \
+         local.get $i i32.const 1 i32.add local.set $i \
+         local.get $i i32.const {bound} i32.lt_u br_if 0 end"
+    )
 }
 
 #[test]
@@ -81,10 +26,9 @@ fn lane_fp_and_loop_matrix() {
         ..AspecPolicy::default()
     };
     low.max_loop_bound = 1;
-    let float_loop = base_module("f32.const 1.0 drop (loop nop)");
+    let float_loop = base_module(&format!("{} f32.const 1.0 drop", canonical_bounded_loop(1)));
     assert!(!verify_aspec(&float_loop, &AspecPolicy::default()).ok);
-    let marked = insert_meta_before_code_section(&float_loop, "loop_bound:1");
-    assert!(verify_aspec(&marked, &low).ok);
+    assert!(verify_aspec(&float_loop, &low).ok);
 }
 
 #[test]
@@ -110,8 +54,24 @@ fn low_assurance_loop_bound_matrix() {
         ..AspecPolicy::default()
     };
     p.max_loop_bound = 1;
-    let one = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:1");
-    let over = insert_meta_before_code_section(&base_module("(loop nop)"), "loop_bound:2");
+    let one = base_module(&canonical_bounded_loop(1));
+    let over = base_module(&canonical_bounded_loop(2));
     assert!(verify_aspec(&one, &p).ok);
     assert!(!verify_aspec(&over, &p).ok);
+}
+
+#[test]
+fn low_assurance_rejects_data_dependent_loop_bound_matrix() {
+    let p = AspecPolicy {
+        lane: AspecLane::LowAssurance,
+        float_policy: FloatPolicy::Allow,
+        max_loop_bound: 100,
+        ..AspecPolicy::default()
+    };
+    let dep = base_module(
+        "(local $i i32) (local $b i32) i32.const 0 local.set $i i32.const 3 local.set $b loop \
+         local.get $i i32.const 1 i32.add local.set $i \
+         local.get $i local.get $b i32.lt_u br_if 0 end",
+    );
+    assert!(!verify_aspec(&dep, &p).ok);
 }

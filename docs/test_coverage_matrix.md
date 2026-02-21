@@ -12,7 +12,7 @@ This matrix maps required parameter-level API coverage to concrete tests.
 | `max_entropy_ratio` | `p_entropy_low_accept_high_with_magic_reject` | `prop_entropy_ratio_threshold_monotone`, `fuzz_aspec_verify` | `aspec_policy_violations_fail_closed` |
 | `max_cyclomatic_complexity` | `p_branch_complexity_boundaries` | `prop_cyclomatic_complexity_threshold`, `fuzz_aspec_verify` | `aspec_policy_violations_fail_closed` |
 | `max_output_bytes` | `boundary_params_output_kolmogorov_and_heavy_flag` | `prop_output_proxy_threshold`, `fuzz_aspec_verify` | `output_proxy_integration`, `aspec_policy_violations_fail_closed` |
-| `max_loop_bound` | `p_loops_low_assurance_bounds_enforced` | `prop_loop_bound_enforced_when_marker_present`, `fuzz_aspec_verify` | `low_assurance_loop_bound_matrix` |
+| `max_loop_bound` | `p_loops_low_assurance_bounds_enforced`, `p_loops_low_assurance_reject_data_dependent_bound`, `p_loops_low_assurance_reject_noncanonical_counter_pattern` | `prop_loop_bound_enforced_for_canonical_loops`, `fuzz_aspec_verify` | `low_assurance_loop_bound_matrix`, `low_assurance_rejects_data_dependent_loop_bound_matrix` |
 | `kolmogorov_proxy_cap` | `boundary_params_output_kolmogorov_and_heavy_flag` | `prop_heavy_lane_flag_threshold`, `fuzz_aspec_verify` | `output_proxy_integration` |
 
 ## Ledger (`crates/evidenceos-core/src/ledger.rs`)
