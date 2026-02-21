@@ -1465,15 +1465,14 @@ impl EvidenceOsService {
             to: Self::state_name(to),
         };
         self.telemetry.lifecycle_event(&event);
-        let remaining = claim
-            .ledger
-            .k_bits_budget
-            .map_or(0.0, |budget| (budget - claim.ledger.k_bits_total).max(0.0));
+        let remaining = claim.ledger.k_bits_budget().map_or(0.0, |budget| {
+            (budget - claim.ledger.k_bits_total()).max(0.0)
+        });
         self.telemetry.update_operation_gauges(
             &claim.operation_id,
             remaining,
-            claim.ledger.wealth,
-            claim.ledger.frozen || claim.state == ClaimState::Frozen,
+            claim.ledger.wealth(),
+            claim.ledger.is_frozen() || claim.state == ClaimState::Frozen,
         );
         Ok(())
     }
@@ -1596,7 +1595,9 @@ impl EvidenceOsService {
 
     fn record_incident(&self, claim: &mut Claim, reason: &str) -> Result<(), Status> {
         claim.state = ClaimState::Frozen;
-        claim.ledger.frozen = true;
+        claim
+            .ledger
+            .freeze("incident_freeze", json!({"reason": reason}));
         if let Some(capsule_hash) = claim.last_capsule_hash {
             let mut etl = self.state.etl.lock();
             etl.revoke(&hex::encode(capsule_hash), reason)
@@ -2495,7 +2496,7 @@ fn policy_oracle_input_json(
     reason_codes: &[u32],
 ) -> Result<Vec<u8>, Status> {
     let payload = serde_json::json!({
-        "alpha_micros": (ledger.alpha * 1_000_000.0).round() as u32,
+        "alpha_micros": (ledger.alpha() * 1_000_000.0).round() as u32,
         "log_alpha_target": ledger.log_alpha_target(),
         "log_alpha_prime": ledger.log_alpha_prime(),
         "barrier_threshold": ledger.barrier_threshold(),
@@ -2504,12 +2505,12 @@ fn policy_oracle_input_json(
         "claim_id": hex::encode(claim.claim_id),
         "epoch": claim.epoch_counter,
         "fuel_used": fuel_total,
-        "k_bits_total": ledger.k_bits_total,
+        "k_bits_total": ledger.k_bits_total(),
         "lane": EvidenceOsService::lane_name(claim.lane),
         "oracle_calls": vault_result.oracle_calls,
         "reason_codes": reason_codes,
         "topic_id": hex::encode(claim.topic_id),
-        "w": ledger.wealth,
+        "w": ledger.wealth(),
     });
     evidenceos_core::capsule::canonical_json(&payload)
         .map_err(|_| Status::internal("policy oracle input encode failed"))
@@ -3306,7 +3307,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let lane_cfg = LaneConfig::for_lane(
                 claim.lane,
                 claim.oracle_num_symbols,
-                claim.ledger.access_credit_budget.unwrap_or(0.0),
+                claim.ledger.access_credit_budget().unwrap_or(0.0),
             )?;
             let report = verify_aspec(&req.wasm_module, &lane_cfg.aspec_policy);
             let summary = format!(
@@ -4266,7 +4267,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     let topic_check = compute_topic_id(
                         &CoreClaimMetadataV2 {
                             lane: Self::lane_name(claim.lane).to_string(),
-                            alpha_micros: (claim.ledger.alpha * 1_000_000.0).round() as u32,
+                            alpha_micros: (claim.ledger.alpha() * 1_000_000.0).round() as u32,
                             epoch_config_ref: "execute".to_string(),
                             output_schema_id: claim.output_schema_id.clone(),
                         },
@@ -4408,7 +4409,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             )?;
             let ledger_numeric_guard_failure = claim.ledger.certification_guard_failure();
             let can_certify = claim.ledger.can_certify();
-            let mut decision = if claim.ledger.frozen
+            let mut decision = if claim.ledger.is_frozen()
                 || ledger_numeric_guard_failure.is_some()
                 || claim.lane == Lane::Heavy
                 || physhir_mismatch
@@ -4511,7 +4512,10 @@ impl EvidenceOsV2 for EvidenceOsService {
             if decision != pb::Decision::Approve as i32 {
                 let clamped = e_value.min(1.0);
                 if clamped < e_value {
-                    claim.ledger.wealth *= clamped / e_value;
+                    claim
+                        .ledger
+                        .scale_wealth(clamped / e_value)
+                        .map_err(|_| Status::internal("failed to clamp wealth"))?;
                 }
             }
             if decision == pb::Decision::Defer as i32 {
@@ -5328,11 +5332,11 @@ mod tests {
         let mut ledger = ConservationLedger::new(0.1).expect("valid ledger");
         let oracle = OracleResolution::new(2, 0.0).expect("resolution");
         assert!(oracle.decode_bucket(&[0xFF]).is_err());
-        assert_eq!(ledger.k_bits_total, 0.0);
+        assert_eq!(ledger.k_bits_total(), 0.0);
         ledger
             .charge(1.0, "structured_output", json!({}))
             .expect("charge should pass");
-        assert_eq!(ledger.k_bits_total, 1.0);
+        assert_eq!(ledger.k_bits_total(), 1.0);
     }
 
     #[test]
