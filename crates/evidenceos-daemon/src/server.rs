@@ -327,6 +327,8 @@ struct Claim {
     epoch_counter: u64,
     #[serde(default)]
     dlc_fuel_accumulated: u64,
+    #[serde(default)]
+    pln_config: Option<ClaimPlnConfig>,
     oracle_num_symbols: u32,
     oracle_resolution: OracleResolution,
     state: ClaimState,
@@ -361,6 +363,87 @@ struct EpochRuntimeConfigFile {
     epoch_size: u64,
     #[serde(default)]
     pln_constant_cost: Option<u64>,
+    #[serde(default)]
+    pln_target_fuel: Option<u64>,
+    #[serde(default)]
+    pln_max_fuel: Option<u64>,
+    #[serde(default)]
+    pln_fast_enabled: Option<bool>,
+    #[serde(default)]
+    pln_heavy_enabled: Option<bool>,
+    #[serde(default)]
+    pln: Option<PlnRuntimeConfigFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PlnRuntimeConfigFile {
+    target_fuel: u64,
+    max_fuel: u64,
+    #[serde(default)]
+    lanes: PlnLaneConfigFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlnLaneConfigFile {
+    #[serde(default = "bool_true")]
+    fast: bool,
+    #[serde(default = "bool_true")]
+    heavy: bool,
+}
+
+impl Default for PlnLaneConfigFile {
+    fn default() -> Self {
+        Self {
+            fast: true,
+            heavy: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ClaimPlnConfig {
+    target_fuel: u64,
+    max_fuel: u64,
+}
+
+impl<'de> Deserialize<'de> for ClaimPlnConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            target_fuel: u64,
+            max_fuel: u64,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            target_fuel: raw.target_fuel,
+            max_fuel: raw.max_fuel,
+        })
+    }
+}
+
+impl Serialize for ClaimPlnConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Raw {
+            target_fuel: u64,
+            max_fuel: u64,
+        }
+        Raw {
+            target_fuel: self.target_fuel,
+            max_fuel: self.max_fuel,
+        }
+        .serialize(serializer)
+    }
+}
+
+fn bool_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,6 +464,15 @@ struct LaneConfig {
     access_credit_budget: f64,
     dp_epsilon_budget: f64,
     dp_delta_budget: f64,
+}
+
+impl PlnLaneConfigFile {
+    fn supports_lane(&self, lane: Lane) -> bool {
+        match lane {
+            Lane::Fast => self.fast,
+            Lane::Heavy => self.heavy,
+        }
+    }
 }
 
 impl LaneConfig {
@@ -1879,13 +1971,31 @@ fn burn_padding_fuel(
     }
 }
 
-fn padded_fuel_total(epoch_budget: u64, fuel_used: u64) -> Result<u64, Status> {
+fn padded_fuel_total(
+    epoch_budget: u64,
+    fuel_used: u64,
+    pln_cfg: Option<&ClaimPlnConfig>,
+) -> Result<u64, Status> {
     if epoch_budget == 0 {
         return Err(Status::invalid_argument("epoch_size must be > 0"));
     }
-    let rem = fuel_used % epoch_budget;
+    let normalized = if let Some(pln_cfg) = pln_cfg {
+        if pln_cfg.target_fuel == 0 || pln_cfg.max_fuel == 0 {
+            return Err(Status::failed_precondition("PLN config invalid"));
+        }
+        if pln_cfg.target_fuel > pln_cfg.max_fuel {
+            return Err(Status::failed_precondition("PLN target exceeds max fuel"));
+        }
+        if fuel_used > pln_cfg.max_fuel {
+            return Err(Status::failed_precondition("PLN max fuel exceeded"));
+        }
+        fuel_used.max(pln_cfg.target_fuel)
+    } else {
+        fuel_used
+    };
+    let rem = normalized % epoch_budget;
     let padding_fuel = if rem == 0 { 0 } else { epoch_budget - rem };
-    Ok(fuel_used.saturating_add(padding_fuel))
+    Ok(normalized.saturating_add(padding_fuel))
 }
 
 fn kernel_structured_output(
@@ -2207,13 +2317,14 @@ fn load_epoch_runtime_config(
     data_dir: &Path,
     epoch_config_ref: &str,
     fallback_epoch_size: u64,
-) -> Result<DlcConfig, Status> {
+) -> Result<(DlcConfig, Option<PlnRuntimeConfigFile>), Status> {
     validate_required_str_field(epoch_config_ref, "epoch_config_ref", MAX_METADATA_FIELD_LEN)?;
     let mut cfg_path = data_dir.join("epoch_configs").join(epoch_config_ref);
     cfg_path.set_extension("json");
     if !cfg_path.exists() {
-        return DlcConfig::new(fallback_epoch_size)
-            .map_err(|_| Status::invalid_argument("epoch_size must be > 0"));
+        let cfg = DlcConfig::new(fallback_epoch_size)
+            .map_err(|_| Status::invalid_argument("epoch_size must be > 0"))?;
+        return Ok((cfg, None));
     }
     let bytes = std::fs::read(&cfg_path)
         .map_err(|_| Status::failed_precondition("read epoch config failed"))?;
@@ -2229,7 +2340,68 @@ fn load_epoch_runtime_config(
         }
         cfg.pln_constant_cost = Some(cost);
     }
-    Ok(cfg)
+    let pln_cfg = if let Some(pln_cfg) = parsed.pln {
+        Some(pln_cfg)
+    } else if parsed.pln_target_fuel.is_some()
+        || parsed.pln_max_fuel.is_some()
+        || parsed.pln_fast_enabled.is_some()
+        || parsed.pln_heavy_enabled.is_some()
+    {
+        Some(PlnRuntimeConfigFile {
+            target_fuel: parsed.pln_target_fuel.unwrap_or(0),
+            max_fuel: parsed.pln_max_fuel.unwrap_or(0),
+            lanes: PlnLaneConfigFile {
+                fast: parsed.pln_fast_enabled.unwrap_or(true),
+                heavy: parsed.pln_heavy_enabled.unwrap_or(true),
+            },
+        })
+    } else {
+        None
+    };
+
+    if let Some(pln_cfg) = pln_cfg {
+        if pln_cfg.target_fuel == 0 {
+            return Err(Status::invalid_argument(
+                "epoch config pln.target_fuel must be > 0",
+            ));
+        }
+        if pln_cfg.max_fuel == 0 {
+            return Err(Status::invalid_argument(
+                "epoch config pln.max_fuel must be > 0",
+            ));
+        }
+        if pln_cfg.target_fuel > pln_cfg.max_fuel {
+            return Err(Status::invalid_argument(
+                "epoch config pln.target_fuel must be <= pln.max_fuel",
+            ));
+        }
+        if !pln_cfg.lanes.fast && !pln_cfg.lanes.heavy {
+            return Err(Status::invalid_argument(
+                "epoch config pln must enable at least one lane",
+            ));
+        }
+        Ok((cfg, Some(pln_cfg)))
+    } else {
+        Ok((cfg, None))
+    }
+}
+
+fn claim_pln_config(
+    lane: Lane,
+    pln_cfg: &Option<PlnRuntimeConfigFile>,
+) -> Result<ClaimPlnConfig, Status> {
+    let cfg = pln_cfg
+        .as_ref()
+        .ok_or_else(|| Status::failed_precondition("PLN must be configured for claimed lane"))?;
+    if !cfg.lanes.supports_lane(lane) {
+        return Err(Status::failed_precondition(
+            "PLN not enabled for requested lane",
+        ));
+    }
+    Ok(ClaimPlnConfig {
+        target_fuel: cfg.target_fuel,
+        max_fuel: cfg.max_fuel,
+    })
 }
 
 fn current_logical_epoch(claim: &Claim) -> Result<u64, Status> {
@@ -2505,6 +2677,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             epoch_size: req.epoch_size,
             epoch_counter: 0,
             dlc_fuel_accumulated: 0,
+            pln_config: None,
             oracle_num_symbols: req.oracle_num_symbols,
             oracle_resolution,
             state: ClaimState::Uncommitted,
@@ -2797,7 +2970,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let emitted_output = vault_result.canonical_output;
             let fuel_used = vault_result.fuel_used;
             let epoch_budget = claim.epoch_size;
-            let fuel_total = padded_fuel_total(epoch_budget, fuel_used)?;
+            let fuel_total = padded_fuel_total(epoch_budget, fuel_used, claim.pln_config.as_ref())?;
             let padding_fuel = fuel_total.saturating_sub(fuel_used);
             burn_padding_fuel(&vault, &context, padding_fuel)?;
             claim.dlc_fuel_accumulated = claim.dlc_fuel_accumulated.saturating_add(fuel_total);
@@ -3058,7 +3231,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             "metadata.epoch_config_ref",
             MAX_METADATA_FIELD_LEN,
         )?;
-        let dlc_cfg =
+        let (dlc_cfg, pln_cfg) =
             load_epoch_runtime_config(&self.state.data_path, &epoch_config_ref, req.epoch_size)?;
         validate_required_str_field(
             &metadata.output_schema_id,
@@ -3141,6 +3314,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .record_lane_escalation(Self::lane_name(requested), Self::lane_name(lane));
         }
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
+        let claim_pln_cfg = claim_pln_config(lane, &pln_cfg)?;
         let ledger = ConservationLedger::new(alpha)
             .map_err(|_| Status::invalid_argument("alpha_micros must encode alpha in (0,1)"))
             .map(|l| {
@@ -3197,6 +3371,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             epoch_size: dlc_cfg.epoch_size,
             epoch_counter: 0,
             dlc_fuel_accumulated: 0,
+            pln_config: Some(claim_pln_cfg),
             oracle_num_symbols: req.oracle_num_symbols,
             oracle_resolution,
             state: ClaimState::Uncommitted,
@@ -3392,7 +3567,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let canonical_output = vault_result.canonical_output.clone();
             let fuel_used = vault_result.fuel_used;
             let epoch_budget = claim.epoch_size;
-            let fuel_total = padded_fuel_total(epoch_budget, fuel_used)?;
+            let fuel_total = padded_fuel_total(epoch_budget, fuel_used, claim.pln_config.as_ref())?;
             let padding_fuel = fuel_total.saturating_sub(fuel_used);
             burn_padding_fuel(&vault, &context, padding_fuel)?;
             claim.dlc_fuel_accumulated = claim.dlc_fuel_accumulated.saturating_add(fuel_total);
@@ -4349,6 +4524,46 @@ mod tests {
     }
 
     #[test]
+    fn epoch_runtime_config_requires_pln_for_claimed_lanes() {
+        let dir = TempDir::new().expect("tmp");
+        let epoch_dir = dir.path().join("epoch_configs");
+        std::fs::create_dir_all(&epoch_dir).expect("mkdir");
+        std::fs::write(
+            epoch_dir.join("epoch-a.json"),
+            r#"{
+                "epoch_size": 10,
+                "pln_target_fuel": 100,
+                "pln_max_fuel": 500,
+                "pln_fast_enabled": false,
+                "pln_heavy_enabled": true
+            }"#,
+        )
+        .expect("write");
+
+        let (_cfg, pln_cfg) = load_epoch_runtime_config(dir.path(), "epoch-a", 10).expect("cfg");
+        let fast_err = claim_pln_config(Lane::Fast, &pln_cfg).expect_err("fast disabled");
+        assert_eq!(fast_err.code(), Code::FailedPrecondition);
+        let heavy_cfg = claim_pln_config(Lane::Heavy, &pln_cfg).expect("heavy enabled");
+        assert_eq!(heavy_cfg.target_fuel, 100);
+        assert_eq!(heavy_cfg.max_fuel, 500);
+    }
+
+    #[test]
+    fn padded_fuel_total_enforces_target_and_max() {
+        let pln_cfg = ClaimPlnConfig {
+            target_fuel: 120,
+            max_fuel: 200,
+        };
+        assert_eq!(padded_fuel_total(10, 25, Some(&pln_cfg)).expect("pad"), 120);
+        assert_eq!(
+            padded_fuel_total(10, 137, Some(&pln_cfg)).expect("pad"),
+            140
+        );
+        let err = padded_fuel_total(10, 201, Some(&pln_cfg)).expect_err("max violated");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[test]
     fn revocation_payload_is_unambiguous_for_multiple_entries() {
         let entries_ab = vec![
             pb::RevocationEntry {
@@ -4494,6 +4709,7 @@ mod tests {
             epoch_size: 10,
             epoch_counter: 0,
             dlc_fuel_accumulated: 0,
+            pln_config: None,
             oracle_num_symbols: 4,
             oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
             state: ClaimState::Uncommitted,
@@ -4547,6 +4763,7 @@ mod tests {
             epoch_size: 10,
             epoch_counter: 0,
             dlc_fuel_accumulated: 0,
+            pln_config: None,
             oracle_num_symbols: 4,
             oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
             state: ClaimState::Uncommitted,

@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(profile) = load_pln_profile(std::path::Path::new(&args.data_dir))? {
-        tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_cycles.p99_cycles, wasm_p99=%profile.wasm_instruction_cycles.p99_cycles, "loaded PLN profile");
+        tracing::info!(cpu_model=%profile.cpu_model, syscall_p99=%profile.syscall_fuel.p99_fuel, wasm_p99=%profile.wasm_instruction_fuel.p99_fuel, "loaded PLN profile");
     }
     if let Some(src) = args.trusted_oracle_keys.as_deref() {
         let dst = std::path::Path::new(&args.data_dir).join("trusted_oracle_keys.json");
