@@ -25,6 +25,7 @@ The result is a verification system with explicit risk posture, deterministic se
 4. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 
 > 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
+> 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
@@ -338,6 +339,9 @@ The [DiscOS repository](https://github.com/jverdicc/DiscOS) includes:
 
 - a Rust client
 - a Python client example
+- safe demonstration scenarios that use synthetic/toy data and avoid operational harmful instructions
+
+When using DiscOS demos with EvidenceOS, keep demonstrations non-operational and policy-aligned; see [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md).
 
 If you are following older DiscOS docs/examples that reference `--etl-path`, update those invocations to EvidenceOS's current `--data-dir` flag.
 
