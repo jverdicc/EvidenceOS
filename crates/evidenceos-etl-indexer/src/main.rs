@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Parser;
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState};
 use serde::Deserialize;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
-const INDEX_SCHEMA_VERSION: i64 = 1;
+const INDEX_SCHEMA_VERSION: i64 = 2;
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CLAIM_CAPSULE_SCHEMA: &str = "evidenceos.v2.claim_capsule";
 
@@ -85,7 +86,13 @@ struct SettlementRow {
     ended_at: u64,
     topic_id: String,
     holdout_ref: String,
+    nullspec_id: Option<String>,
+    trial_nonce_b64: Option<String>,
     decision: i32,
+}
+
+fn sql_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn record_checksum(len_bytes: [u8; 4], payload: &[u8]) -> u32 {
@@ -129,7 +136,7 @@ fn build_sql(rows: &[SettlementRow], digest: &str) -> String {
         "PRAGMA journal_mode=WAL;\nPRAGMA synchronous=FULL;\nPRAGMA foreign_keys=ON;\nBEGIN IMMEDIATE;\n",
     );
     sql.push_str(
-        "CREATE TABLE settlements(\
+        "CREATE TABLE claim_settlements(\
             etl_index INTEGER PRIMARY KEY NOT NULL,\
             capsule_hash TEXT,\
             claim_id TEXT,\
@@ -141,8 +148,13 @@ fn build_sql(rows: &[SettlementRow], digest: &str) -> String {
             ended_at INTEGER NOT NULL,\
             topic_id TEXT,\
             holdout_ref TEXT,\
+            nullspec_id TEXT,\
+            trial_nonce_b64 TEXT,\
             decision INTEGER\
         );\n",
+    );
+    sql.push_str(
+        "CREATE VIEW settlements AS\n         SELECT etl_index,capsule_hash,claim_id,claim_name,arm_id,intervention_id,outcome,k_bits_total,ended_at,topic_id,holdout_ref,decision\n         FROM claim_settlements;\n",
     );
     sql.push_str(
         "CREATE TABLE index_manifest(\
@@ -152,15 +164,33 @@ fn build_sql(rows: &[SettlementRow], digest: &str) -> String {
             tool_version TEXT NOT NULL\
         );\n",
     );
-    sql.push_str("CREATE INDEX settlements_arm_outcome_idx ON settlements(arm_id, outcome);\n");
-    sql.push_str("CREATE INDEX settlements_intervention_outcome_idx ON settlements(intervention_id, outcome);\n");
-    sql.push_str("CREATE INDEX settlements_claim_name_idx ON settlements(claim_name);\n");
-    sql.push_str("CREATE INDEX settlements_ended_at_idx ON settlements(ended_at);\n");
+    sql.push_str(
+        "CREATE TABLE schema_version(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL);\n",
+    );
+    sql.push_str("INSERT INTO schema_version(id, version) VALUES(1, 2);\n");
+    sql.push_str(
+        "CREATE INDEX settlements_arm_outcome_idx ON claim_settlements(arm_id, outcome);\n",
+    );
+    sql.push_str("CREATE INDEX settlements_intervention_outcome_idx ON claim_settlements(intervention_id, outcome);\n");
+    sql.push_str("CREATE INDEX settlements_claim_name_idx ON claim_settlements(claim_name);\n");
+    sql.push_str("CREATE INDEX settlements_ended_at_idx ON claim_settlements(ended_at);\n");
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS idx_settlements_topic_time ON claim_settlements(topic_id, ended_at);\n",
+    );
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS idx_settlements_holdout_time ON claim_settlements(holdout_ref, ended_at);\n",
+    );
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS idx_settlements_nullspec_outcome ON claim_settlements(nullspec_id, outcome);\n",
+    );
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS idx_settlements_trial_nonce ON claim_settlements(trial_nonce_b64);\n",
+    );
 
     for row in rows {
         let _ = writeln!(
             sql,
-            "INSERT INTO settlements(etl_index,capsule_hash,claim_id,claim_name,arm_id,intervention_id,outcome,k_bits_total,ended_at,topic_id,holdout_ref,decision) VALUES({},{},{},{},{},{},{},{},{},{},{},{});",
+            "INSERT INTO claim_settlements(etl_index,capsule_hash,claim_id,claim_name,arm_id,intervention_id,outcome,k_bits_total,ended_at,topic_id,holdout_ref,nullspec_id,trial_nonce_b64,decision) VALUES({},{},{},{},{},{},{},{},{},{},{},{},{},{});",
             row.etl_index,
             sql_text(row.capsule_hash.as_deref()),
             sql_text(Some(&row.claim_id)),
@@ -172,6 +202,8 @@ fn build_sql(rows: &[SettlementRow], digest: &str) -> String {
             row.ended_at,
             sql_text(Some(&row.topic_id)),
             sql_text(Some(&row.holdout_ref)),
+            sql_text(row.nullspec_id.as_deref()),
+            sql_text(row.trial_nonce_b64.as_deref()),
             row.decision,
         );
     }
@@ -185,6 +217,12 @@ fn build_sql(rows: &[SettlementRow], digest: &str) -> String {
     );
     sql.push_str("COMMIT;\nVACUUM;\n");
     sql
+}
+
+fn trial_nonce_to_b64(capsule: &ClaimCapsule) -> Option<String> {
+    let nonce_hex = capsule.trial_nonce_hex.as_ref()?;
+    let raw = hex::decode(nonce_hex).ok()?;
+    Some(STANDARD.encode(raw))
 }
 
 fn outcome_from_claim_state(state: ClaimState) -> Option<&'static str> {
@@ -246,6 +284,7 @@ fn index_etl(etl_path: &Path) -> Result<Vec<SettlementRow>, IndexerError> {
                     source,
                 })?;
             if let Some(outcome) = outcome_from_claim_state(capsule.state) {
+                let trial_nonce_b64 = trial_nonce_to_b64(&capsule);
                 rows.push(SettlementRow {
                     etl_index,
                     capsule_hash: capsule.capsule_hash_hex().ok(),
@@ -258,6 +297,8 @@ fn index_etl(etl_path: &Path) -> Result<Vec<SettlementRow>, IndexerError> {
                     ended_at: etl_index,
                     topic_id: capsule.topic_id_hex,
                     holdout_ref: capsule.holdout_ref,
+                    nullspec_id: capsule.nullspec_id_hex,
+                    trial_nonce_b64,
                     decision: capsule.decision,
                 });
             }
@@ -316,6 +357,9 @@ fn index_etl(etl_path: &Path) -> Result<Vec<SettlementRow>, IndexerError> {
 }
 
 fn build_index(etl_path: &Path, out_path: &Path) -> Result<(), IndexerError> {
+    if out_path.exists() {
+        migrate_schema(out_path)?;
+    }
     let digest = etl_digest(etl_path)?;
     let rows = index_etl(etl_path)?;
     if let Some(parent) = out_path.parent() {
@@ -350,6 +394,140 @@ fn build_index(etl_path: &Path, out_path: &Path) -> Result<(), IndexerError> {
         fs::remove_file(out_path)?;
     }
     fs::rename(tmp_path, out_path)?;
+    Ok(())
+}
+
+fn sqlite3_query(db_path: &Path, query: &str) -> Result<String, IndexerError> {
+    let output = Command::new("sqlite3").arg(db_path).arg(query).output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(IndexerError::SqliteExec(format!(
+            "stdout={stdout}; stderr={stderr}"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn migrate_schema(db_path: &Path) -> Result<(), IndexerError> {
+    let table_exists = |name: &str| -> Result<bool, IndexerError> {
+        let q = format!(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name={};",
+            sql_text(Some(name))
+        );
+        Ok(sqlite3_query(db_path, &q)? == "1")
+    };
+    let table_has_column = |table: &str, column: &str| -> Result<bool, IndexerError> {
+        let q = format!("PRAGMA table_info({});", sql_ident(table));
+        let cols = sqlite3_query(db_path, &q)?;
+        Ok(cols
+            .lines()
+            .any(|line| line.split('|').nth(1).is_some_and(|name| name == column)))
+    };
+
+    let mut sql = String::from("BEGIN IMMEDIATE;\n");
+    sql.push_str("CREATE TABLE IF NOT EXISTS schema_version(id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL);\n");
+    let has_legacy_settlements = table_exists("settlements")?;
+    if table_exists("claim_settlements")? {
+        if !table_has_column("claim_settlements", "nullspec_id")? {
+            sql.push_str("ALTER TABLE claim_settlements ADD COLUMN nullspec_id TEXT;\n");
+        }
+        if !table_has_column("claim_settlements", "trial_nonce_b64")? {
+            sql.push_str("ALTER TABLE claim_settlements ADD COLUMN trial_nonce_b64 TEXT;\n");
+        }
+    } else if table_exists("settlements")? {
+        sql.push_str(
+            "CREATE TABLE IF NOT EXISTS claim_settlements(\
+                etl_index INTEGER PRIMARY KEY NOT NULL,\
+                capsule_hash TEXT,\
+                claim_id TEXT,\
+                claim_name TEXT,\
+                arm_id INTEGER,\
+                intervention_id TEXT,\
+                outcome TEXT NOT NULL,\
+                k_bits_total REAL,\
+                ended_at INTEGER NOT NULL,\
+                topic_id TEXT,\
+                holdout_ref TEXT,\
+                nullspec_id TEXT,\
+                trial_nonce_b64 TEXT,\
+                decision INTEGER\
+            );\n",
+        );
+        let cols = sqlite3_query(db_path, "PRAGMA table_info(settlements);")?;
+        let mut colset = std::collections::BTreeSet::new();
+        for line in cols.lines() {
+            if let Some(name) = line.split('|').nth(1) {
+                colset.insert(name.to_string());
+            }
+        }
+        let requested = [
+            "etl_index",
+            "capsule_hash",
+            "claim_id",
+            "claim_name",
+            "arm_id",
+            "intervention_id",
+            "outcome",
+            "k_bits_total",
+            "ended_at",
+            "topic_id",
+            "holdout_ref",
+            "nullspec_id",
+            "trial_nonce_b64",
+            "decision",
+        ];
+        let mut select_cols = Vec::new();
+        for col in requested {
+            if colset.contains(col) {
+                select_cols.push(sql_ident(col));
+            } else {
+                select_cols.push("NULL".to_string());
+            }
+        }
+        let query = format!(
+            "INSERT OR IGNORE INTO claim_settlements({}) SELECT {} FROM settlements;\n",
+            requested
+                .iter()
+                .map(|c| sql_ident(c))
+                .collect::<Vec<_>>()
+                .join(","),
+            select_cols.join(",")
+        );
+        sql.push_str(&query);
+    }
+    if !has_legacy_settlements {
+        sql.push_str("DROP VIEW IF EXISTS settlements;\n");
+        sql.push_str(
+            "CREATE VIEW settlements AS SELECT etl_index,capsule_hash,claim_id,claim_name,arm_id,intervention_id,outcome,k_bits_total,ended_at,topic_id,holdout_ref,decision FROM claim_settlements;\n",
+        );
+    }
+    sql.push_str("INSERT INTO schema_version(id, version) VALUES(1, 2) ON CONFLICT(id) DO UPDATE SET version=excluded.version;\n");
+    sql.push_str("CREATE INDEX IF NOT EXISTS settlements_arm_outcome_idx ON claim_settlements(arm_id, outcome);\n");
+    sql.push_str("CREATE INDEX IF NOT EXISTS settlements_intervention_outcome_idx ON claim_settlements(intervention_id, outcome);\n");
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS settlements_claim_name_idx ON claim_settlements(claim_name);\n",
+    );
+    sql.push_str(
+        "CREATE INDEX IF NOT EXISTS settlements_ended_at_idx ON claim_settlements(ended_at);\n",
+    );
+    sql.push_str("CREATE INDEX IF NOT EXISTS idx_settlements_topic_time ON claim_settlements(topic_id, ended_at);\n");
+    sql.push_str("CREATE INDEX IF NOT EXISTS idx_settlements_holdout_time ON claim_settlements(holdout_ref, ended_at);\n");
+    sql.push_str("CREATE INDEX IF NOT EXISTS idx_settlements_nullspec_outcome ON claim_settlements(nullspec_id, outcome);\n");
+    sql.push_str("CREATE INDEX IF NOT EXISTS idx_settlements_trial_nonce ON claim_settlements(trial_nonce_b64);\n");
+    sql.push_str("COMMIT;\n");
+
+    let output = Command::new("sqlite3")
+        .arg(db_path)
+        .arg(sql.replace('\n', " "))
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(IndexerError::SqliteExec(format!(
+            "stdout={stdout}; stderr={stderr}"
+        )));
+    }
     Ok(())
 }
 
@@ -461,5 +639,104 @@ mod tests {
         assert!(out.status.success());
         let rows = String::from_utf8(out.stdout).expect("utf8");
         assert_eq!(rows.trim(), "1");
+    }
+
+    #[test]
+    fn extracts_nullspec_and_trial_nonce() {
+        let temp = TempDir::new().expect("temp");
+        let etl = temp.path().join("etl.log");
+        let mut f = File::create(&etl).expect("etl");
+
+        let capsule = serde_json::json!({
+            "schema": CLAIM_CAPSULE_SCHEMA,
+            "claim_id_hex": "11",
+            "topic_id_hex": "22",
+            "output_schema_id": "legacy/v1",
+            "code_ir_manifests": [],
+            "dependency_capsule_hashes": [],
+            "structured_output_hash_hex": "aa",
+            "canonical_output_hash_hex": "bb",
+            "kout_bits_upper_bound": 0,
+            "wasm_hash_hex": "cc",
+            "judge_trace_hash_hex": "dd",
+            "holdout_ref": "holdout-a",
+            "holdout_commitment_hex": "ee",
+            "ledger": {
+                "alpha": 0.1,
+                "log_alpha_target": 0.0,
+                "alpha_prime": 0.1,
+                "log_alpha_prime": 0.0,
+                "k_bits_total": 2.0,
+                "barrier_threshold": 0.0,
+                "barrier": 0.0,
+                "wealth": 0.0,
+                "w_max": 0.0,
+                "epsilon_total": 0.0,
+                "delta_total": 0.0,
+                "access_credit_spent": 0.0,
+                "compute_fuel_spent": 0.0
+            },
+            "ledger_receipts": [],
+            "e_value": 1.0,
+            "certified": false,
+            "decision": 1,
+            "reason_codes": [],
+            "environment_attestations": {
+                "runtime_version": "r",
+                "aspec_version": "a",
+                "protocol_version": "p"
+            },
+            "state": "Frozen",
+            "nullspec_id_hex": "abcd",
+            "trial_nonce_hex": "01020304"
+        });
+
+        append_record(&mut f, &serde_json::to_vec(&capsule).expect("capsule"));
+        drop(f);
+
+        let db = temp.path().join("index.sqlite");
+        build_index(&etl, &db).expect("index build");
+
+        let out = Command::new("sqlite3")
+            .arg(&db)
+            .arg("SELECT holdout_ref,nullspec_id,trial_nonce_b64 FROM claim_settlements;")
+            .output()
+            .expect("sqlite3 query");
+        assert!(out.status.success());
+        let row = String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(row.trim(), "holdout-a|abcd|AQIDBA==");
+    }
+
+    #[test]
+    fn migrates_existing_settlements_table_to_claim_settlements() {
+        let temp = TempDir::new().expect("temp");
+        let db = temp.path().join("index.sqlite");
+        let setup = "CREATE TABLE settlements(etl_index INTEGER PRIMARY KEY NOT NULL,capsule_hash TEXT,claim_id TEXT,claim_name TEXT,arm_id INTEGER,intervention_id TEXT,outcome TEXT NOT NULL,k_bits_total REAL,ended_at INTEGER NOT NULL,topic_id TEXT,holdout_ref TEXT,decision INTEGER); INSERT INTO settlements(etl_index,claim_id,outcome,ended_at,topic_id,holdout_ref,decision) VALUES(1,'c1','FREEZE',1,'t','h',1);";
+        let status = Command::new("sqlite3")
+            .arg(&db)
+            .arg(setup)
+            .status()
+            .expect("sqlite3 setup");
+        assert!(status.success());
+
+        migrate_schema(&db).expect("migrate");
+
+        let out = Command::new("sqlite3")
+            .arg(&db)
+            .arg("SELECT COUNT(*), COALESCE(MAX(version), 0) FROM claim_settlements, schema_version;")
+            .output()
+            .expect("sqlite3 query");
+        assert!(out.status.success());
+        let row = String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(row.trim(), "1|2");
+
+        let idx = Command::new("sqlite3")
+            .arg(&db)
+            .arg("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_settlements_topic_time';")
+            .output()
+            .expect("sqlite3 index query");
+        assert!(idx.status.success());
+        let row = String::from_utf8(idx.stdout).expect("utf8");
+        assert_eq!(row.trim(), "1");
     }
 }
