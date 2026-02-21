@@ -4,3 +4,6 @@
 *.log
 artifacts/*
 !artifacts/.gitkeep
+!artifacts/forc10/
+!artifacts/forc10/**
+artifacts/forc10/out/

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use evidenceos_core::nullspec_contract::{EValueSpecV1, NullSpecContractV1};
+use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
 use evidenceos_daemon::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 
 fn config() -> VaultConfig {
@@ -24,8 +24,8 @@ fn config() -> VaultConfig {
     }
 }
 
-fn test_nullspec() -> NullSpecContractV1 {
-    let mut spec = NullSpecContractV1 {
+fn test_nullspec() -> DraftNullSpecContractV1 {
+    let mut spec = DraftNullSpecContractV1 {
         id: String::new(),
         domain: "sealed-vault".to_string(),
         null_accuracy: 0.5,
@@ -299,6 +299,64 @@ fn pln_padding_equalizes_fuel_total_for_fast_and_slow_paths() {
         }
     };
     assert_eq!(pad(fast.fuel_used), pad(slow.fuel_used));
+}
+
+#[test]
+fn pln_epoch_rounding_equalizes_branch_paths_with_different_instruction_counts() {
+    let fast_branch_wasm = wat::parse_str(
+        r#"(module
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01")
+          (func (export "run")
+            i32.const 1
+            if
+              i32.const 0 i32.const 1 call $emit drop
+            else
+              i32.const 0 drop
+              i32.const 0 drop
+              i32.const 0 drop
+              i32.const 0 i32.const 1 call $emit drop
+            end))"#,
+    )
+    .expect("wat");
+    let slow_branch_wasm = wat::parse_str(
+        r#"(module
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01")
+          (func (export "run")
+            i32.const 0
+            if
+              i32.const 0 i32.const 1 call $emit drop
+            else
+              i32.const 0 drop
+              i32.const 0 drop
+              i32.const 0 drop
+              i32.const 0 i32.const 1 call $emit drop
+            end))"#,
+    )
+    .expect("wat");
+
+    let engine = VaultEngine::new().expect("engine");
+    let fast = engine
+        .execute(&fast_branch_wasm, &context(), config())
+        .expect("fast branch");
+    let slow = engine
+        .execute(&slow_branch_wasm, &context(), config())
+        .expect("slow branch");
+    assert!(slow.fuel_used > fast.fuel_used);
+
+    let epoch_budget = 64_u64;
+    let normalize = |fuel: u64| {
+        let rem = fuel % epoch_budget;
+        if rem == 0 {
+            fuel
+        } else {
+            fuel + (epoch_budget - rem)
+        }
+    };
+    assert_eq!(normalize(fast.fuel_used), normalize(slow.fuel_used));
 }
 
 #[test]

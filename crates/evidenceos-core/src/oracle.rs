@@ -86,7 +86,22 @@ pub enum TieBreaker {
     NearestEven,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalityPolicy {
+    Hamming { max_bits: u32 },
+    BucketRadius { r: u32 },
+    ExactMatchOnly,
+    CustomHashNeighborhood { prefix_bits: u16, salt: [u8; 32] },
+}
+
+impl Default for LocalityPolicy {
+    fn default() -> Self {
+        Self::Hamming { max_bits: 1 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OracleResolution {
     pub num_symbols: u32,
     pub bit_width: u8,
@@ -96,6 +111,8 @@ pub struct OracleResolution {
     pub ttl_epochs: Option<u64>,
     pub delta_sigma: f64,
     pub tie_breaker: TieBreaker,
+    #[serde(default)]
+    pub locality_policy: LocalityPolicy,
 }
 
 impl OracleResolution {
@@ -114,6 +131,7 @@ impl OracleResolution {
             ttl_epochs: None,
             delta_sigma,
             tie_breaker: TieBreaker::NearestEven,
+            locality_policy: LocalityPolicy::default(),
         })
     }
 
@@ -216,6 +234,62 @@ impl OracleResolution {
 
     pub fn validate_canonical_bytes(&self, bytes: &[u8]) -> EvidenceOSResult<u32> {
         self.decode_bucket(bytes)
+    }
+
+    pub fn is_local(&self, prev: &[u8], next: &[u8]) -> EvidenceOSResult<bool> {
+        match &self.locality_policy {
+            LocalityPolicy::Hamming { max_bits } => {
+                HoldoutLabels::hamming_distance(prev, next).map(|d| d <= u64::from(*max_bits))
+            }
+            LocalityPolicy::BucketRadius { r } => {
+                let prev_bucket = Self::bucket_from_bytes(prev)?;
+                let next_bucket = Self::bucket_from_bytes(next)?;
+                Ok(prev_bucket.abs_diff(next_bucket) <= u64::from(*r))
+            }
+            LocalityPolicy::ExactMatchOnly => Ok(prev == next),
+            LocalityPolicy::CustomHashNeighborhood { prefix_bits, salt } => {
+                if *prefix_bits > 256 {
+                    return Err(EvidenceOSError::InvalidArgument);
+                }
+                let prev_hash = Self::salted_hash(salt, prev);
+                let next_hash = Self::salted_hash(salt, next);
+                Ok(Self::shared_prefix_bits(&prev_hash, &next_hash) >= u32::from(*prefix_bits))
+            }
+        }
+    }
+
+    fn bucket_from_bytes(bytes: &[u8]) -> EvidenceOSResult<u64> {
+        let digest = Sha256::digest(bytes);
+        let head = digest
+            .get(..8)
+            .ok_or(EvidenceOSError::InvalidCanonicalEncoding)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(head);
+        Ok(u64::from_be_bytes(arr))
+    }
+
+    fn salted_hash(salt: &[u8; 32], data: &[u8]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(data);
+        let digest = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    }
+
+    fn shared_prefix_bits(a: &[u8; 32], b: &[u8; 32]) -> u32 {
+        let mut count = 0u32;
+        for (aa, bb) in a.iter().zip(b.iter()) {
+            let x = aa ^ bb;
+            if x == 0 {
+                count += 8;
+                continue;
+            }
+            count += x.leading_zeros() - 24;
+            break;
+        }
+        count
     }
 }
 
@@ -343,7 +417,7 @@ impl AccuracyOracleState {
         let local = self
             .last_preds
             .as_ref()
-            .map(|last| HoldoutLabels::hamming_distance(last, preds).map(|d| d <= 1))
+            .map(|last| self.resolution.is_local(last, preds))
             .transpose()?
             .unwrap_or(false);
         let hysteresis_applied = matches!((local, self.last_raw, self.last_bucket),
@@ -380,7 +454,7 @@ impl AccuracyOracleState {
         let local = self
             .last_preds
             .as_ref()
-            .map(|last| HoldoutLabels::hamming_distance(last, preds).map(|d| d <= 1))
+            .map(|last| self.resolution.is_local(last, preds))
             .transpose()?
             .unwrap_or(false);
         let hysteresis_applied = matches!((local, self.last_raw, self.last_bucket),
@@ -543,6 +617,58 @@ mod tests {
         let _ = state.query(&[1, 1, 1, 1]).expect("query1");
         let r2 = state.query(&[1, 1, 1, 0]).expect("query2");
         assert!(!r2.hysteresis_applied);
+    }
+
+    #[test]
+    fn locality_policy_changes_hysteresis_acceptance_behavior() {
+        let holdout = HoldoutLabels::new(vec![1, 1, 1, 1]).expect("holdout");
+        let mut exact_state = AccuracyOracleState::new(
+            holdout.clone(),
+            OracleResolution::new(8, 0.26).expect("resolution"),
+            NullSpec {
+                domain: "labels".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("state");
+        exact_state.resolution.locality_policy = LocalityPolicy::ExactMatchOnly;
+
+        let mut hamming_state = AccuracyOracleState::new(
+            holdout,
+            OracleResolution::new(8, 0.26).expect("resolution"),
+            NullSpec {
+                domain: "labels".into(),
+                null_accuracy: 0.5,
+                e_value_fn: EValueFn::Fixed(1.0),
+            },
+        )
+        .expect("state");
+        hamming_state.resolution.locality_policy = LocalityPolicy::Hamming { max_bits: 1 };
+
+        let _ = exact_state.query(&[1, 1, 1, 1]).expect("exact query1");
+        let _ = hamming_state.query(&[1, 1, 1, 1]).expect("hamming query1");
+
+        let exact = exact_state.query(&[1, 1, 1, 0]).expect("exact query2");
+        let hamming = hamming_state.query(&[1, 1, 1, 0]).expect("hamming query2");
+
+        assert!(!exact.hysteresis_applied);
+        assert!(hamming.hysteresis_applied);
+    }
+
+    #[test]
+    fn locality_policy_does_not_change_canonical_bucket_encoding() {
+        let mut a = OracleResolution::new(16, 0.0).expect("resolution");
+        let mut b = OracleResolution::new(16, 0.0).expect("resolution");
+        a.locality_policy = LocalityPolicy::ExactMatchOnly;
+        b.locality_policy = LocalityPolicy::BucketRadius { r: 3 };
+
+        let encoded_a = a.encode_bucket(7).expect("encode a");
+        let encoded_b = b.encode_bucket(7).expect("encode b");
+
+        assert_eq!(encoded_a, encoded_b);
+        assert_eq!(a.validate_canonical_bytes(&encoded_a).expect("decode a"), 7);
+        assert_eq!(b.validate_canonical_bytes(&encoded_b).expect("decode b"), 7);
     }
 
     #[test]

@@ -96,6 +96,7 @@ fn sort_json(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oracle::LocalityPolicy;
     use ed25519_dalek::{Signer, SigningKey};
 
     fn sample_manifest() -> OracleBundleManifestV1 {
@@ -176,5 +177,22 @@ mod tests {
             .keys
             .insert("root".into(), signing.verifying_key().to_bytes().to_vec());
         assert!(manifest.verify_signature(&trusted).is_err());
+    }
+
+    #[test]
+    fn manifest_canonical_bytes_pin_locality_policy() {
+        let mut a = sample_manifest();
+        let mut b = sample_manifest();
+        a.resolution.locality_policy = LocalityPolicy::ExactMatchOnly;
+        b.resolution.locality_policy = LocalityPolicy::Hamming { max_bits: 1 };
+
+        let bytes_a = a
+            .canonical_bytes()
+            .unwrap_or_else(|_| unreachable!("canonical"));
+        let bytes_b = b
+            .canonical_bytes()
+            .unwrap_or_else(|_| unreachable!("canonical"));
+
+        assert_ne!(bytes_a, bytes_b);
     }
 }

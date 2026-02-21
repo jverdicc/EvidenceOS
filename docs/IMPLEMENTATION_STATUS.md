@@ -10,6 +10,7 @@ This document is the source of truth for whether a paper claim is production-imp
 | Signed oracle operator record verification (ed25519) | Oracle authenticity claims | Implemented | `crates/evidenceos-daemon/src/server.rs` (`verify_signed_oracle_record`), `scripts/check_impl_status_guards.py` |
 | Synthetic holdout derivation path | Holdout handling claims | Partial (insecure simulation mode only) | `crates/evidenceos-daemon/src/main.rs` (`--insecure-synthetic-holdout`), `crates/evidenceos-daemon/src/server.rs`, `scripts/check_impl_status_guards.py` |
 | Differential privacy (DP) execution lane and host imports | DP accounting claims | Not implemented in this release (removed from runtime; see reintroduction plan) | `docs/DP_REINTRODUCTION_PLAN.md`, `scripts/check_impl_status_guards.py` |
+| PLN compile-time CFG branch equalization rewriter | PLN static+runtime padding claim | Not implemented (runtime fuel normalization + epoch rounding only) | `crates/evidenceos-daemon/src/server.rs` (`padded_fuel_total`), `crates/evidenceos-daemon/tests/vault_execution.rs`, `docs/PLN_PRODUCTION_PROFILE.md` |
 
 ## Status policy
 

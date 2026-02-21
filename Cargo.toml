@@ -5,6 +5,7 @@
 resolver = "2"
 members = [
   "crates/evidenceos-protocol",
+  "crates/evidenceos-verifier",
   "crates/evidenceos-core",
   "crates/evidenceos-guest-abi",
   "crates/evidenceos-attest",
@@ -13,6 +14,7 @@ members = [
   "crates/evidenceos-operator",
   "crates/evidenceos-settle-offline",
   "crates/evidenceos-pln-calibrate",
+  "crates/evidenceos-envelope",
 ]
 
 [workspace.package]

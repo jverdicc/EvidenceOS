@@ -1,3 +1,4 @@
+use evidenceos_core::magnitude_envelope::TrustedEnvelopeAuthorities;
 use evidenceos_core::oracle_bundle::TrustedOracleAuthorities;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -13,6 +14,9 @@ pub struct DaemonConfig {
     pub preflight_high_risk_tools: Vec<String>,
     pub preflight_timeout_ms: u64,
     pub preflight_rate_limit_rps: u32,
+    pub envelope_packs_dir: PathBuf,
+    pub trusted_envelope_issuer_keys: Option<PathBuf>,
+    pub require_signed_envelopes: bool,
 }
 
 impl Default for DaemonConfig {
@@ -32,6 +36,9 @@ impl Default for DaemonConfig {
             ],
             preflight_timeout_ms: 120,
             preflight_rate_limit_rps: 50,
+            envelope_packs_dir: PathBuf::from("./data/envelope-packs"),
+            trusted_envelope_issuer_keys: None,
+            require_signed_envelopes: false,
         }
     }
 }
@@ -101,5 +108,19 @@ impl DaemonOracleConfig {
             default_nullspec_id: String::new(),
             allow_fixed_e_value_in_dev: false,
         })
+    }
+}
+
+pub fn load_envelope_trusted_keys(
+    path: Option<&Path>,
+) -> Result<TrustedEnvelopeAuthorities, Box<dyn std::error::Error>> {
+    match path {
+        Some(p) => Ok(TrustedEnvelopeAuthorities::load_from_json(p).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid envelope issuer key file",
+            )
+        })?),
+        None => Ok(TrustedEnvelopeAuthorities::default()),
     }
 }

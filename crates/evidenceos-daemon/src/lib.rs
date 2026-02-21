@@ -19,6 +19,7 @@
 pub mod auth;
 pub mod config;
 pub mod http_preflight;
+pub mod key_management;
 pub mod pln_profile;
 pub mod policy_oracle;
 pub mod probe;

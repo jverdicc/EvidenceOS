@@ -58,6 +58,9 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+      - name: Verify FORC10 reproducibility harness
+        run: make -C artifacts/forc10 verify
+
       - name: Coverage summary
         run: cargo llvm-cov --workspace --all-features --summary-only
 

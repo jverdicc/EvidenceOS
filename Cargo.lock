@@ -919,6 +919,7 @@ dependencies = [
  "ed25519-dalek",
  "evidenceos-guest-abi",
  "evidenceos-protocol",
+ "evidenceos-verifier",
  "hex",
  "parking_lot",
  "proptest",
@@ -956,6 +957,7 @@ dependencies = [
  "evidenceos-core",
  "evidenceos-guest-abi",
  "evidenceos-protocol",
+ "evidenceos-verifier",
  "getrandom 0.2.17",
  "hex",
  "http",
@@ -1037,6 +1039,19 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "evidenceos-verifier"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "evidenceos-protocol",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

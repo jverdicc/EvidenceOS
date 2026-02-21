@@ -21,6 +21,10 @@ Daemon loading:
 - wasm-instruction-adjacent fuel sample distribution
 - derived recommended `pln_target_fuel` values from p99 fuel usage
 
+## Production profile
+
+For paper-parity and threat-model scope, see [`PLN_PRODUCTION_PROFILE.md`](PLN_PRODUCTION_PROFILE.md).
+
 ## Limitations
 
 - This is **not** cycle-accurate hardware padding.
