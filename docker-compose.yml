@@ -3,19 +3,38 @@
 
 services:
   evidenceos:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: evidenceos:local
     ports:
       - "50051:50051"
+      - "8081:8081"
+      - "9464:9464"
+    environment:
+      EVIDENCEOS_KEY_PROVIDER: "file"
     volumes:
-      - ./data:/data
+      - ./ops/data:/data
+      - ./ops/certs:/certs:ro
+      - ./ops/keys:/data/keys:rw
+      - ./ops/oracles:/oracles:ro
     command:
       [
         "--listen",
         "0.0.0.0:50051",
         "--data-dir",
         "/data",
-        "--nullspec-registry-dir",
-        "/data/nullspec-registry",
-        "--nullspec-authority-keys-dir",
-        "/data/trusted-nullspec-keys"
+        "--oracle-dir",
+        "/oracles",
+        "--tls-cert",
+        "/certs/server.crt",
+        "--tls-key",
+        "/certs/server.key",
+        "--mtls-client-ca",
+        "/certs/ca.crt",
+        "--require-client-cert",
+        "--preflight-http-listen",
+        "0.0.0.0:8081",
+        "--preflight-require-bearer-token",
+        "change-me-preflight-token"
       ]
