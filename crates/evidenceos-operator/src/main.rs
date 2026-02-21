@@ -33,6 +33,12 @@ enum Command {
         signing_key: PathBuf,
         #[arg(long)]
         key_id: String,
+        #[arg(long)]
+        calibration_manifest_path: PathBuf,
+        #[arg(long)]
+        disjointness_proof_path: PathBuf,
+        #[arg(long)]
+        disjointness_scope: String,
     },
     SignEpochControl {
         #[arg(long)]
@@ -52,11 +58,18 @@ struct OracleOperatorRecord {
     ttl_epochs: u64,
     calibration_manifest_hash_hex: Option<String>,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: Option<String>,
+    disjointness_attestation: Option<DisjointnessAttestation>,
     nonoverlap_proof_uri: Option<String>,
     updated_at_epoch: u64,
     key_id: String,
     signature_ed25519: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DisjointnessAttestation {
+    statement_type: String,
+    scope: String,
+    proof_sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -71,7 +84,7 @@ struct OracleOperatorRecordSigningPayload<'a> {
     ttl_epochs: u64,
     calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: &'a str,
+    disjointness_attestation: Option<&'a DisjointnessAttestation>,
     nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
@@ -93,11 +106,27 @@ fn main() -> Result<(), String> {
             ttl_epochs,
             signing_key,
             key_id,
+            calibration_manifest_path,
+            disjointness_proof_path,
+            disjointness_scope,
         } => {
             if ttl_epochs == 0 {
                 return Err("ttl_epochs must be > 0".to_string());
             }
+            if disjointness_scope.trim().is_empty() {
+                return Err("disjointness_scope must be non-empty".to_string());
+            }
             let signing_key = read_signing_key(&signing_key)?;
+            let calibration_manifest = fs::read(&calibration_manifest_path)
+                .map_err(|e| format!("read calibration manifest failed: {e}"))?;
+            if calibration_manifest.is_empty() {
+                return Err("calibration manifest must be non-empty".to_string());
+            }
+            let disjointness_proof = fs::read(&disjointness_proof_path)
+                .map_err(|e| format!("read disjointness proof failed: {e}"))?;
+            if disjointness_proof.is_empty() {
+                return Err("disjointness proof must be non-empty".to_string());
+            }
             let cfg_path = data_dir.join(ORACLE_OPERATOR_PATH);
             let mut cfg = if cfg_path.exists() {
                 let bytes = fs::read(&cfg_path).map_err(|e| e.to_string())?;
@@ -112,12 +141,13 @@ fn main() -> Result<(), String> {
             entry.ttl_epochs = ttl_epochs;
             entry.updated_at_epoch = now_epoch;
             entry.key_id = key_id.clone();
-            entry
-                .calibration_manifest_hash_hex
-                .get_or_insert_with(|| "00".repeat(32));
-            entry
-                .disjointness_attestation
-                .get_or_insert_with(|| "operator-attested-disjoint".to_string());
+            entry.calibration_manifest_hash_hex =
+                Some(hex::encode(sha256_bytes(&calibration_manifest)));
+            entry.disjointness_attestation = Some(DisjointnessAttestation {
+                statement_type: "oracle_disjointness_v1".to_string(),
+                scope: disjointness_scope,
+                proof_sha256_hex: hex::encode(sha256_bytes(&disjointness_proof)),
+            });
 
             let payload = OracleOperatorRecordSigningPayload {
                 oracle_id: &oracle_id,
@@ -128,7 +158,7 @@ fn main() -> Result<(), String> {
                     .as_deref()
                     .unwrap_or(""),
                 calibration_epoch: entry.calibration_epoch,
-                disjointness_attestation: entry.disjointness_attestation.as_deref().unwrap_or(""),
+                disjointness_attestation: entry.disjointness_attestation.as_ref(),
                 nonoverlap_proof_uri: entry.nonoverlap_proof_uri.as_deref(),
                 updated_at_epoch: entry.updated_at_epoch,
                 key_id: &entry.key_id,
@@ -174,6 +204,13 @@ fn main() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
 fn unix_epoch_now() -> Result<u64, String> {

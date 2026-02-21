@@ -108,3 +108,36 @@ Crash-test failpoints can be enabled with cargo feature `crash-test-failpoints` 
 - `after_etl_append_execute_claim`
 - `after_etl_append_execute_claim_v2`
 - `after_etl_append_revoke_claim`
+
+## Generating signed oracle operator records (provenance enforced)
+
+Use `evidenceos-operator` to produce `oracle_operator_config.json` entries with verifiable provenance.
+
+1. Prepare inputs:
+   - `calibration_manifest.json` (exact bytes are hashed into `calibration_manifest_hash_hex`).
+   - `disjointness_proof.json` (exact bytes are hashed into `disjointness_attestation.proof_sha256_hex`).
+2. Sign the record:
+
+```bash
+cargo run -p evidenceos-operator -- sign-oracle-record \
+  --data-dir ./data \
+  --oracle-id settle \
+  --ttl-epochs 86400 \
+  --signing-key ./ops-k1.seed \
+  --key-id ops-k1 \
+  --calibration-manifest-path ./calibration_manifest.json \
+  --disjointness-proof-path ./disjointness_proof.json \
+  --disjointness-scope "global/settle"
+```
+
+3. Reload the daemon configuration:
+
+```bash
+kill -HUP <daemon-pid>
+```
+
+In production mode (`EVIDENCEOS_PRODUCTION_MODE=1`), daemon startup/reload and oracle freeze paths enforce:
+- non-empty calibration manifest hash for oracle provenance,
+- structured disjointness attestation (`oracle_disjointness_v1` + scope + proof hash),
+- non-expired operator record (`updated_at_epoch + ttl_epochs`),
+- valid Ed25519 signature over canonical payload.
