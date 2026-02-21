@@ -110,6 +110,12 @@ pub struct EnvironmentAttestations {
     pub runtime_version: String,
     pub aspec_version: String,
     pub protocol_version: String,
+    #[serde(default)]
+    pub tee_backend_name: Option<String>,
+    #[serde(default)]
+    pub tee_measurement_hex: Option<String>,
+    #[serde(default)]
+    pub tee_attestation_blob_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -344,6 +350,9 @@ impl ClaimCapsule {
                 runtime_version,
                 aspec_version,
                 protocol_version,
+                tee_backend_name: None,
+                tee_measurement_hex: None,
+                tee_attestation_blob_b64: None,
             },
             state,
         }

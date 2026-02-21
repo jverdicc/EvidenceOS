@@ -57,6 +57,7 @@ use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
 use evidenceos_core::settlement::UnsignedSettlementProposal;
 use evidenceos_core::structured_claims;
+use evidenceos_core::tee::{attestor_from_env, collect_attestation, TeeAttestor};
 use evidenceos_core::topicid::{
     compute_topic_id, hash_signal, ClaimMetadataV2 as CoreClaimMetadataV2, TopicSignals,
 };
@@ -601,6 +602,7 @@ pub struct EvidenceOsService {
     canary_config: CanaryConfig,
     offline_settlement_ingest: bool,
     require_disjointness_attestation: bool,
+    tee_attestor: Option<Arc<dyn TeeAttestor>>,
 }
 
 impl EvidenceOsService {
@@ -783,6 +785,22 @@ impl EvidenceOsService {
             ));
         }
 
+        let tee_attestor = attestor_from_env()
+            .map_err(|e| {
+                Status::invalid_argument(format!("tee backend configuration error: {e:?}"))
+            })?
+            .map(Arc::<dyn TeeAttestor>::from);
+        if tee_attestor
+            .as_deref()
+            .map(|a| a.backend_name() == "noop")
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                event = "tee_noop_enabled",
+                "NOOP TEE attestation backend enabled; this is development-only and unsafe for production"
+            );
+        }
+
         Ok(Self {
             state,
             insecure_v1_enabled,
@@ -798,6 +816,7 @@ impl EvidenceOsService {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             require_disjointness_attestation,
+            tee_attestor,
         })
     }
 
@@ -847,6 +866,23 @@ impl EvidenceOsService {
             "using cached nullspec registry"
         );
         Ok(state.registry.clone())
+    }
+
+    fn populate_tee_attestation(
+        &self,
+        capsule: &mut ClaimCapsule,
+        measurement: &[u8],
+    ) -> Result<(), Status> {
+        let Some(attestor) = &self.tee_attestor else {
+            return Ok(());
+        };
+        let report = collect_attestation(attestor.as_ref(), measurement)
+            .map_err(|_| Status::failed_precondition("tee attestation failed"))?;
+        capsule.environment_attestations.tee_backend_name = Some(report.backend_name);
+        capsule.environment_attestations.tee_measurement_hex = Some(report.measurement_hex);
+        capsule.environment_attestations.tee_attestation_blob_b64 =
+            Some(report.attestation_blob_b64);
+        Ok(())
     }
 
     pub fn apply_signed_settlements(
@@ -2816,6 +2852,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "evidenceos.v1".to_string(),
                 fuel_total as f64,
             );
+            self.populate_tee_attestation(&mut capsule, &claim.wasm_module)?;
             capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
             capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
             capsule.lineage_root_hash_hex = Some(hex::encode(claim.lineage_root_hash));
@@ -3569,6 +3606,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "evidenceos.v1".to_string(),
                 fuel_total as f64,
             );
+            self.populate_tee_attestation(&mut capsule, &claim.wasm_module)?;
             capsule.nullspec_id_hex = Some(hex::encode(contract.nullspec_id));
             capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
             capsule.eprocess_kind = Some(eprocess_kind_id);
@@ -4522,6 +4560,71 @@ mod tests {
             .data_path
             .join(PENDING_MUTATION_FILE_NAME)
             .exists());
+    }
+
+    #[test]
+    fn tee_backend_populates_capsule_environment_attestations() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock");
+
+        std::env::set_var("EVIDENCEOS_TEE_BACKEND", "noop");
+        std::env::set_var("EVIDENCEOS_TEE_ALLOW_NOOP", "1");
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let ledger = ConservationLedger::new(0.05).expect("ledger");
+        let mut capsule = ClaimCapsule::new(
+            "c".into(),
+            "t".into(),
+            "schema".into(),
+            Vec::new(),
+            Vec::new(),
+            b"output",
+            b"wasm-bytes",
+            b"holdout",
+            &ledger,
+            1.0,
+            false,
+            pb::Decision::Approve as i32,
+            Vec::new(),
+            Vec::new(),
+            b"trace",
+            "holdout".into(),
+            "runtime".into(),
+            "aspec.v1".into(),
+            "evidenceos.v1".into(),
+            0.0,
+        );
+
+        svc.populate_tee_attestation(&mut capsule, b"wasm-bytes")
+            .expect("tee attestation");
+
+        assert_eq!(
+            capsule.environment_attestations.tee_backend_name.as_deref(),
+            Some("noop")
+        );
+        assert!(capsule
+            .environment_attestations
+            .tee_measurement_hex
+            .as_deref()
+            .is_some_and(|v| v.len() == 64));
+        assert!(capsule
+            .environment_attestations
+            .tee_attestation_blob_b64
+            .as_deref()
+            .is_some_and(|v| !v.is_empty()));
+
+        std::env::remove_var("EVIDENCEOS_TEE_BACKEND");
+        std::env::remove_var("EVIDENCEOS_TEE_ALLOW_NOOP");
     }
 
     #[allow(clippy::await_holding_lock)]
