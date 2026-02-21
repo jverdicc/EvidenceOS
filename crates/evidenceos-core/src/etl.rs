@@ -115,7 +115,7 @@ pub fn verify_inclusion_proof(
     tree_size: usize,
     root: &Hash32,
 ) -> bool {
-    verify_inclusion_proof_ct(leaf, leaf_index, tree_size, proof, root)
+    evidenceos_verifier::verify_inclusion_proof(proof, leaf, leaf_index, tree_size, root)
 }
 
 pub fn verify_inclusion_proof_ct(
@@ -125,35 +125,9 @@ pub fn verify_inclusion_proof_ct(
     audit_path: &[Hash32],
     root: &Hash32,
 ) -> bool {
-    if tree_size == 0 || leaf_index >= tree_size {
-        return false;
-    }
-
-    let mut fn_idx = leaf_index;
-    let mut sn_idx = tree_size - 1;
-    let mut path_pos = 0usize;
-    let mut hash = *leaf_hash;
-
-    while sn_idx > 0 {
-        if fn_idx % 2 == 1 {
-            let Some(sibling) = audit_path.get(path_pos) else {
-                return false;
-            };
-            hash = node_hash(sibling, &hash);
-            path_pos += 1;
-        } else if fn_idx < sn_idx {
-            let Some(sibling) = audit_path.get(path_pos) else {
-                return false;
-            };
-            hash = node_hash(&hash, sibling);
-            path_pos += 1;
-        }
-
-        fn_idx /= 2;
-        sn_idx /= 2;
-    }
-
-    path_pos == audit_path.len() && &hash == root
+    evidenceos_verifier::verify_inclusion_proof_ct(
+        leaf_hash, leaf_index, tree_size, audit_path, root,
+    )
 }
 
 pub fn consistency_proof(
@@ -218,7 +192,7 @@ pub fn verify_consistency_proof(
     new_size: usize,
     proof: &[Hash32],
 ) -> bool {
-    verify_consistency_proof_ct(old_root, new_root, old_size, new_size, proof)
+    evidenceos_verifier::verify_consistency_proof(old_root, new_root, old_size, new_size, proof)
 }
 
 pub fn verify_consistency_proof_ct(
@@ -228,60 +202,7 @@ pub fn verify_consistency_proof_ct(
     new_size: usize,
     path: &[Hash32],
 ) -> bool {
-    if old_size > new_size {
-        return false;
-    }
-    if old_size == 0 {
-        return path.is_empty() && *old_root == sha256(b"");
-    }
-    if old_size == new_size {
-        return path.is_empty() && old_root == new_root;
-    }
-
-    let mut fn_idx = old_size - 1;
-    let mut sn_idx = new_size - 1;
-    while fn_idx & 1 == 1 {
-        fn_idx >>= 1;
-        sn_idx >>= 1;
-    }
-
-    let mut it = path.iter();
-    let mut fr;
-    let mut sr;
-    if fn_idx == 0 {
-        fr = *old_root;
-        sr = *old_root;
-    } else {
-        let Some(first) = it.next() else {
-            return false;
-        };
-        fr = *first;
-        sr = *first;
-    }
-
-    while fn_idx > 0 {
-        let Some(p) = it.next() else {
-            return false;
-        };
-        if fn_idx & 1 == 1 {
-            fr = node_hash(p, &fr);
-            sr = node_hash(p, &sr);
-        } else if fn_idx < sn_idx {
-            sr = node_hash(&sr, p);
-        }
-        fn_idx >>= 1;
-        sn_idx >>= 1;
-    }
-
-    while sn_idx > 0 {
-        let Some(p) = it.next() else {
-            return false;
-        };
-        sr = node_hash(&sr, p);
-        sn_idx >>= 1;
-    }
-
-    it.next().is_none() && &fr == old_root && &sr == new_root
+    evidenceos_verifier::verify_consistency_proof_ct(old_root, new_root, old_size, new_size, path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
