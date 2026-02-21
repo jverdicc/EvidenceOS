@@ -2,6 +2,9 @@ use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use evidenceos_core::canary::CanaryState;
 use evidenceos_core::capsule::canonical_json;
+use evidenceos_core::holdout_crypto::{
+    decrypt_holdout_labels, encrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider,
+};
 use evidenceos_core::nullspec::{
     EProcessKind, NullSpecContractV1, NullSpecKind, NULLSPEC_SCHEMA_V1,
 };
@@ -50,6 +53,10 @@ enum Command {
     Governance {
         #[command(subcommand)]
         cmd: GovernanceCmd,
+    },
+    Holdout {
+        #[command(subcommand)]
+        cmd: HoldoutCmd,
     },
 }
 
@@ -178,6 +185,26 @@ enum EpochCmd {
 }
 
 #[derive(Subcommand)]
+enum HoldoutCmd {
+    Encrypt {
+        #[arg(long = "in")]
+        input: PathBuf,
+        #[arg(long = "out")]
+        output: PathBuf,
+        #[arg(long)]
+        key_id: String,
+    },
+    Decrypt {
+        #[arg(long = "in")]
+        input: PathBuf,
+        #[arg(long = "out")]
+        output: PathBuf,
+        #[arg(long)]
+        key_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum GovernanceCmd {
     Events {
         #[command(subcommand)]
@@ -269,6 +296,7 @@ fn main() {
         Command::Oracle { cmd } => run_oracle(cmd),
         Command::Epoch { cmd } => run_epoch(cmd),
         Command::Governance { cmd } => run_governance(cmd),
+        Command::Holdout { cmd } => run_holdout(cmd),
     };
     match out {
         Ok(v) => println!("{}", v),
@@ -440,6 +468,37 @@ fn run_epoch(cmd: EpochCmd) -> Result<serde_json::Value, String> {
                 "write epoch control failed",
             )?;
             append_governance_event(&data_dir, &event)?;
+            Ok(json!({"status":"ok"}))
+        }
+    }
+}
+
+fn run_holdout(cmd: HoldoutCmd) -> Result<serde_json::Value, String> {
+    match cmd {
+        HoldoutCmd::Encrypt {
+            input,
+            output,
+            key_id,
+        } => {
+            let labels = fs::read(input).map_err(|e| e.to_string())?;
+            let key = EnvKeyProvider::new()
+                .key_for_id(&key_id)
+                .map_err(|e| e.to_string())?;
+            let encrypted = encrypt_holdout_labels(&labels, &key).map_err(|e| e.to_string())?;
+            fs::write(output, encrypted).map_err(|e| e.to_string())?;
+            Ok(json!({"status":"ok"}))
+        }
+        HoldoutCmd::Decrypt {
+            input,
+            output,
+            key_id,
+        } => {
+            let payload = fs::read(input).map_err(|e| e.to_string())?;
+            let key = EnvKeyProvider::new()
+                .key_for_id(&key_id)
+                .map_err(|e| e.to_string())?;
+            let labels = decrypt_holdout_labels(&payload, &key).map_err(|e| e.to_string())?;
+            fs::write(output, labels).map_err(|e| e.to_string())?;
             Ok(json!({"status":"ok"}))
         }
     }
