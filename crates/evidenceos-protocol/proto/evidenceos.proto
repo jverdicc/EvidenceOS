@@ -44,6 +44,8 @@ service EvidenceOS {
   // DiscOS-aligned endpoints.
   rpc FetchCapsule(FetchCapsuleRequest) returns (FetchCapsuleResponse);
   rpc RevokeClaim(RevokeClaimRequest) returns (RevokeClaimResponse);
+  rpc GrantCredit(GrantCreditRequest) returns (GrantCreditResponse);
+  rpc SetCreditLimit(SetCreditLimitRequest) returns (SetCreditLimitResponse);
   rpc WatchRevocations(WatchRevocationsRequest) returns (stream WatchRevocationsResponse);
 }
 
@@ -317,6 +319,25 @@ message RevokeClaimRequest {
 message RevokeClaimResponse {
   ClaimState state = 1;
   uint64 timestamp_unix = 2;
+}
+
+message GrantCreditRequest {
+  string principal_id = 1;
+  uint64 amount = 2;
+  string reason = 3;
+}
+
+message GrantCreditResponse {
+  uint64 credit_balance = 1;
+}
+
+message SetCreditLimitRequest {
+  string principal_id = 1;
+  uint64 limit = 2;
+}
+
+message SetCreditLimitResponse {
+  uint64 credit_limit = 1;
 }
 
 message WatchRevocationsRequest {}

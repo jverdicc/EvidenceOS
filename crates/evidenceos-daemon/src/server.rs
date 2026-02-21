@@ -35,6 +35,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::accounting::{
+    AccessCreditPricing, AccountStore, AdmissionProvider, StaticAdmissionProvider,
+};
 use crate::config::OracleTtlPolicy;
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
@@ -80,6 +83,8 @@ const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
+const MAX_PRINCIPAL_ID_LEN: usize = 256;
+const MAX_CREDIT_REASON_LEN: usize = 256;
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
@@ -748,6 +753,7 @@ struct KernelState {
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
     operator_config: Mutex<OperatorRuntimeConfig>,
     nullspec_registry_state: Mutex<NullSpecRegistryState>,
+    account_store: Mutex<AccountStore>,
 }
 
 #[derive(Debug)]
@@ -791,6 +797,9 @@ pub struct EvidenceOsService {
     require_disjointness_attestation: bool,
     enforce_operator_provenance: bool,
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
+    access_credit_pricing: AccessCreditPricing,
+    admission_provider: Arc<dyn AdmissionProvider>,
+    operator_principals: Arc<Vec<String>>,
 }
 
 impl EvidenceOsService {
@@ -910,6 +919,10 @@ impl EvidenceOsService {
             };
 
         let holdouts_root = root.join("holdouts");
+        let admission_provider: Arc<dyn AdmissionProvider> =
+            Arc::new(StaticAdmissionProvider::from_env());
+        let default_credit_limit = admission_provider.max_credit("anonymous");
+        let account_store = AccountStore::open(&root, default_credit_limit)?;
 
         let state = Arc::new(KernelState {
             claims: Mutex::new(
@@ -930,6 +943,7 @@ impl EvidenceOsService {
             keyring,
             revocation_subscribers: Mutex::new(Vec::new()),
             operator_config: Mutex::new(operator_config),
+            account_store: Mutex::new(account_store),
             nullspec_registry_state: Mutex::new(NullSpecRegistryState {
                 registry_dir: nullspec_config.registry_dir,
                 authority_keys_dir: nullspec_config.authority_keys_dir,
@@ -999,6 +1013,18 @@ impl EvidenceOsService {
             );
         }
 
+        let operator_principals = std::env::var("EVIDENCEOS_OPERATOR_PRINCIPALS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec!["anonymous".to_string()]);
+
         Ok(Self {
             state,
             insecure_v1_enabled,
@@ -1016,6 +1042,9 @@ impl EvidenceOsService {
             require_disjointness_attestation,
             enforce_operator_provenance,
             tee_attestor,
+            access_credit_pricing: AccessCreditPricing::from_env(),
+            admission_provider,
+            operator_principals: Arc::new(operator_principals),
         })
     }
 
@@ -1564,6 +1593,43 @@ impl EvidenceOsService {
             )));
         }
         Ok(())
+    }
+
+    fn require_operator(&self, principal_id: &str) -> Result<(), Status> {
+        if self.operator_principals.iter().any(|p| p == principal_id) {
+            return Ok(());
+        }
+        Err(Status::permission_denied("operator role required"))
+    }
+
+    fn default_credit_limit_for(&self, principal_id: &str) -> u64 {
+        self.admission_provider.max_credit(principal_id)
+    }
+
+    fn charge_principal_credit(
+        &self,
+        principal_id: &str,
+        k_bits: Option<u64>,
+        fuel: Option<u64>,
+        max_memory_pages: Option<u64>,
+    ) -> Result<u64, Status> {
+        let charge = self
+            .access_credit_pricing
+            .charge(k_bits, fuel, max_memory_pages);
+        let default_limit = self.default_credit_limit_for(principal_id);
+        self.admission_provider.admit(principal_id, charge)?;
+        let mut store = self.state.account_store.lock();
+        let _ = store.ensure_account(principal_id, default_limit)?;
+        match store.burn(principal_id, charge, default_limit) {
+            Ok(remaining) => {
+                self.telemetry.record_credit_burned(principal_id, charge);
+                Ok(remaining)
+            }
+            Err(status) => {
+                self.telemetry.record_credit_denied(principal_id);
+                Err(status)
+            }
+        }
     }
 
     fn canary_key(claim_name: &str, holdout_ref: &str) -> String {
@@ -3065,6 +3131,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimRequest>,
     ) -> Result<Response<pb::ExecuteClaimResponse>, Status> {
+        let principal_id = Self::principal_id_from_metadata(request.metadata());
         if !self.insecure_v1_enabled {
             return Err(Status::invalid_argument(
                 "v1 ExecuteClaim disabled; use ExecuteClaimV2",
@@ -3190,6 +3257,28 @@ impl EvidenceOsV2 for EvidenceOsService {
                     let _ = self.record_incident(claim, "ledger_kout_overrun");
                     Status::failed_precondition("ledger kout budget exhausted")
                 })?;
+            let principal_k_bits =
+                if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
+                    Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
+                } else {
+                    None
+                };
+            let principal_fuel = if fuel_total > 0 {
+                Some(fuel_total)
+            } else {
+                None
+            };
+            let principal_mem_pages = if vault_result.max_memory_pages > 0 {
+                Some(vault_result.max_memory_pages)
+            } else {
+                None
+            };
+            self.charge_principal_credit(
+                &principal_id,
+                principal_k_bits,
+                principal_fuel,
+                principal_mem_pages,
+            )?;
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
                 return Err(Status::failed_precondition(
@@ -3875,6 +3964,28 @@ impl EvidenceOsV2 for EvidenceOsService {
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
+            let principal_k_bits =
+                if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
+                    Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
+                } else {
+                    None
+                };
+            let principal_fuel = if fuel_total > 0 {
+                Some(fuel_total)
+            } else {
+                None
+            };
+            let principal_mem_pages = if vault_result.max_memory_pages > 0 {
+                Some(vault_result.max_memory_pages)
+            } else {
+                None
+            };
+            self.charge_principal_credit(
+                &principal_id,
+                principal_k_bits,
+                principal_fuel,
+                principal_mem_pages,
+            )?;
             let (e_value, eprocess_kind_id) =
                 compute_nullspec_e_value(&contract, &vault_result.oracle_buckets)?;
             let canary_key = Self::canary_key(&claim.claim_name, &claim.holdout_ref);
@@ -4453,6 +4564,46 @@ impl EvidenceOsV2 for EvidenceOsService {
         }))
     }
 
+    async fn grant_credit(
+        &self,
+        request: Request<pb::GrantCreditRequest>,
+    ) -> Result<Response<pb::GrantCreditResponse>, Status> {
+        let operator_principal = Self::principal_id_from_metadata(request.metadata());
+        self.require_operator(&operator_principal)?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.principal_id, "principal_id", MAX_PRINCIPAL_ID_LEN)?;
+        validate_required_str_field(&req.reason, "reason", MAX_CREDIT_REASON_LEN)?;
+        if req.amount == 0 {
+            return Err(Status::invalid_argument("amount must be > 0"));
+        }
+        self.admission_provider
+            .admit(&req.principal_id, req.amount)?;
+        let default_limit = self.default_credit_limit_for(&req.principal_id);
+        let mut store = self.state.account_store.lock();
+        let balance = store.grant_credit(&req.principal_id, req.amount, default_limit)?;
+        Ok(Response::new(pb::GrantCreditResponse {
+            credit_balance: balance,
+        }))
+    }
+
+    async fn set_credit_limit(
+        &self,
+        request: Request<pb::SetCreditLimitRequest>,
+    ) -> Result<Response<pb::SetCreditLimitResponse>, Status> {
+        let operator_principal = Self::principal_id_from_metadata(request.metadata());
+        self.require_operator(&operator_principal)?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.principal_id, "principal_id", MAX_PRINCIPAL_ID_LEN)?;
+        self.admission_provider
+            .admit(&req.principal_id, req.limit)?;
+        let default_limit = self.default_credit_limit_for(&req.principal_id);
+        let mut store = self.state.account_store.lock();
+        let limit = store.set_credit_limit(&req.principal_id, req.limit, default_limit)?;
+        Ok(Response::new(pb::SetCreditLimitResponse {
+            credit_limit: limit,
+        }))
+    }
+
     async fn watch_revocations(
         &self,
         _request: Request<pb::WatchRevocationsRequest>,
@@ -4673,6 +4824,23 @@ impl EvidenceOsV1 for EvidenceOsService {
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
+    async fn grant_credit(
+        &self,
+        request: Request<v1::GrantCreditRequest>,
+    ) -> Result<Response<v1::GrantCreditResponse>, Status> {
+        let req_v2: v2::GrantCreditRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::grant_credit(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn set_credit_limit(
+        &self,
+        request: Request<v1::SetCreditLimitRequest>,
+    ) -> Result<Response<v1::SetCreditLimitResponse>, Status> {
+        let req_v2: v2::SetCreditLimitRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::set_credit_limit(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
     async fn watch_revocations(
         &self,
         request: Request<v1::WatchRevocationsRequest>,

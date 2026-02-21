@@ -46,6 +46,8 @@ struct TelemetryState {
     preflight_requests_total: HashMap<(String, String), u64>,
     preflight_latency_ms_bucket: BTreeMap<u64, u64>,
     preflight_failures_total: HashMap<String, u64>,
+    credit_burned_total: HashMap<String, u64>,
+    credit_denied_total: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -174,6 +176,24 @@ impl Telemetry {
         *entry = entry.saturating_add(1);
     }
 
+    pub fn record_credit_burned(&self, principal_id: &str, amount: u64) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .credit_burned_total
+            .entry(principal_id.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(amount);
+    }
+
+    pub fn record_credit_denied(&self, principal_id: &str) {
+        let mut guard = self.state.lock();
+        let entry = guard
+            .credit_denied_total
+            .entry(principal_id.to_string())
+            .or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
     pub fn render(&self) -> String {
         let guard = self.state.lock();
         let mut out = String::new();
@@ -281,6 +301,22 @@ impl Telemetry {
                 out,
                 "evidenceos_preflight_failures_total{{kind=\"{}\"}} {}",
                 kind, value
+            );
+        }
+        out.push_str("# TYPE evidenceos_credit_burned_total counter\n");
+        for (principal_id, value) in &guard.credit_burned_total {
+            let _ = writeln!(
+                out,
+                "evidenceos_credit_burned_total{{principal_id=\"{}\"}} {}",
+                principal_id, value
+            );
+        }
+        out.push_str("# TYPE evidenceos_credit_denied_total counter\n");
+        for (principal_id, value) in &guard.credit_denied_total {
+            let _ = writeln!(
+                out,
+                "evidenceos_credit_denied_total{{principal_id=\"{}\"}} {}",
+                principal_id, value
             );
         }
         out

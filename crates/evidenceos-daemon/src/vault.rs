@@ -61,6 +61,7 @@ pub struct VaultExecutionResult {
     pub leakage_bits_total: f64,
     pub kout_bits_total: f64,
     pub oracle_buckets: Vec<u32>,
+    pub max_memory_pages: u64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -236,6 +237,10 @@ impl VaultEngine {
                 HostCallRecord::EmitStructuredClaim { .. } => None,
             })
             .collect();
+        let max_memory_pages = instance
+            .get_memory(&mut store, "memory")
+            .map(|m| m.size(&store))
+            .unwrap_or(0);
 
         Ok(VaultExecutionResult {
             canonical_output: output,
@@ -247,6 +252,7 @@ impl VaultEngine {
             leakage_bits_total: host.leakage_bits,
             kout_bits_total: host.kout_bits,
             oracle_buckets,
+            max_memory_pages,
         })
     }
 
