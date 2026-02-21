@@ -204,6 +204,17 @@ EvidenceOS is designed to make probing:
 3) auditable (ETL evidence), and
 4) stoppable (graded response that can fail-closed).
 
+## Scope and Non-Goals
+
+EvidenceOS addresses **evaluation integrity and adaptive leakage control**. It does not:
+- Evaluate model toxicity, bias, or hallucination rates
+- Replace content moderation or RLHF-based alignment
+- Provide safety guarantees for single-shot interactions
+
+EvidenceOS is designed for settings where an AI system is assumed to be capable, possibly deceptive, and operating across many interactions over time. Its guarantees are protocol-level and mathematical, not behavioral.
+
+See [docs/POSITIONING.md in DiscOS](link) for a full capability and risk matrix.
+
 ## Practical Use Cases and Outcomes
 
 | Use case category | Adversarial vector (plain English) | EvidenceOS mechanism | Mitigation / outcome | Reproducible evidence |
