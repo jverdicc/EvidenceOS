@@ -150,6 +150,10 @@ pub struct TrialMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervention_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm_parameters_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arm_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_nonce_hex: Option<String>,
@@ -210,6 +214,10 @@ pub struct ClaimCapsule {
     pub trial_arm_id: Option<u32>,
     #[serde(default)]
     pub trial_intervention_id: Option<String>,
+    #[serde(default)]
+    pub trial_intervention_version: Option<String>,
+    #[serde(default)]
+    pub trial_arm_parameters_hash_hex: Option<String>,
     #[serde(default)]
     pub trial_nonce_hex: Option<String>,
     #[serde(default)]
@@ -374,6 +382,8 @@ impl ClaimCapsule {
             trial_commitment_schema_version: None,
             trial_arm_id: None,
             trial_intervention_id: None,
+            trial_intervention_version: None,
+            trial_arm_parameters_hash_hex: None,
             trial_nonce_hex: None,
             trial_commitment_hash_hex: None,
             trial: None,

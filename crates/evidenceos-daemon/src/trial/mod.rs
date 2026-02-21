@@ -4,13 +4,68 @@ use std::sync::Arc;
 use getrandom::getrandom;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tonic::Status;
 
 const DEFAULT_SCHEMA_VERSION: u32 = 1;
 const SCALE_PPM_MIN: u32 = 100_000;
 const SCALE_PPM_MAX: u32 = 2_000_000;
+pub const MAX_INTERVENTION_DESCRIPTOR_BYTES: usize = 4096;
 type ArmId = u16;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OraclePolicyDescriptor {
+    pub policy_id: String,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencePolicyDescriptor {
+    pub policy_id: String,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NullSpecPolicyDescriptor {
+    pub policy_id: String,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputPolicyDescriptor {
+    pub policy_id: String,
+    pub params: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterventionDescriptors {
+    pub oracle_policy: OraclePolicyDescriptor,
+    pub dependence_policy: DependencePolicyDescriptor,
+    pub nullspec_policy: NullSpecPolicyDescriptor,
+    pub output_policy: OutputPolicyDescriptor,
+}
+
+pub fn canonicalize_descriptor_json(value: &Value) -> Result<Vec<u8>, Status> {
+    let bytes = evidenceos_core::capsule::canonical_json(value)
+        .map_err(|_| Status::invalid_argument("invalid intervention descriptor"))?;
+    if bytes.len() > MAX_INTERVENTION_DESCRIPTOR_BYTES {
+        return Err(Status::invalid_argument(
+            "intervention descriptor exceeds max size",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub fn hash_arm_parameters(value: &Value) -> Result<[u8; 32], Status> {
+    let bytes = canonicalize_descriptor_json(value)?;
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&out);
+    Ok(digest)
+}
 
 /// Allowed baseline covariates for stratified randomization.
 ///
@@ -29,6 +84,9 @@ pub struct TrialAssignment {
     pub trial_nonce: [u8; 16],
     pub arm_id: u16,
     pub intervention_id: String,
+    pub intervention_version: String,
+    pub arm_parameters_hash: [u8; 32],
+    pub descriptors: InterventionDescriptors,
     pub schema_version: u32,
 }
 
@@ -85,7 +143,13 @@ fn append_tagged(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 pub trait EpistemicIntervention: Send + Sync {
-    fn intervention_id(&self) -> &'static str;
+    fn id(&self) -> &str;
+    fn version(&self) -> &str;
+    fn arm_parameters(&self) -> Value;
+    fn oracle_policy(&self) -> OraclePolicyDescriptor;
+    fn dependence_policy(&self) -> DependencePolicyDescriptor;
+    fn nullspec_policy(&self) -> NullSpecPolicyDescriptor;
+    fn output_policy(&self) -> OutputPolicyDescriptor;
     fn actions(&self) -> Vec<InterventionAction>;
 }
 
@@ -348,15 +412,57 @@ impl TrialRouter {
         } else {
             self.assign_hashed(trial_nonce, stratum)
         };
-        let intervention_id = self
+        let (intervention_id, intervention_version, arm_parameters_hash, descriptors) = self
             .interventions
             .get(&arm_id)
-            .map(|i| i.intervention_id().to_string())
-            .unwrap_or_else(|| "noop.v1".to_string());
+            .map(|i| {
+                let arm_parameters = i.arm_parameters();
+                let hash = hash_arm_parameters(&arm_parameters)?;
+                Ok::<_, Status>((
+                    i.id().to_string(),
+                    i.version().to_string(),
+                    hash,
+                    InterventionDescriptors {
+                        oracle_policy: i.oracle_policy(),
+                        dependence_policy: i.dependence_policy(),
+                        nullspec_policy: i.nullspec_policy(),
+                        output_policy: i.output_policy(),
+                    },
+                ))
+            })
+            .transpose()?
+            .unwrap_or_else(|| {
+                (
+                    "noop".to_string(),
+                    "v1".to_string(),
+                    [0u8; 32],
+                    InterventionDescriptors {
+                        oracle_policy: OraclePolicyDescriptor {
+                            policy_id: "oracle.default.v1".to_string(),
+                            params: serde_json::json!({}),
+                        },
+                        dependence_policy: DependencePolicyDescriptor {
+                            policy_id: "dependence.default.v1".to_string(),
+                            params: serde_json::json!({}),
+                        },
+                        nullspec_policy: NullSpecPolicyDescriptor {
+                            policy_id: "nullspec.default.v1".to_string(),
+                            params: serde_json::json!({}),
+                        },
+                        output_policy: OutputPolicyDescriptor {
+                            policy_id: "output.default.v1".to_string(),
+                            params: serde_json::json!({}),
+                        },
+                    },
+                )
+            });
         Ok(TrialAssignment {
             trial_nonce,
             arm_id,
             intervention_id,
+            intervention_version,
+            arm_parameters_hash,
+            descriptors,
             schema_version: DEFAULT_SCHEMA_VERSION,
         })
     }
@@ -419,8 +525,44 @@ impl TrialRouter {
 pub struct NoopIntervention;
 
 impl EpistemicIntervention for NoopIntervention {
-    fn intervention_id(&self) -> &'static str {
-        "noop.v1"
+    fn id(&self) -> &str {
+        "noop"
+    }
+
+    fn version(&self) -> &str {
+        "v1"
+    }
+
+    fn arm_parameters(&self) -> Value {
+        serde_json::json!({})
+    }
+
+    fn oracle_policy(&self) -> OraclePolicyDescriptor {
+        OraclePolicyDescriptor {
+            policy_id: "oracle.default.v1".to_string(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    fn dependence_policy(&self) -> DependencePolicyDescriptor {
+        DependencePolicyDescriptor {
+            policy_id: "dependence.default.v1".to_string(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    fn nullspec_policy(&self) -> NullSpecPolicyDescriptor {
+        NullSpecPolicyDescriptor {
+            policy_id: "nullspec.default.v1".to_string(),
+            params: serde_json::json!({}),
+        }
+    }
+
+    fn output_policy(&self) -> OutputPolicyDescriptor {
+        OutputPolicyDescriptor {
+            policy_id: "output.default.v1".to_string(),
+            params: serde_json::json!({}),
+        }
     }
 
     fn actions(&self) -> Vec<InterventionAction> {

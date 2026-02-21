@@ -2436,6 +2436,8 @@ fn trial_commitment_hash(assignment: Option<&TrialAssignment>) -> [u8; 32] {
         Some(assignment) => {
             payload.extend_from_slice(&assignment.arm_id.to_be_bytes());
             payload.extend_from_slice(assignment.intervention_id.as_bytes());
+            payload.extend_from_slice(assignment.intervention_version.as_bytes());
+            payload.extend_from_slice(&assignment.arm_parameters_hash);
             payload.extend_from_slice(&assignment.trial_nonce);
         }
         None => {
