@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evidenceos-analysis"
+version = "0.1.0"
+description = "DiscOS userland survival and CONSORT analysis tools"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+analysis = [
+  "pandas>=2.0",
+  "lifelines>=0.27",
+  "matplotlib>=3.7",
+  "numpy>=1.24",
+  "graphviz>=0.20",
+]
+
+[tool.setuptools]
+packages = ["analysis"]
+
+[tool.pytest.ini_options]
+testpaths = ["analysis/tests"]
