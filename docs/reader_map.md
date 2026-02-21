@@ -50,3 +50,15 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## Daemon server module map
+
+The daemon gRPC server is split for faster code-path review:
+
+- `crates/evidenceos-daemon/src/server/mod.rs`: service/state wiring and shared helpers.
+- `crates/evidenceos-daemon/src/server/handlers_v2.rs`: v2 gRPC handlers.
+- `crates/evidenceos-daemon/src/server/handlers_v1.rs`: v1 compatibility handlers and transcode bridge.
+- `crates/evidenceos-daemon/src/server/lifecycle.rs`: lifecycle transition module placeholder.
+- `crates/evidenceos-daemon/src/server/sealing.rs`: sealing module placeholder.
+- `crates/evidenceos-daemon/src/server/execution.rs`: execution module placeholder.
+- `crates/evidenceos-daemon/src/server/telemetry.rs`: telemetry module placeholder.
