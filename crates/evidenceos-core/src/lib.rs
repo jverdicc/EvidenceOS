@@ -56,6 +56,7 @@ pub mod settlement;
 pub mod structured_claims;
 pub mod tee;
 pub mod topicid;
+pub mod trial;
 pub mod wasm_config;
 
 pub use crate::error::{EvidenceOSError, EvidenceOSResult};

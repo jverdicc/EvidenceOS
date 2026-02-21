@@ -26,6 +26,19 @@ use std::path::{Path, PathBuf};
 
 pub type Hash32 = [u8; 32];
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimSettlementEvent {
+    pub claim_id: String,
+    pub outcome: String,
+    pub k_bits_total: u64,
+    #[serde(default)]
+    pub intervention_id: Option<String>,
+    #[serde(default)]
+    pub trial_nonce: Option<String>,
+    #[serde(default)]
+    pub arm_assigned_at: Option<u64>,
+}
+
 fn validate_entry_len(len: usize) -> EvidenceOSResult<u32> {
     u32::try_from(len).map_err(|_| EvidenceOSError::InvalidArgument)
 }
@@ -632,6 +645,34 @@ mod tests {
     use crate::capsule::{ClaimCapsule, ManifestEntry};
     use crate::ledger::ConservationLedger;
     use proptest::prelude::*;
+
+    #[test]
+    fn claim_settlement_event_back_compat_deserializes_missing_trial_fields() {
+        let legacy = r#"{"claim_id":"c-1","outcome":"SETTLED","k_bits_total":42}"#;
+        let event: ClaimSettlementEvent = serde_json::from_str(legacy).expect("deserialize");
+        assert_eq!(event.claim_id, "c-1");
+        assert_eq!(event.outcome, "SETTLED");
+        assert_eq!(event.k_bits_total, 42);
+        assert_eq!(event.intervention_id, None);
+        assert_eq!(event.trial_nonce, None);
+        assert_eq!(event.arm_assigned_at, None);
+    }
+
+    #[test]
+    fn claim_settlement_event_roundtrip_with_trial_fields() {
+        let event = ClaimSettlementEvent {
+            claim_id: "c-2".to_string(),
+            outcome: "FROZEN".to_string(),
+            k_bits_total: 64,
+            intervention_id: Some("classical-support-bound".to_string()),
+            trial_nonce: Some("aabbccdd".to_string()),
+            arm_assigned_at: Some(11),
+        };
+
+        let encoded = serde_json::to_vec(&event).expect("serialize");
+        let decoded: ClaimSettlementEvent = serde_json::from_slice(&encoded).expect("deserialize");
+        assert_eq!(decoded, event);
+    }
 
     fn test_leaves(n: usize) -> Vec<Hash32> {
         (0..n)
