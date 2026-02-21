@@ -425,7 +425,7 @@ pub fn validate_and_canonicalize(
     if canonical_bytes.len() > max_bytes_upper_bound() as usize {
         return Err(EvidenceOSError::InvalidArgument);
     }
-    let envelope_registry = EnvelopeRegistry::with_defaults();
+    let envelope_registry = EnvelopeRegistry::with_builtin_defaults();
     let mut envelope_violation = envelope_registry.validate_claim(&claim).err().map(|v| *v);
     if envelope_violation.is_none()
         && claim.fields.iter().any(|f| {

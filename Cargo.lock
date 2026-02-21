@@ -982,6 +982,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "evidenceos-envelope"
+version = "0.1.0-alpha"
+dependencies = [
+ "clap",
+ "ed25519-dalek",
+ "evidenceos-core",
+ "hex",
+ "serde_json",
+]
+
+[[package]]
 name = "evidenceos-guest-abi"
 version = "0.1.0-alpha"
 dependencies = [
@@ -2584,7 +2595,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
