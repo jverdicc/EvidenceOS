@@ -509,15 +509,50 @@ Example contract fields:
 
 ## Structured Claims + PhysHIR
 
-EvidenceOS supports strict structured-claim schemas with deterministic canonicalization:
+EvidenceOS supports strict structured-claim schemas with deterministic 
+canonicalization:
 
 - typed and bounded fields (reject unknown keys and floats),
 - canonical JSON encoding with sorted keys,
 - PhysHIR unit parsing and SI-dimension checks for quantity fields.
 
-Example (non-sensitive):
+### What PhysHIR does
 
-```json
+Every quantity field in a structured claim carries a Physical Dimension 
+Signature (PDS):
+[L]^a [M]^b [T]^c [I]^d [Θ]^e [N]^f [J]^g
+where each bracket is an SI base dimension and each exponent is its power:
+
+| Symbol | Dimension        | SI Base Unit  | Example exponent meaning     |
+|--------|-----------------|---------------|------------------------------|
+| [L]    | Length           | metre (m)     | a=2 → square metres          |
+| [M]    | Mass             | kilogram (kg) | b=1 → kilograms              |
+| [T]    | Time             | second (s)    | c=-1 → per second (Hz)       |
+| [I]    | Electric current | ampere (A)    | d=1 → amperes                |
+| [Θ]    | Temperature      | kelvin (K)    | e=1 → kelvin                 |
+| [N]    | Amount of substance | mole (mol) | f=1 → molar quantities      |
+| [J]    | Luminous intensity | candela (cd) | g=1 → candela               |
+
+When a claim is submitted, the kernel:
+
+1. Parses the quantity string ("12.3 mmol/L") into fixed-point form
+2. Resolves its PDS signature ([L]^-3 [N]^1 for molar concentration)
+3. Checks the resolved PDS against the schema-declared required dimension
+4. Rejects the claim if the dimensions do not match
+
+### Why this matters for leakage control
+
+Without PDS, all numeric outputs are dimensionally equivalent. A topic 
+budget applied to "concentration queries" can be bypassed by reformulating 
+the same query as a ratio or a rate. PhysHIR closes this by making the 
+kernel dimension-aware: leakage budgets (k) can be scoped to specific PDS 
+signatures. A tight budget on [N] (molar quantities) is not consumed by 
+requests about [T] (timing) or [L] (distance). Probing across physically 
+unrelated dimensions yields no informational advantage against a 
+dimension-specific budget.
+
+### Example (non-sensitive)
+
 {
   "schema_id": "cbrn-sc.v1",
   "claim_id": "claim-001",
@@ -528,6 +563,11 @@ Example (non-sensitive):
   "confidence_bps": 9800,
   "reason_code": "WATCH"
 }
-```
 
-The `measurement` value is parsed into fixed-point form and checked against the schema-required physical dimension before acceptance.
+Field notes:
+- measurement: parsed to fixed-point, PDS resolved to [L]^-3 [N]^1, 
+  checked against schema before acceptance
+- confidence_bps: integer basis points (0–10000), not a float — 
+  avoids floating-point non-determinism in canonicalization
+- event_time_unix: [T]^1, unix epoch seconds, integer only
+- reason_code: bounded enum, unknown values rejected at schema layer
