@@ -4,10 +4,9 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use ring::signature;
 use rustls_pemfile::certs;
-use rustls_webpki::{
-    anchor_from_trusted_cert, EndEntityCert, KeyUsage, SignatureAlgorithm, TrustAnchor, UnixTime,
-};
+use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use serde::Deserialize;
+use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage};
 
 const SNP_REPORT_SIGNED_SIZE: usize = 0x2A0;
 const SNP_REPORT_DATA_OFFSET: usize = 0x50;
@@ -134,18 +133,19 @@ fn verify_sevsnp_bundle(
     let vcek_der = parse_single_pem_cert(&bundle.vcek_pem)?;
     let ask_der = parse_single_pem_cert(&bundle.ask_pem)?;
     let ark_der = parse_single_pem_cert(&bundle.ark_pem)?;
-    let end_entity = EndEntityCert::try_from(vcek_der.as_slice())?;
-    let anchor: TrustAnchor<'_> = anchor_from_trusted_cert(
-        &rustls_pki_types::CertificateDer::from(ark_der.as_slice().to_vec()),
-    )?;
-    let intermediates = vec![rustls_pki_types::CertificateDer::from(ask_der.clone())];
+    let vcek_cert = CertificateDer::from(vcek_der.clone());
+    let ark_cert = CertificateDer::from(ark_der);
+    let ask_cert = CertificateDer::from(ask_der);
+    let end_entity = EndEntityCert::try_from(&vcek_cert)?;
+    let anchor: TrustAnchor<'_> = anchor_from_trusted_cert(&ark_cert)?;
+    let intermediates = vec![ask_cert];
     let now = UnixTime::since_unix_epoch(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| anyhow!("system clock is before UNIX_EPOCH"))?,
     );
     end_entity.verify_for_usage(
-        [SignatureAlgorithm::ECDSA_NISTP384_SHA384],
+        webpki::ALL_VERIFICATION_ALGS,
         &[anchor],
         &intermediates,
         now,

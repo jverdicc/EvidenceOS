@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 use evidenceos_core::capsule::canonical_json;
 use evidenceos_core::nullspec::{
-    EProcessKind, NullSpecContractV1, NullSpecKind, NULLSPEC_SCHEMA_V1,
+    EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
 };
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
@@ -186,7 +186,7 @@ fn install_active_nullspec(
     resolution_hash: [u8; 32],
     calibration_manifest_hash: Option<[u8; 32]>,
 ) {
-    let mut contract = NullSpecContractV1 {
+    let mut contract = SignedNullSpecContractV1 {
         schema: NULLSPEC_SCHEMA_V1.to_string(),
         nullspec_id: [0_u8; 32],
         oracle_id: "settle".to_string(),
@@ -208,7 +208,7 @@ fn install_active_nullspec(
         created_by: "test".to_string(),
         signature_ed25519: Vec::new(),
     };
-    contract.nullspec_id = contract.compute_id();
+    contract.nullspec_id = contract.compute_id().expect("id");
     let store = NullSpecStore::open(std::path::Path::new(data_dir)).expect("store");
     store.install(&contract).expect("install");
     store

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: evidenceos
+description: EvidenceOS daemon deployment chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

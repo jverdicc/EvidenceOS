@@ -1,0 +1,81 @@
+# Deployment Guide
+
+This guide covers production-style deployment for EvidenceOS with Docker and Kubernetes Helm, including mTLS and secure signing-key handling.
+
+## 1) Container image build
+
+```bash
+docker build -t evidenceos:local .
+```
+
+The image is built with a multi-stage Rust build and runs on a minimal distroless runtime.
+
+## 2) Docker Compose lab deployment (mTLS + preflight)
+
+1. Create local directories and materials:
+   - `ops/certs/server.crt`
+   - `ops/certs/server.key`
+   - `ops/certs/ca.crt`
+   - `ops/keys/<key-id>.key` (32-byte Ed25519 seed file, mode `0600`)
+2. Start the stack:
+
+```bash
+docker compose up --build
+```
+
+Default exposed ports:
+- gRPC: `50051`
+- HTTP preflight: `8081`
+- metrics: `9464`
+
+## 3) Helm deployment (Kubernetes)
+
+Chart path:
+
+```text
+deploy/helm/evidenceos
+```
+
+### Install example
+
+```bash
+helm upgrade --install evidenceos deploy/helm/evidenceos \
+  --set image.repository=evidenceos \
+  --set image.tag=local \
+  --set mtls.enabled=true \
+  --set mtls.existingSecret=evidenceos-mtls \
+  --set signingKeys.provider=file \
+  --set signingKeys.existingSecret=evidenceos-signing-key
+```
+
+### Required secrets
+
+- mTLS secret (if `mtls.enabled=true`) with keys:
+  - `server.crt`
+  - `server.key`
+  - `ca.crt`
+- File signing key secret with one or more key files mounted under `/data/keys`.
+
+### Health checks
+
+The chart configures:
+- readiness probe: TCP on gRPC port.
+- liveness probe: TCP on preflight HTTP port.
+
+## 4) Signing key provider modes
+
+`EVIDENCEOS_KEY_PROVIDER`:
+- `file` (default): load keys from `/data/keys` and enforce permissions.
+- `kms`: load key from KMS hook interface.
+
+KMS hook env vars:
+- `EVIDENCEOS_KMS_PROVIDER`: `mock`, `aws`, `gcp`, `azure`
+- `EVIDENCEOS_KMS_KEY_ID`: external key ID (optional for `mock`)
+- `EVIDENCEOS_KMS_MOCK_KEY_HEX`: required only for `mock` provider.
+
+`aws/gcp/azure` hooks are currently explicit stubs returning `UNIMPLEMENTED`, intended for enterprise plugin extension.
+
+## 5) Key permission requirements
+
+On Unix-like systems, daemon startup enforces file-key permissions to be `0600` or stricter (no group/world bits).
+If key files are broader than `0600`, startup fails closed.

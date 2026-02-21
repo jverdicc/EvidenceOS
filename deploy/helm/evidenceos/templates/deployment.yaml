@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "evidenceos.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "evidenceos.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "evidenceos.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "evidenceos.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: evidenceos-daemon
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: EVIDENCEOS_KEY_PROVIDER
+              value: {{ .Values.signingKeys.provider | quote }}
+            - name: EVIDENCEOS_KMS_PROVIDER
+              value: {{ default "" .Values.signingKeys.kmsProvider | quote }}
+            - name: EVIDENCEOS_KMS_KEY_ID
+              value: {{ default "" .Values.signingKeys.kmsKeyId | quote }}
+            - name: PREFLIGHT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "evidenceos.fullname" . }}-preflight
+                  key: token
+          command: ["/usr/local/bin/evidenceos-daemon"]
+          args:
+            - --listen
+            - 0.0.0.0:{{ .Values.service.grpcPort }}
+            - --data-dir
+            - {{ .Values.daemon.dataDir }}
+            - --oracle-dir
+            - {{ .Values.daemon.oracleDir }}
+            - --preflight-http-listen
+            - 0.0.0.0:{{ .Values.service.preflightPort }}
+            - --preflight-require-bearer-token
+            - $(PREFLIGHT_TOKEN)
+            - --trusted-oracle-keys
+            - /config/trusted_oracle_keys.json
+{{- if .Values.mtls.enabled }}
+            - --tls-cert
+            - /mtls/{{ .Values.mtls.certFile }}
+            - --tls-key
+            - /mtls/{{ .Values.mtls.keyFile }}
+            - --mtls-client-ca
+            - /mtls/{{ .Values.mtls.caFile }}
+            - --require-client-cert
+{{- end }}
+{{- range .Values.daemon.extraArgs }}
+            - {{ . | quote }}
+{{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+            - name: preflight
+              containerPort: {{ .Values.service.preflightPort }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: preflight
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.daemon.dataDir }}
+            - name: config
+              mountPath: /config
+              readOnly: true
+{{- if eq .Values.signingKeys.provider "file" }}
+            - name: signing-key
+              mountPath: {{ .Values.daemon.dataDir }}/keys
+              readOnly: true
+{{- end }}
+{{- if .Values.mtls.enabled }}
+            - name: mtls
+              mountPath: /mtls
+              readOnly: true
+{{- end }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "evidenceos.fullname" . }}-config
+{{- if eq .Values.signingKeys.provider "file" }}
+        - name: signing-key
+          secret:
+            secretName: {{ default (printf "%s-signing-key" (include "evidenceos.fullname" .)) .Values.signingKeys.existingSecret }}
+            defaultMode: 0600
+{{- end }}
+{{- if .Values.mtls.enabled }}
+        - name: mtls
+          secret:
+            secretName: {{ default (printf "%s-mtls" (include "evidenceos.fullname" .)) .Values.mtls.existingSecret }}
+            defaultMode: 0400
+{{- end }}

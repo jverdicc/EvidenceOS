@@ -1,0 +1,34 @@
+replicaCount: 1
+
+image:
+  repository: evidenceos
+  tag: local
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  grpcPort: 50051
+  preflightPort: 8081
+
+daemon:
+  dataDir: /data
+  oracleDir: /oracles
+  preflightBearerToken: change-me
+  extraArgs: []
+
+mtls:
+  enabled: true
+  existingSecret: ""
+  certFile: server.crt
+  keyFile: server.key
+  caFile: ca.crt
+
+signingKeys:
+  provider: file
+  existingSecret: ""
+  keyFileName: etl_signing.key
+
+config:
+  trustedOracleKeysJson: "{\"keys\":{}}"
+
+resources: {}
