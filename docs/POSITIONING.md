@@ -10,16 +10,16 @@ Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates sa
 
 | Risk Category | Static Leaderboards | Behavioral Guardrails | EvidenceOS Status |
 | :--- | :--- | :--- | :--- |
-| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | **Enforced via BYOO** — Mathematically bounds external oracle vetoes. |
-| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | **Enforced via BYOO** — $W$ stagnation/depletion upon failed factual checks. |
+| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | **Enforced via BYOO** — Deterministically halts adaptive jailbreaks and multi-step bypasses that evade static guardrails. |
+| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | **Enforced via BYOO** — Converts semantic detection into a hard physical halt (W depletion) before the agent acts on the hallucination. |
 | **Agentic Reward Hacking** | 10% | 30% | **85%** — Sealed Vault bounds execution state. |
 | **Data Exfiltration / Privacy** | 0% | 20% | **95%** — Joint entropy ledger limits extraction. |
-| **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative adaptivity leakage ($k$). |
-| **CBRN Proliferation** | 0% | 15% | **100%*** — Mathematical halt via $W$ depletion & PhysHIR. |
+| **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative adaptivity leakage (k). |
+| **CBRN Proliferation** | 0% | 15% | **100%*** — Mathematical halt via W depletion & PhysHIR. |
 
-*\* 100% coverage means EvidenceOS provides the only formal mechanism addressing this risk class. It does not mean deployment is complete or that all assumptions are resolved. Mechanism coverage is protocol-level. Sim-tested evidence is in `TEST_COVERAGE_MATRIX.md`. Live test evidence is in `TEST_EVIDENCE.md`.*
+*\* 100% coverage means EvidenceOS provides the only formal mechanism addressing this risk class. It does not mean deployment is complete or that all assumptions are resolved. Mechanism coverage is protocol-level. Sim-tested evidence is in TEST_COVERAGE_MATRIX.md. Live test evidence is in TEST_EVIDENCE.md. See NullSpec governance (Open Problem 1 in the paper) for current limitations.*
 
-**Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its $k$-budget and facing deterministic termination (`FROZEN`).
+**Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its k-budget and facing deterministic termination (`FROZEN`).
 
 ---
 
