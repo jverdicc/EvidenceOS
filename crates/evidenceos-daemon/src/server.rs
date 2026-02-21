@@ -462,7 +462,7 @@ struct OracleOperatorRecord {
     ttl_epochs: u64,
     calibration_manifest_hash_hex: Option<String>,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: Option<String>,
+    disjointness_attestation: Option<DisjointnessAttestation>,
     nonoverlap_proof_uri: Option<String>,
     updated_at_epoch: u64,
     key_id: String,
@@ -476,12 +476,18 @@ struct OracleOperatorRecordSigningPayload<'a> {
     ttl_epochs: u64,
     calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: &'a str,
+    disjointness_attestation: Option<&'a DisjointnessAttestation>,
     nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DisjointnessAttestation {
+    statement_type: String,
+    scope: String,
+    proof_sha256_hex: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OracleOperatorConfigFile {
     oracles: HashMap<String, OracleOperatorRecord>,
@@ -610,6 +616,7 @@ pub struct EvidenceOsService {
     canary_config: CanaryConfig,
     offline_settlement_ingest: bool,
     require_disjointness_attestation: bool,
+    enforce_operator_provenance: bool,
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
 }
 
@@ -690,9 +697,12 @@ impl EvidenceOsService {
             std::env::var("EVIDENCEOS_REQUIRE_DISJOINTNESS_ATTESTATION")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(true);
+        let production_mode = std::env::var("EVIDENCEOS_PRODUCTION_MODE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let enforce_operator_provenance = production_mode && require_disjointness_attestation;
 
-        let operator_config =
-            load_operator_runtime_config(&root, require_disjointness_attestation)?;
+        let operator_config = load_operator_runtime_config(&root, enforce_operator_provenance)?;
 
         let (nullspec_keyring, nullspec_registry, nullspec_healthy) =
             match NullSpecAuthorityKeyring::load_from_dir(&nullspec_config.authority_keys_dir) {
@@ -824,6 +834,7 @@ impl EvidenceOsService {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             require_disjointness_attestation,
+            enforce_operator_provenance,
             tee_attestor,
         })
     }
@@ -955,7 +966,7 @@ impl EvidenceOsService {
     pub fn reload_operator_runtime_config(&self) -> Result<(), Status> {
         let next = match load_operator_runtime_config(
             &self.state.data_path,
-            self.require_disjointness_attestation,
+            self.enforce_operator_provenance,
         ) {
             Ok(cfg) => cfg,
             Err(status) => {
@@ -1168,9 +1179,7 @@ impl EvidenceOsService {
             match operator_config.oracle_calibration_hash.get(&oracle_id) {
                 Some(v) => decode_hex_hash32(v, "calibration_manifest_hash_hex")?,
                 None => {
-                    if self.require_disjointness_attestation
-                        && !operator_config.trusted_keys.is_empty()
-                    {
+                    if self.enforce_operator_provenance {
                         return Err(Status::failed_precondition(
                             "missing oracle calibration manifest hash",
                         ));
@@ -2004,9 +2013,16 @@ fn validate_required_str_field(value: &str, field: &str, max_len: usize) -> Resu
     Ok(())
 }
 
+fn unix_epoch_now_secs() -> Result<u64, Status> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| Status::internal("system clock before unix epoch"))
+}
+
 fn load_operator_runtime_config(
     data_path: &Path,
-    require_disjointness_attestation: bool,
+    enforce_operator_provenance: bool,
 ) -> Result<OperatorRuntimeConfig, Status> {
     let trusted_path = data_path.join("trusted_oracle_keys.json");
     let trusted_keys = if trusted_path.exists() {
@@ -2039,9 +2055,8 @@ fn load_operator_runtime_config(
         OracleOperatorConfigFile::default()
     };
 
-    let enforce_attestation = require_disjointness_attestation && !trusted_keys.is_empty();
     for (oracle_id, rec) in &oracle_cfg.oracles {
-        verify_signed_oracle_record(oracle_id, rec, &trusted_keys, enforce_attestation)?;
+        verify_signed_oracle_record(oracle_id, rec, &trusted_keys, enforce_operator_provenance)?;
     }
 
     let epoch_path = data_path.join("epoch_control.json");
@@ -2097,7 +2112,7 @@ fn verify_signed_oracle_record(
     oracle_id: &str,
     rec: &OracleOperatorRecord,
     trusted_keys: &HashMap<String, Vec<u8>>,
-    require_disjointness_attestation: bool,
+    enforce_operator_provenance: bool,
 ) -> Result<(), Status> {
     if rec.schema_version != 1 {
         return Err(Status::invalid_argument(
@@ -2107,8 +2122,21 @@ fn verify_signed_oracle_record(
     if rec.ttl_epochs == 0 {
         return Err(Status::invalid_argument("oracle ttl must be > 0"));
     }
+    let now_epoch = unix_epoch_now_secs()?;
+    if rec.updated_at_epoch > now_epoch {
+        return Err(Status::failed_precondition(
+            "oracle operator record updated_at_epoch is in the future",
+        ));
+    }
+    if enforce_operator_provenance
+        && now_epoch.saturating_sub(rec.updated_at_epoch) > rec.ttl_epochs
+    {
+        return Err(Status::failed_precondition(
+            "oracle operator record expired",
+        ));
+    }
     let calibration_manifest_hash_hex = rec.calibration_manifest_hash_hex.as_deref().unwrap_or("");
-    if require_disjointness_attestation && calibration_manifest_hash_hex.is_empty() {
+    if enforce_operator_provenance && calibration_manifest_hash_hex.is_empty() {
         return Err(Status::failed_precondition(
             "calibration manifest hash missing",
         ));
@@ -2119,11 +2147,21 @@ fn verify_signed_oracle_record(
             "calibration_manifest_hash_hex",
         )?;
     }
-    let disjointness_attestation = rec.disjointness_attestation.as_deref().unwrap_or("");
-    if require_disjointness_attestation && disjointness_attestation.trim().is_empty() {
-        return Err(Status::failed_precondition(
-            "disjointness attestation must be non-empty",
-        ));
+    let disjointness_attestation = rec.disjointness_attestation.as_ref();
+    if enforce_operator_provenance {
+        let attestation = disjointness_attestation
+            .ok_or_else(|| Status::failed_precondition("disjointness attestation must be set"))?;
+        if attestation.statement_type != "oracle_disjointness_v1" {
+            return Err(Status::failed_precondition(
+                "unsupported disjointness statement_type",
+            ));
+        }
+        if attestation.scope.trim().is_empty() {
+            return Err(Status::failed_precondition(
+                "disjointness attestation scope must be non-empty",
+            ));
+        }
+        decode_hex_hash32(&attestation.proof_sha256_hex, "proof_sha256_hex")?;
     }
     let key_bytes = trusted_keys
         .get(&rec.key_id)

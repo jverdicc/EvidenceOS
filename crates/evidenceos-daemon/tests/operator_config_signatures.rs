@@ -9,13 +9,20 @@ use serde_json::json;
 use tempfile::TempDir;
 
 #[derive(Serialize)]
+struct DisjointnessAttestation<'a> {
+    statement_type: &'a str,
+    scope: &'a str,
+    proof_sha256_hex: &'a str,
+}
+
+#[derive(Serialize)]
 struct OracleOperatorRecordPayload<'a> {
     oracle_id: &'a str,
     schema_version: u32,
     ttl_epochs: u64,
     calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: &'a str,
+    disjointness_attestation: Option<DisjointnessAttestation<'a>>,
     nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
@@ -35,7 +42,7 @@ fn sign_oracle_record(
     ttl_epochs: u64,
     calibration_manifest_hash_hex: &str,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: &str,
+    disjointness_attestation: Option<DisjointnessAttestation<'_>>,
     nonoverlap_proof_uri: Option<&str>,
     updated_at_epoch: u64,
     key_id: &str,
@@ -89,14 +96,21 @@ fn valid_signature_passes() {
     let sk = SigningKey::from_bytes(&[7u8; 32]);
     setup_trusted_key(&dir, key_id, &sk);
 
-    let updated_at_epoch = 42;
+    let updated_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
     let signature = sign_oracle_record(
         &sk,
         oracle_id,
         12,
         &"ab".repeat(32),
         Some(10),
-        "attested-disjoint",
+        Some(DisjointnessAttestation {
+            statement_type: "oracle_disjointness_v1",
+            scope: "global/settle",
+            proof_sha256_hex: &"cd".repeat(32),
+        }),
         None,
         updated_at_epoch,
         key_id,
@@ -110,7 +124,11 @@ fn valid_signature_passes() {
                     "ttl_epochs": 12,
                     "calibration_manifest_hash_hex": "abababababababababababababababababababababababababababababababab",
                     "calibration_epoch": 10,
-                    "disjointness_attestation": "attested-disjoint",
+                    "disjointness_attestation": {
+                        "statement_type": "oracle_disjointness_v1",
+                        "scope": "global/settle",
+                        "proof_sha256_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                    },
                     "nonoverlap_proof_uri": null,
                     "updated_at_epoch": updated_at_epoch,
                     "key_id": key_id,
@@ -153,9 +171,16 @@ fn mutation_fails_verification() {
         4,
         &"11".repeat(32),
         None,
-        "attested-disjoint",
+        Some(DisjointnessAttestation {
+            statement_type: "oracle_disjointness_v1",
+            scope: "global/settle",
+            proof_sha256_hex: &"ef".repeat(32),
+        }),
         None,
-        88,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs(),
         key_id,
     );
     std::fs::write(
@@ -166,8 +191,12 @@ fn mutation_fails_verification() {
                     "schema_version": 1,
                     "ttl_epochs": 5,
                     "calibration_manifest_hash_hex": "1111111111111111111111111111111111111111111111111111111111111111",
-                    "disjointness_attestation": "attested-disjoint",
-                    "updated_at_epoch": 88,
+                    "disjointness_attestation": {
+                        "statement_type": "oracle_disjointness_v1",
+                        "scope": "global/settle",
+                        "proof_sha256_hex": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+                    },
+                    "updated_at_epoch": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs(),
                     "key_id": key_id,
                     "signature_ed25519": signature,
                 }
@@ -193,9 +222,16 @@ fn unknown_key_id_fails_verification() {
         7,
         &"22".repeat(32),
         None,
-        "attested-disjoint",
+        Some(DisjointnessAttestation {
+            statement_type: "oracle_disjointness_v1",
+            scope: "global/settle",
+            proof_sha256_hex: &"ab".repeat(32),
+        }),
         None,
-        1,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs(),
         "ops-k2",
     );
     std::fs::write(
@@ -206,8 +242,12 @@ fn unknown_key_id_fails_verification() {
                     "schema_version": 1,
                     "ttl_epochs": 7,
                     "calibration_manifest_hash_hex": "2222222222222222222222222222222222222222222222222222222222222222",
-                    "disjointness_attestation": "attested-disjoint",
-                    "updated_at_epoch": 1,
+                    "disjointness_attestation": {
+                        "statement_type": "oracle_disjointness_v1",
+                        "scope": "global/settle",
+                        "proof_sha256_hex": "abababababababababababababababababababababababababababababababab"
+                    },
+                    "updated_at_epoch": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("time").as_secs(),
                     "key_id": "ops-k2",
                     "signature_ed25519": signature,
                 }

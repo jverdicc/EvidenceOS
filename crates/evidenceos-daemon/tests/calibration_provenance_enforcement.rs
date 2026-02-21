@@ -16,13 +16,20 @@ use tempfile::TempDir;
 use tonic::Request;
 
 #[derive(Serialize)]
+struct DisjointnessAttestation<'a> {
+    statement_type: &'a str,
+    scope: &'a str,
+    proof_sha256_hex: &'a str,
+}
+
+#[derive(Serialize)]
 struct OracleOperatorRecordPayload<'a> {
     oracle_id: &'a str,
     schema_version: u32,
     ttl_epochs: u64,
     calibration_manifest_hash_hex: &'a str,
     calibration_epoch: Option<u64>,
-    disjointness_attestation: &'a str,
+    disjointness_attestation: Option<DisjointnessAttestation<'a>>,
     nonoverlap_proof_uri: Option<&'a str>,
     updated_at_epoch: u64,
     key_id: &'a str,
@@ -50,9 +57,16 @@ fn write_operator_config(dir: &TempDir, calibration_hex: &str) {
         ttl_epochs: 5,
         calibration_manifest_hash_hex: calibration_hex,
         calibration_epoch: Some(10),
-        disjointness_attestation: "attested-disjoint",
+        disjointness_attestation: Some(DisjointnessAttestation {
+            statement_type: "oracle_disjointness_v1",
+            scope: "global/settle",
+            proof_sha256_hex: &"cd".repeat(32),
+        }),
         nonoverlap_proof_uri: None,
-        updated_at_epoch: 42,
+        updated_at_epoch: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs(),
         key_id,
     };
     let signature = sign_oracle_record(&sk, &payload);
@@ -65,9 +79,13 @@ fn write_operator_config(dir: &TempDir, calibration_hex: &str) {
                     "ttl_epochs": 5,
                     "calibration_manifest_hash_hex": calibration_hex,
                     "calibration_epoch": 10,
-                    "disjointness_attestation": "attested-disjoint",
+                    "disjointness_attestation": {
+                        "statement_type": "oracle_disjointness_v1",
+                        "scope": "global/settle",
+                        "proof_sha256_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+                    },
                     "nonoverlap_proof_uri": null,
-                    "updated_at_epoch": 42,
+                    "updated_at_epoch": payload.updated_at_epoch,
                     "key_id": key_id,
                     "signature_ed25519": signature,
                 }
