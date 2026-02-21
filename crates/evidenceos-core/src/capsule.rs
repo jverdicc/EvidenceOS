@@ -145,6 +145,16 @@ pub struct TopicOracleReceiptLike {
     pub signature_hex: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrialMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_nonce_hex: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimCapsule {
     pub schema: String,
@@ -204,6 +214,8 @@ pub struct ClaimCapsule {
     pub trial_nonce_hex: Option<String>,
     #[serde(default)]
     pub trial_commitment_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial: Option<TrialMetadata>,
     pub environment_attestations: EnvironmentAttestations,
     pub state: ClaimState,
 }
@@ -364,6 +376,7 @@ impl ClaimCapsule {
             trial_intervention_id: None,
             trial_nonce_hex: None,
             trial_commitment_hash_hex: None,
+            trial: None,
             environment_attestations: EnvironmentAttestations {
                 runtime_version,
                 aspec_version,
