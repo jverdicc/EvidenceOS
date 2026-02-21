@@ -17,7 +17,7 @@
 
 syntax = "proto3";
 
-package evidenceos.v2;
+package evidenceos.v1;
 
 service EvidenceOS {
   rpc Health(HealthRequest) returns (HealthResponse);
