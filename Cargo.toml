@@ -13,6 +13,7 @@ members = [
   "crates/evidenceos-operator",
   "crates/evidenceos-settle-offline",
   "crates/evidenceos-pln-calibrate",
+  "crates/evidenceos-envelope",
 ]
 
 [workspace.package]
