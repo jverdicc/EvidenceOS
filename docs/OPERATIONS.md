@@ -141,3 +141,40 @@ In production mode (`EVIDENCEOS_PRODUCTION_MODE=1`), daemon startup/reload and o
 - structured disjointness attestation (`oracle_disjointness_v1` + scope + proof hash),
 - non-expired operator record (`updated_at_epoch + ttl_epochs`),
 - valid Ed25519 signature over canonical payload.
+
+## Access-credit accounting (identity-bound)
+
+The daemon now enforces per-principal access credit in addition to claim/topic/holdout budgets.
+
+- Principal identity is derived from request metadata (`authorization`, `x-evidenceos-signature`, or `x-client-cert-fp`).
+- Account records are persisted in `${DATA_DIR}/accounts.json` with:
+  - `credit_balance`
+  - `daily_mint_remaining`
+  - `last_mint_day`
+  - `limits`
+- Credit charge for claim execution:
+  - `ΔC = λk*k_bits + λcpu*fuel + λmem*max_memory_pages`
+- Configuration knobs:
+  - `EVIDENCEOS_LAMBDA_K_PER_BIT`
+  - `EVIDENCEOS_LAMBDA_CPU_PER_FUEL`
+  - `EVIDENCEOS_LAMBDA_MEM_PER_WASM_PAGE`
+- Worst-case fail-closed charging if a measurement is missing:
+  - `EVIDENCEOS_CREDIT_WORST_CASE_K_BITS`
+  - `EVIDENCEOS_CREDIT_WORST_CASE_FUEL`
+  - `EVIDENCEOS_CREDIT_WORST_CASE_PAGES`
+
+### Admission / staking hook
+
+The daemon uses an `AdmissionProvider` interface (`max_credit` and `admit`) to support an external stake/admission policy. The default provider is static-limit based and configured via:
+
+- `EVIDENCEOS_DEFAULT_CREDIT_LIMIT`
+- `EVIDENCEOS_PRINCIPAL_CREDIT_LIMITS` (comma-separated `principal=limit`)
+
+### Operator RPCs
+
+New operator-only RPCs:
+
+- `GrantCredit(principal_id, amount, reason)`
+- `SetCreditLimit(principal_id, limit)`
+
+Operator principals are configured by `EVIDENCEOS_OPERATOR_PRINCIPALS` (comma-separated principal IDs).
