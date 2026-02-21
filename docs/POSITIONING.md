@@ -4,18 +4,22 @@ This document outlines where EvidenceOS and the DiscOS userland bridge fit withi
 
 ## Section 1: Where EvidenceOS Operates
 
-Standard AI safety evaluations largely focus on static intelligence or behavioral alignment. EvidenceOS operates on a fundamentally different layer: enforcing physical, mathematical bounds on dynamic, multi-step agentic state.
+Standard AI safety evaluations largely focus on static intelligence or behavioral alignment. EvidenceOS operates on a fundamentally different layer: enforcing physical, mathematical bounds on dynamic, multi-step agentic state. 
 
-| Risk Category | Static Leaderboards | Behavioral Guardrails | EvidenceOS | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | **0%** — out of scope by design | N/A |
-| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | **0%** — out of scope by design | N/A |
-| **Agentic Reward Hacking** | 10% | 30% | **85%** — Sealed Vault bounds state | Live |
-| **Data Exfiltration / Privacy** | 0% | 20% | **95%** — $\epsilon, \delta$ ledger limits extraction | Sim-tested |
-| **Capability Spillover** | 5% | 10% | **100%*** — meters cumulative leakage $k$ | Architecture specified |
-| **CBRN Proliferation** | 0% | 15% | **100%*** — mathematical halt via $W$ depletion | Architecture specified |
+Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates safety *detection* (handled by external specialized models) from safety *enforcement* (handled by the kernel's Conservation Ledger).
 
-*\* 100% coverage means EvidenceOS provides the only formal mechanism addressing this risk class. It does not mean deployment is complete or that all assumptions are resolved. Mechanism coverage is protocol-level. Sim-tested evidence is in TEST_COVERAGE_MATRIX.md. Live test evidence is in TEST_EVIDENCE.md. See NullSpec governance (Open Problem 1 in the paper) for current limitations.*
+| Risk Category | Static Leaderboards | Behavioral Guardrails | EvidenceOS Status |
+| :--- | :--- | :--- | :--- |
+| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | **Enforced via BYOO** — Mathematically bounds external oracle vetoes. |
+| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | **Enforced via BYOO** — $W$ stagnation/depletion upon failed factual checks. |
+| **Agentic Reward Hacking** | 10% | 30% | **85%** — Sealed Vault bounds execution state. |
+| **Data Exfiltration / Privacy** | 0% | 20% | **95%** — Joint entropy ledger limits extraction. |
+| **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative adaptivity leakage ($k$). |
+| **CBRN Proliferation** | 0% | 15% | **100%*** — Mathematical halt via $W$ depletion & PhysHIR. |
+
+*\* 100% coverage means EvidenceOS provides the only formal mechanism addressing this risk class. It does not mean deployment is complete or that all assumptions are resolved. Mechanism coverage is protocol-level. Sim-tested evidence is in `TEST_COVERAGE_MATRIX.md`. Live test evidence is in `TEST_EVIDENCE.md`.*
+
+**Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its $k$-budget and facing deterministic termination (`FROZEN`).
 
 ---
 
