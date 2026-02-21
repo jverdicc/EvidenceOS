@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 
 use crate::auth::{derive_caller_identity, CallerIdentity};
 use crate::config::OracleTtlPolicy;
+use crate::key_management::{load_signing_key_from_kms, SigningKeySource};
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
@@ -1938,12 +1939,37 @@ fn write_secret_key(key_path: &Path, secret: &[u8; 32]) -> Result<(), Status> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn ensure_secret_key_permissions(path: &Path) -> Result<(), Status> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| Status::internal("read signing key metadata failed"))?;
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(Status::failed_precondition(
+            "signing key permissions are too broad; require 0600 or stricter",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_secret_key_permissions(_path: &Path) -> Result<(), Status> {
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)]
 fn load_or_create_keyring(
     data_dir: &Path,
 ) -> Result<([u8; 32], HashMap<[u8; 32], SigningKey>), Status> {
     let keys_dir = data_dir.join(KEYRING_DIR_REL_PATH);
     std::fs::create_dir_all(&keys_dir).map_err(|_| Status::internal("mkdir keys failed"))?;
+
+    if matches!(SigningKeySource::from_env()?, SigningKeySource::Kms) {
+        let signing_key = load_signing_key_from_kms()?;
+        let key_id = key_id_from_verifying_key(&signing_key.verifying_key());
+        let mut keyring = HashMap::new();
+        keyring.insert(key_id, signing_key);
+        return Ok((key_id, keyring));
+    }
 
     let mut keyring = HashMap::new();
     for entry in
@@ -1965,6 +1991,7 @@ fn load_or_create_keyring(
             Err(_) => continue,
         };
         let key_id = parse_hash32(&bytes, "key_id")?;
+        ensure_secret_key_permissions(&path)?;
         let secret =
             std::fs::read(&path).map_err(|_| Status::internal("read signing key failed"))?;
         if secret.len() != 32 {
@@ -1982,6 +2009,7 @@ fn load_or_create_keyring(
 
     let legacy_key_path = data_dir.join(ETL_SIGNING_KEY_REL_PATH);
     if legacy_key_path.exists() {
+        ensure_secret_key_permissions(&legacy_key_path)?;
         let bytes = std::fs::read(&legacy_key_path)
             .map_err(|_| Status::internal("read signing key failed"))?;
         if bytes.len() != 32 {
@@ -2026,15 +2054,26 @@ fn load_or_create_keyring(
         return Err(Status::internal("active key id not found in keyring"));
     }
 
-    std::fs::write(
-        &active_path,
-        format!(
-            "{}
-",
-            hex::encode(active_key_id)
-        ),
-    )
-    .map_err(|_| Status::internal("write active key id failed"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&active_path)
+            .map_err(|_| Status::internal("write active key id failed"))?;
+        f.write_all(format!("{}\n", hex::encode(active_key_id)).as_bytes())
+            .and_then(|_| f.flush())
+            .map_err(|_| Status::internal("write active key id failed"))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&active_path, format!("{}\n", hex::encode(active_key_id)))
+            .map_err(|_| Status::internal("write active key id failed"))?;
+    }
 
     Ok((active_key_id, keyring))
 }
