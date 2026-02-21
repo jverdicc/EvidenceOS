@@ -13,7 +13,7 @@ cargo run -p evidenceos-etl-indexer -- \
 Behavior:
 - Reads ETL sequentially and verifies each record CRC.
 - Fails closed on CRC corruption, truncated records, unknown event kinds, or unknown capsule schema.
-- Parses claim capsules and writes terminal-state rows (`SETTLED`, `CERTIFIED`, `REVOKED`, `TAINTED`, `STALE`, `FREEZE`) to `settlements`.
+- Parses claim capsules and writes terminal-state rows (`SETTLED`, `CERTIFIED`, `REVOKED`, `TAINTED`, `STALE`, `FREEZE`) to `claim_settlements` (with a compatibility `settlements` view).
 - Writes `index_manifest` with:
   - ETL file SHA-256 digest,
   - index schema version,
@@ -23,7 +23,7 @@ Because the index is rebuilt from ETL alone and inserts rows in ETL order, rebui
 
 ## Schema overview
 
-### `settlements`
+### `claim_settlements`
 Columns include:
 - `etl_index` (primary key)
 - `capsule_hash`
@@ -37,15 +37,24 @@ Columns include:
 - `topic_id`
 - `holdout_ref`
 - `decision`
+- `nullspec_id`
+- `trial_nonce_b64`
 
 Indexes:
 - `(arm_id, outcome)`
 - `(intervention_id, outcome)`
 - `(claim_name)`
 - `(ended_at)`
+- `(topic_id, ended_at)`
+- `(holdout_ref, ended_at)`
+- `(nullspec_id, outcome)`
+- `(trial_nonce_b64)`
 
 ### `index_manifest`
 Single row containing deterministic build metadata.
+
+### `schema_version`
+Single row pragma table tracking the current SQLite schema version used by automatic migrations.
 
 ## Query examples
 
