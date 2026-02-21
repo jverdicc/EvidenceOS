@@ -15,6 +15,7 @@ members = [
   "crates/evidenceos-settle-offline",
   "crates/evidenceos-pln-calibrate",
   "crates/evidenceos-envelope",
+  "crates/evidenceos-etl-indexer",
 ]
 
 [workspace.package]

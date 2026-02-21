@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "evidenceos-etl-indexer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Builds a deterministic SQLite index from EvidenceOS ETL logs"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+crc32fast = "1.4"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+evidenceos-core = { path = "../evidenceos-core" }
+
+[dev-dependencies]
+tempfile = "3"
