@@ -1017,7 +1017,8 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimV2Request>,
     ) -> Result<Response<pb::ExecuteClaimV2Response>, Status> {
-        let principal_id = Self::principal_id_from_metadata(request.metadata());
+        let caller = Self::caller_identity(request.metadata());
+        let principal_id = caller.principal_id.clone();
         let request_id = Self::request_id_from_metadata(request.metadata())?;
         if let Some(cached) =
             self.idempotency_lookup_execute_claim_v2(&principal_id, &request_id)?
@@ -1695,6 +1696,8 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::GetInclusionProofRequest>,
     ) -> Result<Response<pb::GetInclusionProofResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
+        Self::require_auditor_role(&caller, "GetInclusionProof")?;
         let req = request.into_inner();
         let etl = self.state.etl.lock();
         let leaf_hash = etl
@@ -1714,6 +1717,8 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::GetConsistencyProofRequest>,
     ) -> Result<Response<pb::GetConsistencyProofResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
+        Self::require_auditor_role(&caller, "GetConsistencyProof")?;
         let req = request.into_inner();
         if req.first_tree_size > req.second_tree_size {
             return Err(Status::invalid_argument(
@@ -1771,6 +1776,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::FetchCapsuleRequest>,
     ) -> Result<Response<pb::FetchCapsuleResponse>, Status> {
         let caller = Self::caller_identity(request.metadata());
+        Self::require_auditor_role(&caller, "FetchCapsule")?;
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
         let claims = self.state.claims.lock();
         let claim = claims

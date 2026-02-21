@@ -141,9 +141,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::GetInclusionProofRequest>,
     ) -> Result<Response<v1::GetInclusionProofResponse>, Status> {
-        let req_v2: v2::GetInclusionProofRequest = transcode_message(request.into_inner())?;
-        let response =
-            <Self as EvidenceOsV2>::get_inclusion_proof(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::GetInclusionProofRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::get_inclusion_proof(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -151,9 +150,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::GetConsistencyProofRequest>,
     ) -> Result<Response<v1::GetConsistencyProofResponse>, Status> {
-        let req_v2: v2::GetConsistencyProofRequest = transcode_message(request.into_inner())?;
-        let response =
-            <Self as EvidenceOsV2>::get_consistency_proof(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::GetConsistencyProofRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::get_consistency_proof(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
