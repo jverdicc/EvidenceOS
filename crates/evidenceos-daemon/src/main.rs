@@ -175,10 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.nullspec_registry_dir.as_deref(),
         args.nullspec_authority_keys_dir.as_deref(),
     )?;
-    let oracle_aspec_policy = AspecPolicy {
-        float_policy: FloatPolicy::Allow,
-        ..AspecPolicy::default()
-    };
+    let oracle_aspec_policy = AspecPolicy::oracle_v1();
     let registry = OracleRegistry::load_from_dir(
         &oracle_cfg.oracle_dir,
         &oracle_cfg.trusted_authorities,

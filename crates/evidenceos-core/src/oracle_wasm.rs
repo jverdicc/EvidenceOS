@@ -1,4 +1,4 @@
-use crate::aspec::{verify_aspec, AspecLane, AspecPolicy};
+use crate::aspec::{verify_aspec, AspecPolicy};
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use crate::wasm_config::deterministic_wasmtime_config;
 use wasmtime::{Engine, ExternType, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -30,23 +30,9 @@ pub struct WasmOracleSandbox {
 }
 
 impl WasmOracleSandbox {
-    pub fn new(
-        wasm: &[u8],
-        aspec_policy: &AspecPolicy,
-        policy: WasmOracleSandboxPolicy,
-    ) -> EvidenceOSResult<Self> {
-        let report = verify_aspec(wasm, aspec_policy);
-        let ignorable = [
-            "missing required export: run",
-            "missing required import emit_structured_claim in env:: or kernel::",
-            "disallowed export: oracle_query",
-        ];
-        let critical_reasons: Vec<_> = report
-            .reasons
-            .iter()
-            .filter(|reason| !ignorable.iter().any(|msg| *reason == msg))
-            .collect();
-        if !matches!(report.lane, AspecLane::HighAssurance) || !critical_reasons.is_empty() {
+    pub fn new(wasm: &[u8], policy: WasmOracleSandboxPolicy) -> EvidenceOSResult<Self> {
+        let report = verify_aspec(wasm, &AspecPolicy::oracle_v1());
+        if !report.ok {
             return Err(EvidenceOSError::AspecRejected);
         }
 
@@ -117,7 +103,6 @@ impl WasmOracleSandbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aspec::FloatPolicy;
 
     fn oracle_wat(body: &str) -> Vec<u8> {
         wat::parse_str(format!(
@@ -130,22 +115,14 @@ mod tests {
     fn aspec_rejects_wasi_imports() {
         let wasm = wat::parse_str("(module (import \"wasi_snapshot_preview1\" \"fd_write\" (func)) (memory (export \"memory\") 1) (func (export \"oracle_query\") (param i32 i32) (result f64) f64.const 0.1))")
             .unwrap_or_else(|_| unreachable!());
-        let policy = AspecPolicy {
-            float_policy: FloatPolicy::Allow,
-            ..AspecPolicy::default()
-        };
-        let sandbox = WasmOracleSandbox::new(&wasm, &policy, WasmOracleSandboxPolicy::default());
+        let sandbox = WasmOracleSandbox::new(&wasm, WasmOracleSandboxPolicy::default());
         assert!(sandbox.is_err());
     }
 
     #[test]
     fn wasm_query_rejects_nan() {
-        let wasm = oracle_wat("f64.const nan:canonical");
-        let policy = AspecPolicy {
-            float_policy: FloatPolicy::Allow,
-            ..AspecPolicy::default()
-        };
-        let sandbox = WasmOracleSandbox::new(&wasm, &policy, WasmOracleSandboxPolicy::default())
+        let wasm = oracle_wat("f64.const 0.0 f64.const 0.0 f64.div");
+        let sandbox = WasmOracleSandbox::new(&wasm, WasmOracleSandboxPolicy::default())
             .unwrap_or_else(|_| unreachable!());
         assert!(sandbox.query_raw_metric(&[0, 1]).is_err());
     }

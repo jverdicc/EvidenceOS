@@ -28,7 +28,8 @@ use evidenceos_guest_abi::{
     allowed_import_pairs, IMPORT_EMIT_STRUCTURED_CLAIM, MODULE_ENV, MODULE_KERNEL_ALIAS,
 };
 
-const ALLOWED_EXPORTS: [&str; 2] = ["run", "memory"];
+pub const ASPEC_PROFILE_CLAIM_V1: &str = "CLAIM_V1";
+pub const ASPEC_PROFILE_ORACLE_V1: &str = "ORACLE_V1";
 
 fn is_required_output_import(module: &str, name: &str) -> bool {
     (module == MODULE_ENV || module == MODULE_KERNEL_ALIAS) && name == IMPORT_EMIT_STRUCTURED_CLAIM
@@ -98,9 +99,17 @@ pub struct AspecReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AspecPolicy {
+    /// Human-readable policy profile label.
+    pub profile_name: String,
     pub lane: AspecLane,
+    /// Allowed export names.
+    pub allowed_exports: Vec<String>,
+    /// Required export names.
+    pub required_exports: Vec<String>,
     /// Allowed imports as (module,name).
     pub allowed_imports: HashSet<(String, String)>,
+    /// Allowed import path prefixes (`module::name`).
+    pub allowed_imports_prefixes: Vec<String>,
     /// §A.1 P_data maximum data bytes.
     pub max_data_segment_bytes: u64,
     /// §A.1 P_entropy entropy ratio cap in [0,1].
@@ -119,12 +128,22 @@ pub struct AspecPolicy {
 
 impl Default for AspecPolicy {
     fn default() -> Self {
+        Self::claim_v1()
+    }
+}
+
+impl AspecPolicy {
+    pub fn claim_v1() -> Self {
         let allowed = allowed_import_pairs()
             .map(|(module, name)| (module.to_string(), name.to_string()))
             .collect();
         Self {
+            profile_name: ASPEC_PROFILE_CLAIM_V1.to_string(),
             lane: AspecLane::HighAssurance,
+            allowed_exports: vec!["run".to_string(), "memory".to_string()],
+            required_exports: vec!["run".to_string()],
             allowed_imports: allowed,
+            allowed_imports_prefixes: vec![],
             max_data_segment_bytes: 65_536,
             max_entropy_ratio: 0.75,
             max_cyclomatic_complexity: 50,
@@ -134,6 +153,27 @@ impl Default for AspecPolicy {
             float_policy: FloatPolicy::RejectAll,
         }
     }
+
+    pub fn oracle_v1() -> Self {
+        Self {
+            profile_name: ASPEC_PROFILE_ORACLE_V1.to_string(),
+            allowed_exports: vec!["oracle_query".to_string(), "memory".to_string()],
+            required_exports: vec!["oracle_query".to_string(), "memory".to_string()],
+            allowed_imports: HashSet::new(),
+            allowed_imports_prefixes: vec![],
+            float_policy: FloatPolicy::Allow,
+            ..Self::claim_v1()
+        }
+    }
+}
+
+fn allows_import(policy: &AspecPolicy, module: &str, name: &str) -> bool {
+    let key = (module.to_string(), name.to_string());
+    policy.allowed_imports.contains(&key)
+        || policy
+            .allowed_imports_prefixes
+            .iter()
+            .any(|prefix| format!("{module}::{name}").starts_with(prefix))
 }
 
 fn normalized_entropy(data: &[u8]) -> f64 {
@@ -544,7 +584,6 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
     let mut data_segment_bytes: u64 = 0;
     let mut data_bytes: Vec<u8> = Vec::new();
     let mut exported_names = Vec::new();
-    let mut has_run_export = false;
     let mut has_output_import = false;
     let mut total_loops: u64 = 0;
     let mut bounds_used = Vec::new();
@@ -571,8 +610,7 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                     match import.ty {
                         TypeRef::Func(_) => {
                             imported_funcs += 1;
-                            let key = (import.module.to_string(), import.name.to_string());
-                            if !policy.allowed_imports.contains(&key) {
+                            if !allows_import(policy, import.module, import.name) {
                                 reasons.push(format!(
                                     "banned import: {}::{}",
                                     import.module, import.name
@@ -616,10 +654,11 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                     };
                     let name = export.name.to_string();
                     exported_names.push(name.clone());
-                    if name == "run" {
-                        has_run_export = true;
-                    }
-                    if !ALLOWED_EXPORTS.contains(&name.as_str()) {
+                    if !policy
+                        .allowed_exports
+                        .iter()
+                        .any(|allowed| allowed == &name)
+                    {
                         reasons.push(format!("disallowed export: {name}"));
                     }
                 }
@@ -825,14 +864,13 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
         }
     }
 
-    if !has_run_export {
-        reasons.push("missing required export: run".to_string());
-    }
-    if exported_names.is_empty() {
-        reasons.push("module exports must include run".to_string());
+    for required_export in &policy.required_exports {
+        if !exported_names.iter().any(|name| name == required_export) {
+            reasons.push(format!("missing required export: {required_export}"));
+        }
     }
 
-    if !has_output_import {
+    if policy.profile_name == ASPEC_PROFILE_CLAIM_V1 && !has_output_import {
         reasons
             .push("missing required import emit_structured_claim in env:: or kernel::".to_string());
     }
@@ -1213,6 +1251,29 @@ mod tests {
 
         let good = base_module("nop");
         assert!(verify_aspec(&good, &AspecPolicy::default()).ok);
+    }
+
+    #[test]
+    fn p_claim_and_oracle_profiles_are_explicit_and_enforced() {
+        let claim_module = wat::parse_str(
+            r#"(module
+                (import "kernel" "emit_structured_claim" (func (param i32 i32)))
+                (memory (export "memory") 1)
+                (func (export "run") nop))"#,
+        )
+        .unwrap();
+        let oracle_module = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "oracle_query") (param i32 i32) (result f64) f64.const 0.0))"#,
+        )
+        .unwrap();
+
+        assert!(verify_aspec(&claim_module, &AspecPolicy::claim_v1()).ok);
+        assert!(!verify_aspec(&claim_module, &AspecPolicy::oracle_v1()).ok);
+
+        assert!(verify_aspec(&oracle_module, &AspecPolicy::oracle_v1()).ok);
+        assert!(!verify_aspec(&oracle_module, &AspecPolicy::claim_v1()).ok);
     }
 
     #[test]
