@@ -1,7 +1,6 @@
+use crate::capsule::canonical_json;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnsignedSettlementProposal {
@@ -9,7 +8,10 @@ pub struct UnsignedSettlementProposal {
     pub claim_id_hex: String,
     pub claim_state: String,
     pub epoch: u64,
-    pub capsule_bytes: Vec<u8>,
+    pub etl_index: u64,
+    pub sth_hash_hex: String,
+    pub decision: i32,
+    pub reason_codes: Vec<u32>,
     pub capsule_hash_hex: String,
 }
 
@@ -18,15 +20,17 @@ impl UnsignedSettlementProposal {
         if self.schema_version != 1 {
             return Err("unsupported schema_version");
         }
-        if self.claim_id_hex.len() != 64 || self.capsule_hash_hex.len() != 64 {
+        if self.claim_id_hex.len() != 64
+            || self.capsule_hash_hex.len() != 64
+            || self.sth_hash_hex.len() != 64
+        {
             return Err("hash fields must be 32-byte hex");
         }
         if self.claim_state.is_empty() {
             return Err("claim_state must be non-empty");
         }
-        let hash = Sha256::digest(&self.capsule_bytes);
-        if hex::encode(hash) != self.capsule_hash_hex {
-            return Err("capsule_hash_hex does not match capsule_bytes");
+        if self.reason_codes.len() > 64 {
+            return Err("reason_codes exceeds maximum");
         }
         Ok(())
     }
@@ -40,25 +44,7 @@ pub struct SignedSettlementRecord {
 }
 
 fn signing_payload(proposal: &UnsignedSettlementProposal) -> Result<Vec<u8>, &'static str> {
-    let value = serde_json::to_value(proposal).map_err(|_| "proposal serialization failed")?;
-    let sorted = sort_json(value);
-    serde_json::to_vec(&sorted).map_err(|_| "proposal serialization failed")
-}
-
-fn sort_json(v: Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut sorted = Map::new();
-            for (k, val) in entries {
-                sorted.insert(k, sort_json(val));
-            }
-            Value::Object(sorted)
-        }
-        Value::Array(arr) => Value::Array(arr.into_iter().map(sort_json).collect()),
-        other => other,
-    }
+    canonical_json(proposal).map_err(|_| "proposal serialization failed")
 }
 
 pub fn sign_settlement_proposal(
@@ -107,8 +93,11 @@ mod tests {
             claim_id_hex: "ab".repeat(32),
             claim_state: "CERTIFIED".to_string(),
             epoch: 12,
-            capsule_bytes: b"capsule".to_vec(),
-            capsule_hash_hex: hex::encode(Sha256::digest(b"capsule")),
+            etl_index: 99,
+            sth_hash_hex: "12".repeat(32),
+            decision: 1,
+            reason_codes: vec![7, 9],
+            capsule_hash_hex: "34".repeat(32),
         };
         let key = signing_key();
         let record = sign_settlement_proposal(proposal, &key).expect("sign");
@@ -122,8 +111,11 @@ mod tests {
             claim_id_hex: "cd".repeat(32),
             claim_state: "SETTLED".to_string(),
             epoch: 2,
-            capsule_bytes: b"capsule".to_vec(),
-            capsule_hash_hex: hex::encode(Sha256::digest(b"capsule")),
+            etl_index: 2,
+            sth_hash_hex: "ef".repeat(32),
+            decision: 2,
+            reason_codes: vec![4],
+            capsule_hash_hex: "ab".repeat(32),
         };
         let key = signing_key();
         let mut record = sign_settlement_proposal(proposal, &key).expect("sign");
@@ -138,14 +130,20 @@ mod tests {
             "claim_id_hex": "ef".repeat(32),
             "claim_state": "SETTLED",
             "epoch": 99,
-            "capsule_bytes": [99, 97, 112, 115, 117, 108, 101],
-            "capsule_hash_hex": hex::encode(Sha256::digest(b"capsule"))
+            "etl_index": 12,
+            "sth_hash_hex": "aa".repeat(32),
+            "decision": 1,
+            "reason_codes": [9202, 9203],
+            "capsule_hash_hex": "bb".repeat(32)
         });
         let reordered = json!({
             "capsule_hash_hex": ordered["capsule_hash_hex"],
+            "reason_codes": ordered["reason_codes"],
+            "decision": ordered["decision"],
+            "sth_hash_hex": ordered["sth_hash_hex"],
+            "etl_index": ordered["etl_index"],
             "epoch": ordered["epoch"],
             "claim_state": ordered["claim_state"],
-            "capsule_bytes": ordered["capsule_bytes"],
             "schema_version": ordered["schema_version"],
             "claim_id_hex": ordered["claim_id_hex"]
         });

@@ -29,6 +29,25 @@ use tonic::{GrpcMethod, Request, Status};
 const DEFAULT_REPLAY_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_REPLAY_IDS: usize = 10_000;
 const MAX_REQUEST_ID_LEN: usize = 128;
+const MAX_SCOPES_HEADER_LEN: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalRole {
+    Operator,
+    Client,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallerIdentity {
+    pub principal_id: String,
+    pub role: PrincipalRole,
+}
+
+impl CallerIdentity {
+    pub fn is_operator(&self) -> bool {
+        self.role == PrincipalRole::Operator
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AuthConfig {
@@ -292,6 +311,96 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+pub fn derive_caller_identity(metadata: &MetadataMap) -> CallerIdentity {
+    let operator_fingerprints = operator_fingerprint_allowlist();
+    if let Some(v) = metadata
+        .get("x-client-cert-fp")
+        .and_then(|v| v.to_str().ok())
+    {
+        let normalized_fp = v.trim().to_ascii_lowercase();
+        let san = metadata
+            .get("x-client-cert-san")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let principal_source = if san.is_empty() {
+            normalized_fp.clone()
+        } else {
+            san.clone()
+        };
+        let san_operator = san.eq_ignore_ascii_case("operator")
+            || san.to_ascii_lowercase().contains("role=operator");
+        let fp_operator = operator_fingerprints.contains(&normalized_fp);
+        return CallerIdentity {
+            principal_id: format!(
+                "mtls:{}",
+                hex::encode(sha256_bytes(principal_source.as_bytes()))
+            ),
+            role: if san_operator || fp_operator {
+                PrincipalRole::Operator
+            } else {
+                PrincipalRole::Client
+            },
+        };
+    }
+
+    if let Some(v) = metadata.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(token) = v.strip_prefix("Bearer ") {
+            let scopes_header = metadata
+                .get("x-evidenceos-token-scopes")
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.is_empty() && v.len() <= MAX_SCOPES_HEADER_LEN)
+                .unwrap_or_default();
+            let is_operator = scopes_header
+                .split([',', ' '])
+                .filter(|s| !s.is_empty())
+                .any(|s| s.eq_ignore_ascii_case("operator"));
+            return CallerIdentity {
+                principal_id: format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes()))),
+                role: if is_operator {
+                    PrincipalRole::Operator
+                } else {
+                    PrincipalRole::Client
+                },
+            };
+        }
+    }
+
+    if let Some(v) = metadata
+        .get("x-evidenceos-signature")
+        .and_then(|v| v.to_str().ok())
+    {
+        return CallerIdentity {
+            principal_id: format!("hmac:{}", hex::encode(sha256_bytes(v.as_bytes()))),
+            role: PrincipalRole::Client,
+        };
+    }
+
+    CallerIdentity {
+        principal_id: "anonymous".to_string(),
+        role: PrincipalRole::Client,
+    }
+}
+
+fn operator_fingerprint_allowlist() -> std::collections::HashSet<String> {
+    std::env::var("EVIDENCEOS_OPERATOR_CERT_FINGERPRINTS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    hasher.finalize().into()
+}
+
 #[allow(clippy::result_large_err)]
 pub fn decode_with_max_size<T: Message + Default>(
     bytes: &[u8],
@@ -418,6 +527,38 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 
+    #[test]
+    fn bearer_operator_scope_maps_to_operator_role() {
+        let mut req = Request::new(());
+        req.metadata_mut().insert(
+            "authorization",
+            "Bearer role-token".parse().expect("metadata value"),
+        );
+        req.metadata_mut().insert(
+            "x-evidenceos-token-scopes",
+            "client,operator".parse().expect("metadata value"),
+        );
+
+        let caller = super::derive_caller_identity(req.metadata());
+        assert!(caller.is_operator());
+        assert!(caller.principal_id.starts_with("bearer:"));
+    }
+
+    #[test]
+    fn mtls_allowlisted_fingerprint_maps_to_operator_role() {
+        std::env::set_var("EVIDENCEOS_OPERATOR_CERT_FINGERPRINTS", "abc123");
+        let mut req = Request::new(());
+        req.metadata_mut().insert(
+            "x-client-cert-fp",
+            "abc123".parse().expect("metadata value"),
+        );
+
+        let caller = super::derive_caller_identity(req.metadata());
+        assert!(caller.is_operator());
+        assert!(caller.principal_id.starts_with("mtls:"));
+
+        std::env::remove_var("EVIDENCEOS_OPERATOR_CERT_FINGERPRINTS");
+    }
     #[test]
     fn timestamp_skew_rejected() {
         let key = b"hmac-secret".to_vec();

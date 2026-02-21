@@ -40,6 +40,9 @@ jobs:
       - name: Unit test implementation guard checker
         run: python -m unittest scripts.tests.test_check_impl_status_guards
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 
@@ -54,6 +57,9 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace
+
+      - name: Verify FORC10 reproducibility harness
+        run: make -C artifacts/forc10 verify
 
       - name: Coverage summary
         run: cargo llvm-cov --workspace --all-features --summary-only

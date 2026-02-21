@@ -1,27 +1,19 @@
 # Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# EvidenceOS daemon container
-
-FROM rust:1.78-bookworm AS builder
+FROM rust:stable-bookworm AS builder
 WORKDIR /app
 
-# Pre-copy manifests for better caching
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates ./crates
-COPY proto ./proto
-
+COPY . .
 RUN cargo build --release -p evidenceos-daemon
 
-FROM debian:bookworm-slim
-RUN useradd -m -u 10001 evidenceos
-WORKDIR /home/evidenceos
+FROM gcr.io/distroless/cc-debian12:nonroot
+WORKDIR /app
 
 COPY --from=builder /app/target/release/evidenceos-daemon /usr/local/bin/evidenceos-daemon
 
-USER evidenceos
-EXPOSE 50051
+EXPOSE 50051 8081 9464
 VOLUME ["/data"]
 
 ENTRYPOINT ["/usr/local/bin/evidenceos-daemon"]
-CMD ["--listen", "0.0.0.0:50051", "--data-dir", "/data"]
+CMD ["--listen", "0.0.0.0:50051", "--data-dir", "/data", "--preflight-http-listen", "0.0.0.0:8081", "--metrics-listen", "0.0.0.0:9464"]

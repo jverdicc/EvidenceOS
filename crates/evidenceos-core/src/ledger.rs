@@ -21,17 +21,27 @@ use serde_json::{json, Value};
 
 /// Compute alpha' = alpha * 2^{-k_total}.
 pub fn alpha_prime(alpha: f64, k_bits_total: f64) -> f64 {
-    alpha * 2f64.powf(-k_bits_total)
+    log_alpha_prime(alpha, k_bits_total).exp()
 }
 
 /// Certification barrier: 1 / alpha' = 2^{k_total} / alpha.
 pub fn certification_barrier(alpha: f64, k_bits_total: f64) -> f64 {
-    let ap = alpha_prime(alpha, k_bits_total);
-    if ap <= 0.0 {
-        f64::INFINITY
-    } else {
-        1.0 / ap
-    }
+    barrier_threshold(alpha, k_bits_total).exp()
+}
+
+/// log(alpha_target).
+pub fn log_alpha_target(alpha: f64) -> f64 {
+    alpha.ln()
+}
+
+/// log(alpha') = log(alpha_target) - k * ln(2).
+pub fn log_alpha_prime(alpha: f64, k_bits_total: f64) -> f64 {
+    log_alpha_target(alpha) - (k_bits_total * std::f64::consts::LN_2)
+}
+
+/// Barrier threshold B in log-space where certify iff ln(w_max) >= B.
+pub fn barrier_threshold(alpha: f64, k_bits_total: f64) -> f64 {
+    -log_alpha_prime(alpha, k_bits_total)
 }
 
 /// §19.4 weighted arithmetic e-merge.
@@ -338,11 +348,44 @@ impl ConservationLedger {
     pub fn alpha_prime(&self) -> f64 {
         alpha_prime(self.alpha, self.k_bits_total)
     }
+    pub fn log_alpha_target(&self) -> f64 {
+        log_alpha_target(self.alpha)
+    }
+    pub fn log_alpha_prime(&self) -> f64 {
+        log_alpha_prime(self.alpha, self.k_bits_total)
+    }
+    pub fn barrier_threshold(&self) -> f64 {
+        barrier_threshold(self.alpha, self.k_bits_total)
+    }
     pub fn barrier(&self) -> f64 {
         certification_barrier(self.alpha, self.k_bits_total)
     }
+    pub fn certification_guard_failure(&self) -> Option<&'static str> {
+        if !(self.alpha.is_finite() && self.alpha > 0.0 && self.alpha < 1.0) {
+            return Some("invalid_alpha");
+        }
+        if !self.k_bits_total.is_finite() || self.k_bits_total < 0.0 {
+            return Some("invalid_k_bits_total");
+        }
+        if !(self.w_max.is_finite() && self.w_max > 0.0) {
+            return Some("invalid_w_max");
+        }
+        let threshold = self.barrier_threshold();
+        if !threshold.is_finite() {
+            return Some("invalid_barrier_threshold");
+        }
+        None
+    }
     pub fn can_certify(&self) -> bool {
-        self.w_max >= self.barrier()
+        if self.certification_guard_failure().is_some() {
+            return false;
+        }
+        let log_w_max = self.w_max.ln();
+        let threshold = self.barrier_threshold();
+        if !log_w_max.is_finite() || threshold.is_nan() {
+            return false;
+        }
+        log_w_max >= threshold
     }
     pub fn w_max(&self) -> f64 {
         self.w_max
@@ -475,6 +518,21 @@ mod tests {
     }
 
     #[test]
+    fn barrier_log_space_extremes_stay_non_nan() {
+        let alpha = 1e-30;
+        for k in [0.0, 1.0, 1_000.0, 1_000_000.0] {
+            let log_ap = log_alpha_prime(alpha, k);
+            let threshold = barrier_threshold(alpha, k);
+            let barrier = certification_barrier(alpha, k);
+            let ap = alpha_prime(alpha, k);
+            assert!(!log_ap.is_nan());
+            assert!(!threshold.is_nan());
+            assert!(!barrier.is_nan());
+            assert!(!ap.is_nan());
+        }
+    }
+
+    #[test]
     fn w_max_tracks_peak_wealth() {
         let mut l = ConservationLedger::new(0.05).expect("ledger");
         l.settle_e_value(3.0, "a", Value::Null).expect("settle");
@@ -580,6 +638,34 @@ mod tests {
         let low = certification_barrier(0.05, 2.0);
         let high = certification_barrier(0.05, 6.0);
         assert!(high > low);
+    }
+
+    #[test]
+    fn barrier_threshold_is_monotonic_in_k() {
+        let alpha = 1e-30;
+        let mut prev = barrier_threshold(alpha, 0.0);
+        for k in [1.0, 10.0, 100.0, 10_000.0, 1_000_000.0] {
+            let next = barrier_threshold(alpha, k);
+            assert!(next.is_finite());
+            assert!(next > prev);
+            prev = next;
+        }
+    }
+
+    #[test]
+    fn can_certify_uses_log_space_for_extreme_thresholds() {
+        let mut l = ConservationLedger::new(1e-30).expect("ledger");
+        l.k_bits_total = 1_000_000.0;
+        l.w_max = f64::MAX;
+        assert!(!l.can_certify());
+    }
+
+    #[test]
+    fn certification_guard_fails_closed_on_invalid_numeric_state() {
+        let mut l = ConservationLedger::new(0.5).expect("ledger");
+        l.w_max = f64::NAN;
+        assert_eq!(l.certification_guard_failure(), Some("invalid_w_max"));
+        assert!(!l.can_certify());
     }
 
     #[test]

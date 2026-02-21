@@ -214,6 +214,10 @@ fn is_forbidden_output_import(module: &str, name: &str) -> bool {
         || lowered.contains("output") && !is_required_output_import(module, name)
 }
 
+fn is_forbidden_dp_import(name: &str) -> bool {
+    matches!(name, "dp_laplace_i64" | "dp_gaussian_i64")
+}
+
 fn compute_control_metadata(ops: &[Operator<'_>]) -> Result<ControlMetadata, String> {
     let mut matching_end = vec![None; ops.len()];
     let mut if_to_else = vec![None; ops.len()];
@@ -621,6 +625,12 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                     import.module, import.name
                                 ));
                             }
+                            if is_forbidden_dp_import(import.name) {
+                                reasons.push(format!(
+                                    "DP guest syscall is forbidden; host-managed DP only: {}::{}",
+                                    import.module, import.name
+                                ));
+                            }
                         }
                         TypeRef::Memory(_) => reasons.push(
                             "memory imports are banned (define memory in-module)".to_string(),
@@ -1017,6 +1027,20 @@ mod tests {
         )
         .unwrap();
         assert!(!verify_aspec(&bad, &AspecPolicy::default()).ok);
+
+        let dp_import = wat::parse_str(
+            "(module
+                (import \"env\" \"dp_laplace_i64\" (func (param i64 i64 i64) (result i64)))
+                (import \"kernel\" \"emit_structured_claim\" (func (param i32 i32)))
+                (func (export \"run\") nop))",
+        )
+        .unwrap();
+        let report = verify_aspec(&dp_import, &AspecPolicy::default());
+        assert!(!report.ok);
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("host-managed DP only")));
     }
 
     #[test]

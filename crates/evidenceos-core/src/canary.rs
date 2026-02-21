@@ -1,6 +1,6 @@
 use crate::eprocess::DirichletMixtureEProcess;
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::nullspec::{EProcessKind, NullSpecContractV1, NullSpecKind};
+use crate::nullspec::{EProcessKind, NullSpecKind, SignedNullSpecContractV1};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl CanaryState {
 
     pub fn update_with_bucket(
         &mut self,
-        contract: &NullSpecContractV1,
+        contract: &SignedNullSpecContractV1,
         y_bucket: usize,
         epoch: u64,
     ) -> EvidenceOSResult<bool> {
@@ -132,8 +132,8 @@ impl CanaryState {
 mod tests {
     use super::*;
 
-    fn sample_contract() -> NullSpecContractV1 {
-        NullSpecContractV1 {
+    fn sample_contract() -> SignedNullSpecContractV1 {
+        SignedNullSpecContractV1 {
             schema: "evidenceos.nullspec.v1".to_string(),
             nullspec_id: [0; 32],
             oracle_id: "oracle-a".to_string(),

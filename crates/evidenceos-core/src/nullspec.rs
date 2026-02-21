@@ -20,7 +20,7 @@ pub enum EProcessKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NullSpecContractV1 {
+pub struct SignedNullSpecContractV1 {
     pub schema: String,
     pub nullspec_id: [u8; 32],
     pub oracle_id: String,
@@ -50,14 +50,11 @@ impl TrustedAuthorities {
     }
 }
 
-impl NullSpecContractV1 {
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        let value = match serde_json::to_value(self) {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        };
+impl SignedNullSpecContractV1 {
+    pub fn canonical_bytes(&self) -> EvidenceOSResult<Vec<u8>> {
+        let value = serde_json::to_value(self).map_err(|_| EvidenceOSError::Internal)?;
         let sorted = sort_json(value);
-        serde_json::to_vec(&sorted).unwrap_or_else(|_| b"null".to_vec())
+        serde_json::to_vec(&sorted).map_err(|_| EvidenceOSError::Internal)
     }
 
     pub fn signing_payload_bytes(&self) -> EvidenceOSResult<Vec<u8>> {
@@ -69,14 +66,14 @@ impl NullSpecContractV1 {
         serde_json::to_vec(&sorted).map_err(|_| EvidenceOSError::Internal)
     }
 
-    pub fn compute_id(&self) -> [u8; 32] {
+    pub fn compute_id(&self) -> EvidenceOSResult<[u8; 32]> {
         let mut hasher = Sha256::new();
-        let payload = self.signing_payload_bytes().unwrap_or_default();
+        let payload = self.signing_payload_bytes()?;
         hasher.update(payload);
         let digest = hasher.finalize();
         let mut out = [0_u8; 32];
         out.copy_from_slice(&digest);
-        out
+        Ok(out)
     }
 
     pub fn verify_signature(&self, trusted_keys: &TrustedAuthorities) -> EvidenceOSResult<()> {
@@ -97,7 +94,7 @@ impl NullSpecContractV1 {
         let payload = self.signing_payload_bytes()?;
         key.verify(&payload, &sig)
             .map_err(|_| EvidenceOSError::SignatureInvalid)?;
-        if self.nullspec_id != self.compute_id() {
+        if self.nullspec_id != self.compute_id()? {
             return Err(EvidenceOSError::NullSpecInvalid(
                 "nullspec id mismatch".to_string(),
             ));
@@ -131,8 +128,8 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
-    fn sample_contract() -> NullSpecContractV1 {
-        NullSpecContractV1 {
+    fn sample_contract() -> SignedNullSpecContractV1 {
+        SignedNullSpecContractV1 {
             schema: NULLSPEC_SCHEMA_V1.to_string(),
             nullspec_id: [0_u8; 32],
             oracle_id: "o1".to_string(),
@@ -156,11 +153,11 @@ mod tests {
     fn compute_id_matches_canonical_hash() {
         let c = sample_contract();
         let mut h = Sha256::new();
-        h.update(c.canonical_bytes());
+        h.update(c.canonical_bytes().expect("canonical"));
         let digest = h.finalize();
         let mut expected = [0_u8; 32];
         expected.copy_from_slice(&digest);
-        assert_eq!(c.compute_id(), expected);
+        assert_eq!(c.compute_id().expect("id"), expected);
     }
 
     #[test]
@@ -170,7 +167,7 @@ mod tests {
         let mut c = sample_contract();
         let payload = c.signing_payload_bytes().expect("payload");
         c.signature_ed25519 = sk.sign(&payload).to_bytes().to_vec();
-        c.nullspec_id = c.compute_id();
+        c.nullspec_id = c.compute_id().expect("id");
 
         let mut ta = TrustedAuthorities::default();
         ta.insert("op1".to_string(), vk);

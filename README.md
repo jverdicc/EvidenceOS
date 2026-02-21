@@ -25,6 +25,7 @@ The result is a verification system with explicit risk posture, deterministic se
 4. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 
 > 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
+> 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
@@ -50,7 +51,7 @@ EvidenceOS operationalizes the envelope with several primitives:
 
 • Sybil resistance via topic budgeting. Per-account limits are breakable by identity rotation; UVP charges a shared topic pool (TopicHash / MultiSignalTopicID) so extraction does not scale with identities.
 
-• Non-bypassable admissibility (ASPEC). ASPEC is a decidable admissibility profile for claim Wasm that forbids ambient capabilities (time, randomness, network, files), enforces static resource bounds, and prevents hidden internal search. This ensures hypothesis selection happens through metered oracle calls, not inside submitted code.
+• Non-bypassable admissibility (ASPEC). ASPEC is a decidable admissibility profile for claim Wasm that forbids ambient capabilities (time, randomness, network, files), forbids guest DP syscalls (`dp_laplace_i64`, `dp_gaussian_i64`) in sealed/high-assurance operation, enforces static resource bounds, and prevents hidden internal search. This ensures hypothesis selection happens through metered oracle calls, not inside submitted code.
 
 • Deterministic, auditable settlement. A Deterministic Logical Clock (DLC) and epoch settlement reduce timing leakage. The Evidence Transparency Log (ETL) is an append-only Merkle log that publishes signed tree heads, supports inclusion/consistency proofs, and feeds revocations. Claims form a lineage DAG; recursive revocation taints descendants when a root is slashed.
 
@@ -238,6 +239,14 @@ A commonly reported class of incidents is high-volume prompting campaigns intend
 - **Sim-tested (repo evidence):** deterministic behavior, ledger transitions, ETL proofs/consistency, gRPC lifecycle paths, and fuzzed parser/state surfaces.
 - **Architecture specified:** DiscOS↔EvidenceOS split, ASPEC admissibility boundary, topic-budget anti-sybil model, and lane-based settlement controls.
 - **Roadmap:** stronger production hardening around key lifecycle/rotation, expanded policy packs, and additional end-to-end adversarial simulation suites.
+- **PLN implementation scope:** current production PLN is runtime fuel normalization + deterministic epoch rounding; compile-time CFG branch equalization is not yet implemented (see `docs/PLN_PRODUCTION_PROFILE.md`).
+
+## Implementation status (paper ↔ code)
+
+To avoid review-time ambiguity between paper artifact snapshots and current mainline code, use:
+
+- [`docs/PAPER_VS_CODE.md`](docs/PAPER_VS_CODE.md) for the living parity matrix (paper claim → repo implementation → status).
+- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for additional implementation guardrail notes.
 
 ## Verification Matrix
 
@@ -330,6 +339,9 @@ The [DiscOS repository](https://github.com/jverdicc/DiscOS) includes:
 
 - a Rust client
 - a Python client example
+- safe demonstration scenarios that use synthetic/toy data and avoid operational harmful instructions
+
+When using DiscOS demos with EvidenceOS, keep demonstrations non-operational and policy-aligned; see [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md).
 
 If you are following older DiscOS docs/examples that reference `--etl-path`, update those invocations to EvidenceOS's current `--data-dir` flag.
 
