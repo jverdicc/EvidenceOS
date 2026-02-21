@@ -17,9 +17,9 @@ Daemon loading:
 
 ## What it measures
 
-- syscall-adjacent timing sample distribution (nanosecond proxy)
-- wasm-instruction-adjacent timing sample distribution (nanosecond proxy)
-- derived recommended `pln_constant_cost` values from p99
+- syscall-adjacent fuel sample distribution
+- wasm-instruction-adjacent fuel sample distribution
+- derived recommended `pln_target_fuel` values from p99 fuel usage
 
 ## Limitations
 

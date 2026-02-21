@@ -6,11 +6,11 @@ use clap::Parser;
 use evidenceos_core::pln::{DistributionSummary, PlnProfile, RecommendedPlnCosts};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use wasmtime::{Config, Engine, Instance, Module, Store};
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-pln-calibrate")]
-#[command(about = "Generate hardware-local PLN timing profile")]
+#[command(about = "Generate hardware-local PLN fuel profile")]
 struct Args {
     #[arg(long, default_value = "./data")]
     data_dir: String,
@@ -32,65 +32,118 @@ fn cpu_model() -> String {
 
 fn summarize(samples: &mut [u64]) -> DistributionSummary {
     samples.sort_unstable();
-    let mean_cycles = (samples.iter().copied().sum::<u64>() / (samples.len() as u64)).max(1);
+    let mean_fuel = (samples.iter().copied().sum::<u64>() / (samples.len() as u64)).max(1);
     let p95_idx = ((samples.len() * 95) / 100).min(samples.len().saturating_sub(1));
     let p99_idx = ((samples.len() * 99) / 100).min(samples.len().saturating_sub(1));
     DistributionSummary {
-        mean_cycles,
-        p95_cycles: samples[p95_idx].max(mean_cycles),
-        p99_cycles: samples[p99_idx].max(samples[p95_idx].max(mean_cycles)),
+        mean_fuel,
+        p95_fuel: samples[p95_idx].max(mean_fuel),
+        p99_fuel: samples[p99_idx].max(samples[p95_idx].max(mean_fuel)),
     }
 }
 
-fn time_syscall_cycles(samples: usize) -> Vec<u64> {
-    (0..samples)
-        .map(|_| {
-            let start = Instant::now();
-            let _ = std::thread::current().id();
-            start.elapsed().as_nanos().max(1) as u64
-        })
-        .collect()
+fn wasmtime_engine() -> Result<Engine, String> {
+    let mut cfg = Config::new();
+    cfg.consume_fuel(true);
+    cfg.wasm_threads(false);
+    cfg.wasm_simd(false);
+    cfg.wasm_relaxed_simd(false);
+    cfg.wasm_multi_memory(false);
+    cfg.wasm_reference_types(false);
+    cfg.wasm_memory64(false);
+    Engine::new(&cfg).map_err(|e| format!("engine init failed: {e}"))
 }
 
-fn time_wasm_instruction_cycles(samples: usize) -> Vec<u64> {
-    (0..samples)
-        .map(|_| {
-            let start = Instant::now();
-            let mut acc = 0u64;
-            for i in 0..512u64 {
-                acc = acc.wrapping_add(i.rotate_left((i % 13) as u32));
-            }
-            std::hint::black_box(acc);
-            start.elapsed().as_nanos().max(1) as u64 / 512
-        })
-        .collect()
+fn fuel_cost_for_wat(engine: &Engine, wat_src: &str, export: &str) -> Result<u64, String> {
+    let wasm = wat::parse_str(wat_src).map_err(|e| format!("wat parse failed: {e}"))?;
+    let module = Module::new(engine, &wasm).map_err(|e| format!("module create failed: {e}"))?;
+    let mut store = Store::new(engine, ());
+    let fuel_budget = 2_000_000;
+    store
+        .set_fuel(fuel_budget)
+        .map_err(|e| format!("set fuel failed: {e}"))?;
+    let instance =
+        Instance::new(&mut store, &module, &[]).map_err(|e| format!("instantiate failed: {e}"))?;
+    let f = instance
+        .get_typed_func::<(), ()>(&mut store, export)
+        .map_err(|e| format!("load export failed: {e}"))?;
+    f.call(&mut store, ())
+        .map_err(|e| format!("function call failed: {e}"))?;
+    let remaining = store
+        .get_fuel()
+        .map_err(|e| format!("get fuel failed: {e}"))?;
+    Ok(fuel_budget.saturating_sub(remaining))
 }
 
-fn build_profile(samples: usize) -> PlnProfile {
-    let mut syscall = time_syscall_cycles(samples.max(100));
-    let mut wasm = time_wasm_instruction_cycles(samples.max(100));
+fn fuel_cost_syscall_like(engine: &Engine) -> Result<u64, String> {
+    fuel_cost_for_wat(
+        engine,
+        r#"(module
+            (func (export \"run\")
+                i32.const 0
+                drop
+                i32.const 1
+                drop)
+        )"#,
+        "run",
+    )
+}
+
+fn fuel_cost_wasm_instruction_block(engine: &Engine) -> Result<u64, String> {
+    fuel_cost_for_wat(
+        engine,
+        r#"(module
+            (func (export \"run\")
+                (local i32)
+                i32.const 0
+                local.set 0
+                loop
+                    local.get 0
+                    i32.const 1
+                    i32.add
+                    local.tee 0
+                    i32.const 512
+                    i32.lt_s
+                    br_if 0
+                end)
+        )"#,
+        "run",
+    )
+}
+
+fn sample_fuel(samples: usize, op: impl Fn() -> Result<u64, String>) -> Result<Vec<u64>, String> {
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        out.push(op()?);
+    }
+    Ok(out)
+}
+
+fn build_profile(samples: usize) -> Result<PlnProfile, String> {
+    let samples = samples.max(100);
+    let engine = wasmtime_engine()?;
+    let mut syscall = sample_fuel(samples, || fuel_cost_syscall_like(&engine))?;
+    let mut wasm = sample_fuel(samples, || fuel_cost_wasm_instruction_block(&engine))?;
     let syscall_summary = summarize(&mut syscall);
     let wasm_summary = summarize(&mut wasm);
     let profile = PlnProfile {
         cpu_model: cpu_model(),
-        syscall_cycles: syscall_summary.clone(),
-        wasm_instruction_cycles: wasm_summary.clone(),
-        recommended_pln_constant_cost: RecommendedPlnCosts {
-            syscall_constant_cost: syscall_summary.p99_cycles,
-            wasm_instruction_constant_cost: wasm_summary.p99_cycles,
+        syscall_fuel: syscall_summary.clone(),
+        wasm_instruction_fuel: wasm_summary.clone(),
+        recommended_pln_target_fuel: RecommendedPlnCosts {
+            syscall_target_fuel: syscall_summary.p99_fuel,
+            wasm_instruction_target_fuel: wasm_summary.p99_fuel,
         },
     };
-    let _ = profile.validate();
-    profile
+    profile.validate().map_err(str::to_string)?;
+    Ok(profile)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let data_dir = PathBuf::from(args.data_dir);
     fs::create_dir_all(&data_dir)?;
-    let profile = build_profile(args.samples);
-    profile
-        .validate()
+    let profile = build_profile(args.samples)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let out_path = data_dir.join("pln_profile.json");
     let payload = serde_json::to_vec_pretty(&profile)?;
@@ -107,8 +160,8 @@ mod tests {
     fn summary_monotone() {
         let mut d = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let s = summarize(&mut d);
-        assert!(s.mean_cycles > 0);
-        assert!(s.p95_cycles >= s.mean_cycles);
-        assert!(s.p99_cycles >= s.p95_cycles);
+        assert!(s.mean_fuel > 0);
+        assert!(s.p95_fuel >= s.mean_fuel);
+        assert!(s.p99_fuel >= s.p95_fuel);
     }
 }
