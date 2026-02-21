@@ -1,54 +1,49 @@
-"""Kaplan-Meier survival analysis for EvidenceOS epistemic trial ETL output."""
+"""Kaplan-Meier survival analysis for EvidenceOS epistemic trial data."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 from lifelines import KaplanMeierFitter
 
+from analysis.epistemic_trial.extract_from_capsules import (
+    read_extracted_rows,
+    run_extraction,
+)
 
-def read_settlements(path: Path):
-    excluded = 0
-    rows = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            if rec.get("kind") != "ClaimSettlementEvent":
-                continue
-            intervention_id = rec.get("intervention_id")
-            outcome = rec.get("outcome")
-            k_bits_total = rec.get("k_bits_total")
-            if intervention_id is None or outcome is None or k_bits_total is None:
-                excluded += 1
-                continue
-            rows.append(
-                {
-                    "arm": intervention_id,
-                    "duration": float(k_bits_total),
-                    "event": 1 if outcome == "FROZEN" else 0,
-                }
-            )
-    return rows, excluded
+
+def _load_rows(dataset: Path | None, etl: Path | None) -> list[dict[str, object]]:
+    if dataset is not None:
+        return read_extracted_rows(dataset)
+    assert etl is not None
+    return run_extraction(etl, etl.with_suffix(".capsules.csv"))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--etl", required=True, type=Path)
+    parser.add_argument("--dataset", type=Path, help="Extracted capsule dataset (.csv/.parquet)")
+    parser.add_argument("--etl", type=Path, help="Raw ETL (used when --dataset is omitted)")
     parser.add_argument("--png", required=True, type=Path)
     parser.add_argument("--csv", required=True, type=Path)
     args = parser.parse_args()
 
-    rows, excluded = read_settlements(args.etl)
+    if args.dataset is None and args.etl is None:
+        raise SystemExit("Provide --dataset or --etl")
+
+    rows = _load_rows(args.dataset, args.etl)
     by_arm = defaultdict(list)
     for row in rows:
-        by_arm[row["arm"]].append(row)
+        arm = row.get("intervention_id") or row.get("arm_id") or "unassigned"
+        by_arm[str(arm)].append(
+            {
+                "duration": float(row["k_bits_total"]),
+                "event": int(row["frozen_event"]),
+            }
+        )
 
     plt.figure(figsize=(8, 5))
     csv_rows = []
@@ -94,7 +89,7 @@ def main() -> None:
         print(
             f"- {arm}: assigned={consort[(arm,'assigned')]}, "
             f"frozen={consort[(arm,'frozen')]}, "
-            f"censored={consort[(arm,'censored')]}, excluded={excluded}"
+            f"censored={consort[(arm,'censored')]}"
         )
 
 

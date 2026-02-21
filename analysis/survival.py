@@ -4,8 +4,8 @@ import argparse
 from pathlib import Path
 
 from analysis.consort import write_consort_diagram
-from analysis.etl_reader import parse_json_records, read_etl_records
-from analysis.trial_dataframe import EVENT_COMPETING, EVENT_PRIMARY, build_trial_dataframe
+from analysis.epistemic_trial.extract_from_capsules import read_extracted_rows, run_extraction
+from analysis.trial_dataframe import EVENT_COMPETING, EVENT_PRIMARY
 
 
 def _require_analysis_dependencies():
@@ -119,17 +119,39 @@ def covariate_balance_table(df, deps):
     return pd.DataFrame(pieces)
 
 
-def run(etl_path: str, out_dir: str) -> None:
+def _build_dataframe(rows: list[dict[str, object]], deps):
+    pd = deps["pd"]
+    normalized = []
+    for row in rows:
+        arm = row.get("intervention_id") or row.get("arm_id") or "unassigned"
+        normalized.append({
+            "participant_id": row.get("claim_id"),
+            "arm": str(arm),
+            "duration_days": float(row["k_bits_total"]),
+            "event_code": EVENT_PRIMARY if int(row.get("frozen_event", 0)) == 1 else 0,
+            "status": "analyzed",
+            "etl_index": int(row.get("ended_at") or 0),
+        })
+    return pd.DataFrame(normalized)
+
+
+def run(etl_path: str | None, out_dir: str, dataset_path: str | None = None) -> None:
     deps = _require_analysis_dependencies()
     pd = deps["pd"]
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    records = parse_json_records(read_etl_records(etl_path))
-    df = build_trial_dataframe(records)
+    if dataset_path:
+        rows = read_extracted_rows(Path(dataset_path))
+    elif etl_path:
+        rows = run_extraction(Path(etl_path), out / "capsule_trials.csv")
+    else:
+        raise ValueError("provide dataset_path or etl_path")
+
+    df = _build_dataframe(rows, deps)
     if df.empty:
-        raise ValueError("No trial records found in ETL")
+        raise ValueError("No trial records found in extracted capsule dataset")
 
     write_km_curves(df, out, deps)
 
@@ -147,10 +169,13 @@ def run(etl_path: str, out_dir: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="DiscOS trial survival analysis")
-    parser.add_argument("--etl", required=True, help="Path to ETL log")
+    parser.add_argument("--etl", help="Path to ETL log")
+    parser.add_argument("--dataset", help="Path to extracted capsule dataset (.csv/.parquet)")
     parser.add_argument("--out", required=True, help="Output directory for analysis artifacts")
     args = parser.parse_args()
-    run(args.etl, args.out)
+    if not args.etl and not args.dataset:
+        raise SystemExit("Provide --etl or --dataset")
+    run(args.etl, args.out, args.dataset)
 
 
 if __name__ == "__main__":
