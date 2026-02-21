@@ -56,6 +56,7 @@ use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::canary::{CanaryConfig, CanaryState};
 use evidenceos_core::capsule::{
     ClaimCapsule, ClaimState as CoreClaimState, ManifestEntry, TopicOracleReceiptLike,
+    TrialMetadata,
 };
 use evidenceos_core::crypto_transcripts::{revocations_snapshot_digest, sth_signature_digest};
 use evidenceos_core::dlc::{DeterministicLogicalClock, DlcConfig};
@@ -3676,6 +3677,11 @@ impl EvidenceOsV2 for EvidenceOsService {
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+                capsule.trial = Some(TrialMetadata {
+                    intervention_id: Some(assignment.intervention_id.clone()),
+                    arm_id: Some(u32::from(assignment.arm_id)),
+                    trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
+                });
             }
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified
@@ -4592,6 +4598,11 @@ impl EvidenceOsV2 for EvidenceOsService {
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+                capsule.trial = Some(TrialMetadata {
+                    intervention_id: Some(assignment.intervention_id.clone()),
+                    arm_id: Some(u32::from(assignment.arm_id)),
+                    trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
+                });
             }
             capsule.state = if claim.state == ClaimState::Certified {
                 CoreClaimState::Certified

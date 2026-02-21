@@ -1,3 +1,4 @@
+use evidenceos_core::capsule::ClaimCapsule;
 use evidenceos_core::crypto_transcripts::verify_sth_signature as verify_sth_signature_core;
 use evidenceos_core::etl::{
     verify_consistency_proof as verify_consistency_proof_core,
@@ -8,6 +9,7 @@ use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 use evidenceos_verifier::{verify_consistency_proof, verify_inclusion_proof, verify_sth_signature};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -312,4 +314,70 @@ async fn property_random_rotation_and_append_stays_verifiable() {
         }
         server.stop().await;
     }
+}
+
+#[tokio::test]
+async fn trial_metadata_keeps_etl_verification_and_old_format_parsing() {
+    let temp = TempDir::new().expect("temp");
+    let mut server = TestServer::start(temp.path().to_str().expect("path")).await;
+
+    let response = execute_once(&mut server.client, "trial-capsule").await;
+
+    let ip = response.inclusion_proof.clone().expect("inclusion");
+    let leaf: [u8; 32] = ip.leaf_hash.try_into().expect("leaf");
+    let root_hash: [u8; 32] = response.root_hash.clone().try_into().expect("root");
+    let path: Vec<[u8; 32]> = ip
+        .audit_path
+        .clone()
+        .into_iter()
+        .map(|x| x.try_into().expect("path hash"))
+        .collect();
+    assert!(verify_inclusion_proof(
+        &path,
+        &leaf,
+        ip.leaf_index as usize,
+        ip.tree_size as usize,
+        &root_hash
+    ));
+    assert!(verify_inclusion_proof_core(
+        &path,
+        &leaf,
+        ip.leaf_index as usize,
+        ip.tree_size as usize,
+        &root_hash
+    ));
+
+    let capsule: Value =
+        serde_json::from_slice(&response.capsule_bytes).expect("capsule json value");
+    let trial = capsule["trial"]
+        .as_object()
+        .expect("trial metadata present");
+    assert!(
+        trial["arm_id"].as_u64().is_some(),
+        "trial arm id is present"
+    );
+    assert!(
+        trial["intervention_id"].as_str().is_some(),
+        "trial intervention id is present"
+    );
+    assert!(
+        trial["trial_nonce_hex"].as_str().is_some(),
+        "trial nonce is present"
+    );
+
+    let mut old_format = capsule.clone();
+    old_format
+        .as_object_mut()
+        .expect("capsule object")
+        .remove("trial");
+    let old_format_bytes = serde_json::to_vec(&old_format).expect("old format bytes");
+    let parsed_old: ClaimCapsule =
+        serde_json::from_slice(&old_format_bytes).expect("old-format parse");
+    assert_eq!(parsed_old.trial, None);
+
+    let parsed_current: ClaimCapsule =
+        serde_json::from_slice(&response.capsule_bytes).expect("current parse");
+    assert!(parsed_current.trial.is_some());
+
+    server.stop().await;
 }
