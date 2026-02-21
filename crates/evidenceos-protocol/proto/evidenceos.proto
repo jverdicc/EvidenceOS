@@ -46,6 +46,8 @@ service EvidenceOS {
   rpc RevokeClaim(RevokeClaimRequest) returns (RevokeClaimResponse);
   rpc GrantCredit(GrantCreditRequest) returns (GrantCreditResponse);
   rpc SetCreditLimit(SetCreditLimitRequest) returns (SetCreditLimitResponse);
+  rpc SetHoldoutPoolBudgets(SetHoldoutPoolBudgetsRequest) returns (SetHoldoutPoolBudgetsResponse);
+  rpc GetHoldoutPoolBudgets(GetHoldoutPoolBudgetsRequest) returns (GetHoldoutPoolBudgetsResponse);
   rpc WatchRevocations(WatchRevocationsRequest) returns (stream WatchRevocationsResponse);
 }
 
@@ -338,6 +340,33 @@ message SetCreditLimitRequest {
 
 message SetCreditLimitResponse {
   uint64 credit_limit = 1;
+}
+
+message HoldoutPoolBudgets {
+  string holdout_id = 1;
+  string scope = 2;
+  optional double k_bits_budget = 3;
+  optional double access_credit_budget = 4;
+}
+
+message SetHoldoutPoolBudgetsRequest {
+  string holdout_id = 1;
+  string scope = 2;
+  optional double new_k_bits_budget = 3;
+  optional double new_access_credit_budget = 4;
+}
+
+message SetHoldoutPoolBudgetsResponse {
+  HoldoutPoolBudgets budgets = 1;
+}
+
+message GetHoldoutPoolBudgetsRequest {
+  string holdout_id = 1;
+  string scope = 2;
+}
+
+message GetHoldoutPoolBudgetsResponse {
+  HoldoutPoolBudgets budgets = 1;
 }
 
 message WatchRevocationsRequest {}

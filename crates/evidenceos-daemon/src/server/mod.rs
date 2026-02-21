@@ -137,6 +137,29 @@ struct HoldoutDescriptor {
     len: usize,
     labels_hash: [u8; 32],
     encryption_key_id: Option<String>,
+    holdout_k_bits_budget: Option<f64>,
+    holdout_access_credit_budget: Option<f64>,
+    holdout_pool_scope: Option<HoldoutPoolScope>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+enum HoldoutPoolScope {
+    #[default]
+    Global,
+    PerPrincipal,
+    Both,
+}
+
+impl HoldoutPoolScope {
+    fn parse(scope: &str) -> Result<Self, Status> {
+        match scope {
+            "global" => Ok(Self::Global),
+            "per_principal" => Ok(Self::PerPrincipal),
+            "both" => Ok(Self::Both),
+            _ => Err(Status::invalid_argument("invalid holdout_pool_scope")),
+        }
+    }
 }
 
 trait HoldoutProvider: Send + Sync {
@@ -145,13 +168,33 @@ trait HoldoutProvider: Send + Sync {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct HoldoutManifest {
+#[serde(default)]
+struct HoldoutManifestV1 {
     holdout_handle_hex: String,
     len: usize,
     labels_sha256_hex: String,
     created_at_unix: u64,
     schema_version: u32,
     encryption_key_id: Option<String>,
+    holdout_k_bits_budget: Option<f64>,
+    holdout_access_credit_budget: Option<f64>,
+    holdout_pool_scope: Option<String>,
+}
+
+impl Default for HoldoutManifestV1 {
+    fn default() -> Self {
+        Self {
+            holdout_handle_hex: String::new(),
+            len: 0,
+            labels_sha256_hex: String::new(),
+            created_at_unix: 0,
+            schema_version: HOLDOUT_MANIFEST_SCHEMA_VERSION,
+            encryption_key_id: None,
+            holdout_k_bits_budget: None,
+            holdout_access_credit_budget: None,
+            holdout_pool_scope: None,
+        }
+    }
 }
 
 struct RegistryHoldoutProvider {
@@ -187,7 +230,7 @@ impl HoldoutProvider for RegistryHoldoutProvider {
         }
         let bytes = std::fs::read(&manifest_path)
             .map_err(|_| Status::internal("holdout manifest read failed"))?;
-        let manifest: HoldoutManifest = serde_json::from_slice(&bytes)
+        let manifest: HoldoutManifestV1 = serde_json::from_slice(&bytes)
             .map_err(|_| Status::invalid_argument("invalid holdout manifest"))?;
         if manifest.schema_version != HOLDOUT_MANIFEST_SCHEMA_VERSION {
             return Err(Status::failed_precondition(
@@ -207,12 +250,34 @@ impl HoldoutProvider for RegistryHoldoutProvider {
         }
         let handle = decode_hex_hash32(&manifest.holdout_handle_hex, "holdout_handle_hex")?;
         let labels_hash = decode_hex_hash32(&manifest.labels_sha256_hex, "labels_sha256_hex")?;
+        if let Some(v) = manifest.holdout_k_bits_budget {
+            if !v.is_finite() || v < 0.0 {
+                return Err(Status::invalid_argument(
+                    "holdout_k_bits_budget must be finite and >= 0",
+                ));
+            }
+        }
+        if let Some(v) = manifest.holdout_access_credit_budget {
+            if !v.is_finite() || v < 0.0 {
+                return Err(Status::invalid_argument(
+                    "holdout_access_credit_budget must be finite and >= 0",
+                ));
+            }
+        }
+        let holdout_pool_scope = manifest
+            .holdout_pool_scope
+            .as_deref()
+            .map(HoldoutPoolScope::parse)
+            .transpose()?;
         Ok(HoldoutDescriptor {
             holdout_ref: holdout_ref.to_string(),
             handle,
             len: manifest.len,
             labels_hash,
             encryption_key_id: manifest.encryption_key_id,
+            holdout_k_bits_budget: manifest.holdout_k_bits_budget,
+            holdout_access_credit_budget: manifest.holdout_access_credit_budget,
+            holdout_pool_scope,
         })
     }
 
@@ -294,6 +359,9 @@ impl HoldoutProvider for SyntheticHoldoutProvider {
             len,
             labels_hash: sha256_bytes(&labels),
             encryption_key_id: None,
+            holdout_k_bits_budget: None,
+            holdout_access_credit_budget: None,
+            holdout_pool_scope: None,
         })
     }
 
@@ -473,6 +541,8 @@ struct Claim {
     trial_assignment: Option<TrialAssignment>,
     #[serde(default)]
     trial_commitment_hash: [u8; 32],
+    #[serde(default)]
+    holdout_pool_scope: HoldoutPoolScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -563,9 +633,15 @@ fn bool_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+struct HoldoutPoolKey {
+    holdout_id: [u8; 32],
+    principal_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HoldoutBudgetPool {
-    holdout_handle_id: [u8; 32],
+    holdout_pool_key: HoldoutPoolKey,
     k_bits_budget: f64,
     access_credit_budget: f64,
     k_bits_spent: f64,
@@ -615,7 +691,7 @@ impl LaneConfig {
 
 impl HoldoutBudgetPool {
     fn new(
-        holdout_handle_id: [u8; 32],
+        holdout_pool_key: HoldoutPoolKey,
         k_bits_budget: f64,
         access_credit_budget: f64,
     ) -> Result<Self, Status> {
@@ -627,7 +703,7 @@ impl HoldoutBudgetPool {
             return Err(Status::invalid_argument("invalid holdout pool budget"));
         }
         Ok(Self {
-            holdout_handle_id,
+            holdout_pool_key,
             k_bits_budget,
             access_credit_budget,
             k_bits_spent: 0.0,
@@ -734,7 +810,7 @@ struct PersistedState {
     claims: Vec<Claim>,
     revocations: Vec<([u8; 32], u64, String)>,
     topic_pools: Vec<([u8; 32], TopicBudgetPool)>,
-    holdout_pools: Vec<([u8; 32], HoldoutBudgetPool)>,
+    holdout_pools: Vec<(HoldoutPoolKey, HoldoutBudgetPool)>,
     canary_states: Vec<(String, CanaryState)>,
 }
 
@@ -786,7 +862,7 @@ enum IdempotencyEntry {
 struct KernelState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
     topic_pools: Mutex<HashMap<[u8; 32], TopicBudgetPool>>,
-    holdout_pools: Mutex<HashMap<[u8; 32], HoldoutBudgetPool>>,
+    holdout_pools: Mutex<HashMap<HoldoutPoolKey, HoldoutBudgetPool>>,
     canary_states: Mutex<HashMap<String, CanaryState>>,
     etl: Mutex<Etl>,
     data_path: PathBuf,
@@ -847,6 +923,9 @@ pub struct EvidenceOsService {
     admission_provider: Arc<dyn AdmissionProvider>,
     access_credit_pricing: AccessCreditPricing,
     operator_principals: Vec<String>,
+    default_holdout_k_bits_budget: f64,
+    default_holdout_access_credit_budget: f64,
+    holdout_pool_scope: HoldoutPoolScope,
 }
 
 #[derive(Debug, Clone)]
@@ -1151,6 +1230,30 @@ impl EvidenceOsService {
             })
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec!["anonymous".to_string()]);
+        let default_holdout_k_bits_budget =
+            std::env::var("EVIDENCEOS_DEFAULT_HOLDOUT_K_BITS_BUDGET")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1024.0);
+        Self::validate_budget_value(
+            default_holdout_k_bits_budget,
+            "default_holdout_k_bits_budget",
+        )?;
+        let default_holdout_access_credit_budget =
+            std::env::var("EVIDENCEOS_DEFAULT_HOLDOUT_ACCESS_CREDIT_BUDGET")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1024.0);
+        Self::validate_budget_value(
+            default_holdout_access_credit_budget,
+            "default_holdout_access_credit_budget",
+        )?;
+        let holdout_pool_scope = std::env::var("EVIDENCEOS_HOLDOUT_POOL_SCOPE")
+            .ok()
+            .as_deref()
+            .map(HoldoutPoolScope::parse)
+            .transpose()?
+            .unwrap_or(HoldoutPoolScope::Global);
 
         Ok(Self {
             state,
@@ -1174,6 +1277,9 @@ impl EvidenceOsService {
             admission_provider,
             access_credit_pricing: AccessCreditPricing::from_env(),
             operator_principals,
+            default_holdout_k_bits_budget,
+            default_holdout_access_credit_budget,
+            holdout_pool_scope,
         })
     }
 
@@ -1840,6 +1946,51 @@ impl EvidenceOsService {
         Ok(())
     }
 
+    fn holdout_scope_for(&self, descriptor: &HoldoutDescriptor) -> HoldoutPoolScope {
+        descriptor
+            .holdout_pool_scope
+            .unwrap_or(self.holdout_pool_scope)
+    }
+
+    fn holdout_budget_for(&self, descriptor: &HoldoutDescriptor) -> (f64, f64) {
+        (
+            descriptor
+                .holdout_k_bits_budget
+                .unwrap_or(self.default_holdout_k_bits_budget),
+            descriptor
+                .holdout_access_credit_budget
+                .unwrap_or(self.default_holdout_access_credit_budget),
+        )
+    }
+
+    fn holdout_pool_keys(
+        &self,
+        holdout_id: [u8; 32],
+        principal_id: &str,
+        scope: HoldoutPoolScope,
+    ) -> Vec<HoldoutPoolKey> {
+        match scope {
+            HoldoutPoolScope::Global => vec![HoldoutPoolKey {
+                holdout_id,
+                principal_id: None,
+            }],
+            HoldoutPoolScope::PerPrincipal => vec![HoldoutPoolKey {
+                holdout_id,
+                principal_id: Some(principal_id.to_string()),
+            }],
+            HoldoutPoolScope::Both => vec![
+                HoldoutPoolKey {
+                    holdout_id,
+                    principal_id: None,
+                },
+                HoldoutPoolKey {
+                    holdout_id,
+                    principal_id: Some(principal_id.to_string()),
+                },
+            ],
+        }
+    }
+
     fn require_operator(&self, principal_id: &str) -> Result<(), Status> {
         if self.operator_principals.iter().any(|p| p == principal_id) {
             return Ok(());
@@ -1935,13 +2086,13 @@ fn persist_all(state: &KernelState) -> Result<(), Status> {
             .topic_pools
             .lock()
             .iter()
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         holdout_pools: state
             .holdout_pools
             .lock()
             .iter()
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
         canary_states: state
             .canary_states
@@ -3339,6 +3490,54 @@ mod tests {
         .expect("write manifest");
     }
 
+    fn write_holdout_registry_with_policy(
+        root: &Path,
+        holdout_ref: &str,
+        handle: [u8; 32],
+        labels: &[u8],
+        holdout_k_bits_budget: Option<f64>,
+        holdout_access_credit_budget: Option<f64>,
+        holdout_pool_scope: Option<&str>,
+    ) {
+        let dir = root.join("holdouts").join(holdout_ref);
+        std::fs::create_dir_all(&dir).expect("mkdir holdout dir");
+        #[cfg(unix)]
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let labels_path = dir.join("labels.bin");
+        std::fs::write(&labels_path, labels).expect("write labels");
+        #[cfg(unix)]
+        std::fs::set_permissions(&labels_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod file");
+        let manifest = serde_json::json!({
+            "holdout_handle_hex": hex::encode(handle),
+            "len": labels.len(),
+            "labels_sha256_hex": hex::encode(sha256_bytes(labels)),
+            "created_at_unix": 1,
+            "schema_version": HOLDOUT_MANIFEST_SCHEMA_VERSION,
+            "encryption_key_id": serde_json::Value::Null,
+            "holdout_k_bits_budget": holdout_k_bits_budget,
+            "holdout_access_credit_budget": holdout_access_credit_budget,
+            "holdout_pool_scope": holdout_pool_scope,
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).expect("manifest encode"),
+        )
+        .expect("write manifest");
+    }
+
+    fn request_with_principal(
+        req: pb::CreateClaimV2Request,
+        principal: &str,
+    ) -> Request<pb::CreateClaimV2Request> {
+        let mut request = Request::new(req);
+        request.metadata_mut().insert(
+            "x-principal-id",
+            principal.parse().expect("principal metadata"),
+        );
+        request
+    }
+
     fn claim_request(holdout_ref: &str) -> pb::CreateClaimV2Request {
         pb::CreateClaimV2Request {
             claim_name: "claim-a".to_string(),
@@ -3438,6 +3637,125 @@ mod tests {
                 .expect("trial assignment")
         };
         assert_eq!(first_assignment, second_assignment);
+    }
+
+    #[tokio::test]
+    async fn holdout_pool_per_principal_isolates_budgets() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+        let holdout_ref = "holdout-per-principal";
+        write_holdout_registry_with_policy(
+            dir.path(),
+            holdout_ref,
+            [8u8; 32],
+            &[0, 1, 1, 0],
+            Some(100.0),
+            Some(55.0),
+            Some("per_principal"),
+        );
+
+        let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(claim_request(holdout_ref), "principal-a"),
+        )
+        .await
+        .expect("create a");
+        let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(claim_request(holdout_ref), "principal-b"),
+        )
+        .await
+        .expect("create b");
+
+        let pools = svc.state.holdout_pools.lock();
+        assert_eq!(pools.len(), 2);
+        for (key, pool) in pools.iter() {
+            assert_eq!(key.holdout_id, [8u8; 32]);
+            assert!(key.principal_id.is_some());
+            assert_eq!(pool.k_bits_budget, 100.0);
+            assert_eq!(pool.access_credit_budget, 55.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn holdout_pool_global_uses_policy_budget_not_first_claim() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+        let holdout_ref = "holdout-global";
+        write_holdout_registry_with_policy(
+            dir.path(),
+            holdout_ref,
+            [9u8; 32],
+            &[0, 1, 1, 0],
+            Some(77.0),
+            Some(33.0),
+            Some("global"),
+        );
+
+        let mut req_a = claim_request(holdout_ref);
+        req_a.access_credit = 1;
+        let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_a, "principal-a"),
+        )
+        .await
+        .expect("create a");
+        let mut req_b = claim_request(holdout_ref);
+        req_b.access_credit = 999;
+        let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_b, "principal-b"),
+        )
+        .await
+        .expect("create b");
+
+        let pools = svc.state.holdout_pools.lock();
+        let pool = pools
+            .get(&HoldoutPoolKey {
+                holdout_id: [9u8; 32],
+                principal_id: None,
+            })
+            .expect("global pool");
+        assert_eq!(pool.k_bits_budget, 77.0);
+        assert_eq!(pool.access_credit_budget, 33.0);
+    }
+
+    #[test]
+    fn holdout_pool_both_scope_freezes_if_either_pool_exhausted() {
+        let mut global_pool = HoldoutBudgetPool::new(
+            HoldoutPoolKey {
+                holdout_id: [1u8; 32],
+                principal_id: None,
+            },
+            10.0,
+            10.0,
+        )
+        .expect("global pool");
+        let mut principal_pool = HoldoutBudgetPool::new(
+            HoldoutPoolKey {
+                holdout_id: [1u8; 32],
+                principal_id: Some("principal-a".to_string()),
+            },
+            1.0,
+            1.0,
+        )
+        .expect("principal pool");
+
+        assert!(global_pool.charge(2.0, 2.0).is_ok());
+        assert!(principal_pool.charge(2.0, 2.0).is_err());
+        assert!(principal_pool.frozen);
     }
 
     #[test]
@@ -3672,6 +3990,7 @@ mod tests {
             created_at_unix_ms: 1,
             trial_assignment: None,
             trial_commitment_hash: [0u8; 32],
+            holdout_pool_scope: HoldoutPoolScope::Global,
         };
         let err = vault_context(
             &claim,
@@ -3733,6 +4052,7 @@ mod tests {
             created_at_unix_ms: 1,
             trial_assignment: None,
             trial_commitment_hash: [0u8; 32],
+            holdout_pool_scope: HoldoutPoolScope::Global,
         }
     }
 
