@@ -134,7 +134,7 @@ async fn create_and_seal(
 async fn valid_cbrn_sc_output_passes_and_returns_capsule() {
     let temp = TempDir::new().expect("temp");
     let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
-    let payload = b"{\"schema_version\":\"1\",\"claim_id\":\"c1\",\"event_time_unix\":1,\"substance\":\"chlorine\",\"unit\":\"ppm\",\"value\":1,\"confidence_bps\":9000,\"reason_code\":\"ALERT\",\"reason_codes\":[\"ALERT\"],\"references\":[],\"location_id\":\"l\",\"sensor_id\":\"s\"}";
+    let payload = b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}";
     let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
     let exec = client
         .execute_claim_v2(pb::ExecuteClaimV2Request {
@@ -158,9 +158,9 @@ async fn structured_invalid_reason_code_unknown_field_and_float_are_rejected() {
     let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
 
     for payload in [
-        b"{\"schema_version\":\"1\",\"claim_id\":\"c1\",\"event_time_unix\":1,\"substance\":\"chlorine\",\"unit\":\"ppm\",\"value\":1,\"confidence_bps\":9000,\"reason_code\":\"NOPE\",\"reason_codes\":[\"ALERT\"],\"references\":[],\"location_id\":\"l\",\"sensor_id\":\"s\"}".as_slice(),
-        b"{\"schema_version\":\"1\",\"claim_id\":\"c1\",\"event_time_unix\":1,\"substance\":\"chlorine\",\"unit\":\"ppm\",\"value\":1,\"confidence_bps\":9000,\"reason_code\":\"ALERT\",\"reason_codes\":[\"ALERT\"],\"references\":[],\"location_id\":\"l\",\"sensor_id\":\"s\",\"unexpected\":1}".as_slice(),
-        b"{\"schema_version\":\"1\",\"claim_id\":\"c1\",\"event_time_unix\":1,\"substance\":\"chlorine\",\"unit\":\"ppm\",\"value\":1.5,\"confidence_bps\":9000,\"reason_code\":\"ALERT\",\"reason_codes\":[\"ALERT\"],\"references\":[],\"location_id\":\"l\",\"sensor_id\":\"s\"}".as_slice(),
+        b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"NOPE\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}".as_slice(),
+        b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[],\"unexpected\":1}".as_slice(),
+        b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":1.5,\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}".as_slice(),
     ] {
         let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
         let err = client
@@ -177,7 +177,7 @@ async fn structured_output_too_large_rejected() {
     let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
     let refs = "x".repeat(structured_claims::max_bytes_upper_bound() as usize + 32);
     let payload = format!(
-        "{{\"schema_version\":\"1\",\"claim_id\":\"c1\",\"event_time_unix\":1,\"substance\":\"chlorine\",\"unit\":\"ppm\",\"value\":1,\"confidence_bps\":9000,\"reason_code\":\"ALERT\",\"reason_codes\":[\"ALERT\"],\"references\":[\"{}\"],\"location_id\":\"l\",\"sensor_id\":\"s\"}}",
+        "{{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{{\"kind\":\"CONCENTRATION\",\"value\":{{\"value\":\"1\",\"scale\":0}},\"unit\":\"ppm\"}}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[\"{}\"]}}",
         refs
     );
     let claim_id = create_and_seal(
