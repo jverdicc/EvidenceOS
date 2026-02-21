@@ -7,15 +7,15 @@ flowchart LR
     AM[Admissible Model<br/>Wasm/HIR] --> ASPEC
     SDS[Secure Data Stream<br/>Merkle Proofs] --> SG
 
-    subgraph SV[2. The Sealed Vault (Trusted Execution Environment)]
-      subgraph DE[Deterministic Execution Engine (Sandbox)]
+    subgraph SV["2. The Sealed Vault (Trusted Execution Environment)"]
+      subgraph DE["Deterministic Execution Engine (Sandbox)"]
         ASPEC[ASPEC Linter<br/>Code Scanning]
         PLN[Path-Length Normalization (PLN)<br/>Cycle Padding]
         DLC[Deterministic Logical Clock (DLC)<br/>Logical Time]
         ASPEC --> PLN --> DLC
       end
 
-      subgraph OS[Oracle System]
+      subgraph OS["Oracle System"]
         IJ[Internal Judge Model<br/>LLM-as-a-Judge]
         AO[Accuracy Oracle<br/>Compare Prediction vs. Private Label]
         SO[Safety/Compliance Oracle<br/>Constraint Check]
@@ -45,7 +45,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph M[1. The Modeler (You)]
+    subgraph M["1. The Modeler (You)"]
       H[Hypothesis & Code]
       PD[Public Data<br/>Training]
       AC[Admissibility Check<br/>ASPEC Linter]
@@ -55,14 +55,14 @@ flowchart LR
 
     AC --> DV
 
-    subgraph V[2. The Sealed Vault (Trusted Enclave)]
+    subgraph V["2. The Sealed Vault (Trusted Enclave)"]
       DV[Deterministic Execution Sandbox]
       PT[Private Data & Truth<br/>Ticks, Labels]
       SG2[Secure Gateway<br/>Merkle Proofs]
       DLC2[Deterministic Logical Clock (DLC)]
       IB[Information Budget<br/>Joint Entropy Tax]
 
-      subgraph LP[Pass/Private Lanes]
+      subgraph LP["Pass/Private Lanes"]
         MODEL[Model<br/>Hypothesis]
         ORACLE[Oracle<br/>Judge]
         SETTLE[Settlement & Ledger]
@@ -81,7 +81,7 @@ flowchart LR
     SETTLE --> OF[Oracle Feedback<br/>Hysteresis Filter / Quantization]
     OF --> CAPSULE[Claim Capsule<br/>Certified Merkle Proof + Score + Metadata]
 
-    subgraph B[3. ETL / Evidence Transparency Log (append-only Merkle log)]
+    subgraph B["3. ETL / Evidence Transparency Log (append-only Merkle log)"]
       PRE[Pre-Commitment<br/>Hashes only: Model, Data]
       CHAIN[Certified Claim<br/>32-byte hash]
       PRE --> CHAIN
