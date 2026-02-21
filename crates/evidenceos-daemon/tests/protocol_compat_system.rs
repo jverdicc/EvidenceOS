@@ -15,6 +15,7 @@ fn hash(seed: u8) -> Vec<u8> {
 }
 
 async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "true");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -93,6 +94,14 @@ async fn daemon_protocol_v1_and_v2_smoke() {
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
 
     let mut v2 = v2_client(addr).await;
+    let info = v2
+        .get_server_info(pb::GetServerInfoRequest {})
+        .await
+        .expect("v2 server info should succeed")
+        .into_inner();
+    assert_eq!(info.protocol_semver, evidenceos_protocol::PROTOCOL_SEMVER);
+    assert_eq!(info.proto_hash, evidenceos_protocol::PROTO_SHA256);
+
     let v2_claim = v2
         .create_claim_v2(v2_create(7))
         .await
@@ -101,12 +110,51 @@ async fn daemon_protocol_v1_and_v2_smoke() {
     assert_eq!(v2_claim.state, pb::ClaimState::Uncommitted as i32);
 
     let mut v1 = v1_client(addr).await;
+    let info_v1 = v1
+        .get_server_info(v1::GetServerInfoRequest {})
+        .await
+        .expect("v1 server info should succeed")
+        .into_inner();
+    assert_eq!(
+        info_v1.protocol_semver,
+        evidenceos_protocol::PROTOCOL_SEMVER
+    );
+
     let v1_claim = v1
         .create_claim_v2(v1_create(9))
         .await
         .expect("v1 create should succeed")
         .into_inner();
     assert_eq!(v1_claim.state, v1::ClaimState::Uncommitted as i32);
+
+    let missing_claim = vec![0xAB; 32];
+    let freeze_alias = v2
+        .freeze(pb::FreezeRequest {
+            claim_id: missing_claim.clone(),
+        })
+        .await
+        .expect_err("freeze alias should reject unknown claim");
+    let freeze_main = v2
+        .freeze_gates(pb::FreezeGatesRequest {
+            claim_id: missing_claim.clone(),
+        })
+        .await
+        .expect_err("freeze gates should reject unknown claim");
+    assert_eq!(freeze_alias.code(), freeze_main.code());
+
+    let seal_alias = v2
+        .seal(pb::SealRequest {
+            claim_id: missing_claim.clone(),
+        })
+        .await
+        .expect_err("seal alias should reject unknown claim");
+    let seal_main = v2
+        .seal_claim(pb::SealClaimRequest {
+            claim_id: missing_claim,
+        })
+        .await
+        .expect_err("seal claim should reject unknown claim");
+    assert_eq!(seal_alias.code(), seal_main.code());
 
     handle.abort();
 }
@@ -126,26 +174,22 @@ async fn proto_roundtrip_backcompat_capsule() {
         .expect("v2 create")
         .into_inner();
 
-    let v2_capsule = v2
+    let v2_fetch_err = v2
         .fetch_capsule(pb::FetchCapsuleRequest {
             claim_id: claim.claim_id.clone(),
         })
         .await
-        .expect("v2 fetch")
-        .into_inner();
+        .expect_err("v2 fetch should fail before execute");
 
     let mut v1 = v1_client(addr).await;
-    let v1_capsule = v1
+    let v1_fetch_err = v1
         .fetch_capsule(v1::FetchCapsuleRequest {
             claim_id: claim.claim_id,
         })
         .await
-        .expect("v1 fetch")
-        .into_inner();
+        .expect_err("v1 fetch should fail before execute");
 
-    assert_eq!(v1_capsule.capsule_hash, v2_capsule.capsule_hash);
-    assert_eq!(v1_capsule.etl_index, v2_capsule.etl_index);
-    assert_eq!(v1_capsule.capsule_bytes, v2_capsule.capsule_bytes);
+    assert_eq!(v1_fetch_err.code(), v2_fetch_err.code());
 
     handle.abort();
 }

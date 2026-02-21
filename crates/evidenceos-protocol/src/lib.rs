@@ -38,6 +38,9 @@ pub type HoldoutHandle = [u8; 32];
 pub type TopicId = [u8; 32];
 pub type CapsuleHash = [u8; 32];
 
+pub const PROTOCOL_SEMVER: &str = "2.1.0";
+pub const PROTO_SHA256: &str = "6cde13b72b42e46d149364e18ad2f96b3874526f4e0c6a98d744dc11be183851";
+
 pub const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 pub const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 pub const DOMAIN_STH_SIGNATURE_V1: &[u8] = b"evidenceos:sth:v1";

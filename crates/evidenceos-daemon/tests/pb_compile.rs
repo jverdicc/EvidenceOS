@@ -32,6 +32,13 @@ async fn protocol_crate_exports_client_and_server_stubs() {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
+        async fn get_server_info(
+            &self,
+            _request: tonic::Request<pb::GetServerInfoRequest>,
+        ) -> Result<tonic::Response<pb::GetServerInfoResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
         async fn create_claim(
             &self,
             _request: tonic::Request<pb::CreateClaimRequest>,
@@ -53,10 +60,24 @@ async fn protocol_crate_exports_client_and_server_stubs() {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
+        async fn freeze(
+            &self,
+            _request: tonic::Request<pb::FreezeRequest>,
+        ) -> Result<tonic::Response<pb::FreezeResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
         async fn freeze_gates(
             &self,
             _request: tonic::Request<pb::FreezeGatesRequest>,
         ) -> Result<tonic::Response<pb::FreezeGatesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
+        async fn seal(
+            &self,
+            _request: tonic::Request<pb::SealRequest>,
+        ) -> Result<tonic::Response<pb::SealResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 

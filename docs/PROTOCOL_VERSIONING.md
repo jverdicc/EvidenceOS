@@ -47,3 +47,23 @@ cargo test -p evidenceos-daemon daemon_protocol_v1_and_v2_smoke
 
 4. Confirm compatibility tests pass before merge.
 5. If proto files changed intentionally, update protocol snapshot checks.
+
+
+## Server self-identification and drift checks
+
+EvidenceOS exposes `GetServerInfo` on both `evidenceos.v2` and compatibility `evidenceos.v1`.
+
+`GetServerInfoResponse` includes:
+
+- `protocol_semver`: semantic version for the canonical protocol contract (currently `2.1.0`).
+- `proto_hash`: SHA-256 of canonical `crates/evidenceos-protocol/proto/evidenceos.proto`.
+- `build_git_commit`: daemon build commit (or `unknown` when omitted at build-time).
+- `build_time_utc`: daemon build timestamp (or `unknown` when omitted at build-time).
+- `daemon_version`: binary crate version.
+- `feature_flags`: runtime hardening feature gates (TLS/mTLS/registry/insecure toggles).
+
+Client policy (DiscOS):
+
+1. Hard-fail on protocol major mismatch.
+2. Hard-fail on `proto_hash` mismatch unless explicitly overridden (for example, `--allow-protocol-drift`).
+3. Log the returned metadata for auditability.

@@ -81,6 +81,14 @@ const BURN_WASM_MODULE: &[u8] = &[
     0x01, 0x00, 0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, 0x0a, 0x08, 0x01, 0x06, 0x00,
     0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
 ];
+const BUILD_GIT_COMMIT: &str = match option_env!("EVIDENCEOS_BUILD_GIT_COMMIT") {
+    Some(v) => v,
+    None => "unknown",
+};
+const BUILD_TIME_UTC: &str = match option_env!("EVIDENCEOS_BUILD_TIME_UTC") {
+    Some(v) => v,
+    None => "unknown",
+};
 
 #[cfg(feature = "crash-test-failpoints")]
 fn maybe_abort_failpoint(name: &str) {
@@ -818,6 +826,31 @@ impl EvidenceOsService {
             require_disjointness_attestation,
             tee_attestor,
         })
+    }
+
+    fn synthetic_holdout_enabled(&self) -> bool {
+        std::env::var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn protocol_feature_flags(&self) -> pb::FeatureFlags {
+        let tls_enabled = std::env::var("EVIDENCEOS_TLS_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let mtls_enabled = std::env::var("EVIDENCEOS_MTLS_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let oracle_registry_enabled = !self.policy_oracles.is_empty();
+        pb::FeatureFlags {
+            tls_enabled,
+            mtls_enabled,
+            oracle_registry_enabled,
+            insecure_v1_enabled: self.insecure_v1_enabled,
+            synthetic_holdout_enabled: self.synthetic_holdout_enabled(),
+            offline_settlement_ingest_enabled: self.offline_settlement_ingest,
+            disjointness_attestation_required: self.require_disjointness_attestation,
+        }
     }
 
     pub fn reload_nullspec_registry(&self) -> Result<(), Status> {
@@ -2394,6 +2427,20 @@ impl EvidenceOsV2 for EvidenceOsService {
         }))
     }
 
+    async fn get_server_info(
+        &self,
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
+        Ok(Response::new(pb::GetServerInfoResponse {
+            protocol_semver: evidenceos_protocol::PROTOCOL_SEMVER.to_string(),
+            proto_hash: evidenceos_protocol::PROTO_SHA256.to_string(),
+            build_git_commit: BUILD_GIT_COMMIT.to_string(),
+            build_time_utc: BUILD_TIME_UTC.to_string(),
+            daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+            feature_flags: Some(self.protocol_feature_flags()),
+        }))
+    }
+
     async fn create_claim(
         &self,
         request: Request<pb::CreateClaimRequest>,
@@ -2615,6 +2662,23 @@ impl EvidenceOsV2 for EvidenceOsService {
         Ok(Response::new(pb::CommitArtifactsResponse { state }))
     }
 
+    async fn freeze(
+        &self,
+        request: Request<pb::FreezeRequest>,
+    ) -> Result<Response<pb::FreezeResponse>, Status> {
+        let req = request.into_inner();
+        let response = <Self as EvidenceOsV2>::freeze_gates(
+            self,
+            Request::new(pb::FreezeGatesRequest {
+                claim_id: req.claim_id,
+            }),
+        )
+        .await?;
+        Ok(Response::new(pb::FreezeResponse {
+            state: response.into_inner().state,
+        }))
+    }
+
     async fn freeze_gates(
         &self,
         request: Request<pb::FreezeGatesRequest>,
@@ -2633,6 +2697,23 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_all(&self.state)?;
         Ok(Response::new(pb::FreezeGatesResponse {
             state: state.to_proto(),
+        }))
+    }
+
+    async fn seal(
+        &self,
+        request: Request<pb::SealRequest>,
+    ) -> Result<Response<pb::SealResponse>, Status> {
+        let req = request.into_inner();
+        let response = <Self as EvidenceOsV2>::seal_claim(
+            self,
+            Request::new(pb::SealClaimRequest {
+                claim_id: req.claim_id,
+            }),
+        )
+        .await?;
+        Ok(Response::new(pb::SealResponse {
+            state: response.into_inner().state,
         }))
     }
 
@@ -4037,6 +4118,15 @@ impl EvidenceOsV1 for EvidenceOsService {
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
+    async fn get_server_info(
+        &self,
+        request: Request<v1::GetServerInfoRequest>,
+    ) -> Result<Response<v1::GetServerInfoResponse>, Status> {
+        let req_v2: v2::GetServerInfoRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::get_server_info(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
     async fn create_claim(
         &self,
         request: Request<v1::CreateClaimRequest>,
@@ -4064,12 +4154,30 @@ impl EvidenceOsV1 for EvidenceOsService {
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
+    async fn freeze(
+        &self,
+        request: Request<v1::FreezeRequest>,
+    ) -> Result<Response<v1::FreezeResponse>, Status> {
+        let req_v2: v2::FreezeRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::freeze(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
     async fn freeze_gates(
         &self,
         request: Request<v1::FreezeGatesRequest>,
     ) -> Result<Response<v1::FreezeGatesResponse>, Status> {
         let req_v2: v2::FreezeGatesRequest = transcode_message(request.into_inner())?;
         let response = <Self as EvidenceOsV2>::freeze_gates(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn seal(
+        &self,
+        request: Request<v1::SealRequest>,
+    ) -> Result<Response<v1::SealResponse>, Status> {
+        let req_v2: v2::SealRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::seal(self, Request::new(req_v2)).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
