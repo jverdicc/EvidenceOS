@@ -40,6 +40,9 @@ jobs:
       - name: Unit test implementation guard checker
         run: python -m unittest scripts.tests.test_check_impl_status_guards
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
 
