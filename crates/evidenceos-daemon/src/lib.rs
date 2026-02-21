@@ -16,9 +16,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod accounting;
 pub mod auth;
 pub mod config;
 pub mod http_preflight;
+pub mod key_management;
 pub mod pln_profile;
 pub mod policy_oracle;
 pub mod probe;

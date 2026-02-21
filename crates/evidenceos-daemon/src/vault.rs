@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
-use evidenceos_core::nullspec_contract::NullSpecContractV1;
+use evidenceos_core::nullspec_contract::DraftNullSpecContractV1;
 use evidenceos_core::oracle::{AccuracyOracleState, HoldoutLabels, NullSpec, OracleResolution};
 use evidenceos_core::structured_claims;
 use evidenceos_guest_abi::{
@@ -46,7 +46,7 @@ pub struct VaultExecutionContext {
     pub holdout_labels: Vec<u8>,
     pub oracle_num_buckets: u32,
     pub oracle_delta_sigma: f64,
-    pub null_spec: NullSpecContractV1,
+    pub null_spec: DraftNullSpecContractV1,
     pub output_schema_id: String,
 }
 
@@ -61,6 +61,7 @@ pub struct VaultExecutionResult {
     pub leakage_bits_total: f64,
     pub kout_bits_total: f64,
     pub oracle_buckets: Vec<u32>,
+    pub max_memory_pages: u64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -236,6 +237,10 @@ impl VaultEngine {
                 HostCallRecord::EmitStructuredClaim { .. } => None,
             })
             .collect();
+        let max_memory_pages = instance
+            .get_memory(&mut store, "memory")
+            .map(|m| m.size(&store))
+            .unwrap_or(0);
 
         Ok(VaultExecutionResult {
             canonical_output: output,
@@ -247,6 +252,7 @@ impl VaultEngine {
             leakage_bits_total: host.leakage_bits,
             kout_bits_total: host.kout_bits,
             oracle_buckets,
+            max_memory_pages,
         })
     }
 
@@ -521,14 +527,14 @@ fn compute_judge_trace_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use evidenceos_core::nullspec_contract::{EValueSpecV1, NullSpecContractV1};
+    use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
 
     fn test_context() -> VaultExecutionContext {
         VaultExecutionContext {
             holdout_labels: vec![0, 1, 0, 1],
             oracle_num_buckets: 2,
             oracle_delta_sigma: 0.0,
-            null_spec: NullSpecContractV1 {
+            null_spec: DraftNullSpecContractV1 {
                 id: "".to_string(),
                 domain: "test".to_string(),
                 null_accuracy: 0.5,

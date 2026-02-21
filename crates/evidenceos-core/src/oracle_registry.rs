@@ -30,7 +30,7 @@ impl OracleRegistry {
     pub fn load_from_dir(
         path: &Path,
         trusted_keys: &TrustedOracleAuthorities,
-        aspec_policy: &AspecPolicy,
+        _aspec_policy: &AspecPolicy,
         sandbox_policy: WasmOracleSandboxPolicy,
     ) -> EvidenceOSResult<Self> {
         let mut backends: BTreeMap<String, Box<dyn OracleBackend>> = BTreeMap::new();
@@ -76,7 +76,7 @@ impl OracleRegistry {
                 if hash != manifest.wasm_sha256 {
                     return Err(EvidenceOSError::OracleViolation);
                 }
-                let sandbox = WasmOracleSandbox::new(&wasm, aspec_policy, sandbox_policy.clone())?;
+                let sandbox = WasmOracleSandbox::new(&wasm, sandbox_policy.clone())?;
                 let backend = WasmOracleBackend {
                     manifest: manifest.clone(),
                     sandbox,

@@ -19,7 +19,6 @@ use crate::crypto_transcripts::etl_leaf_hash;
 use crate::error::{EvidenceOSError, EvidenceOSResult};
 use crate::ledger::ConservationLedger;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,8 +63,14 @@ impl ClaimState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LedgerSnapshot {
     pub alpha: f64,
+    #[serde(default)]
+    pub log_alpha_target: f64,
     pub alpha_prime: f64,
+    #[serde(default)]
+    pub log_alpha_prime: f64,
     pub k_bits_total: f64,
+    #[serde(default)]
+    pub barrier_threshold: f64,
     pub barrier: f64,
     pub wealth: f64,
     pub w_max: f64,
@@ -79,8 +84,11 @@ impl LedgerSnapshot {
     pub fn from_ledger(l: &ConservationLedger) -> Self {
         Self {
             alpha: l.alpha,
+            log_alpha_target: l.log_alpha_target(),
             alpha_prime: l.alpha_prime(),
+            log_alpha_prime: l.log_alpha_prime(),
             k_bits_total: l.k_bits_total,
+            barrier_threshold: l.barrier_threshold(),
             barrier: l.barrier(),
             wealth: l.wealth,
             w_max: l.w_max,
@@ -190,25 +198,7 @@ pub struct ClaimCapsule {
 }
 
 pub fn canonical_json(v: &impl Serialize) -> EvidenceOSResult<Vec<u8>> {
-    let value = serde_json::to_value(v).map_err(|_| EvidenceOSError::Internal)?;
-    let sorted = sort_json(value);
-    serde_json::to_vec(&sorted).map_err(|_| EvidenceOSError::Internal)
-}
-
-fn sort_json(v: Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut sorted = Map::new();
-            for (k, val) in entries {
-                sorted.insert(k, sort_json(val));
-            }
-            Value::Object(sorted)
-        }
-        Value::Array(arr) => Value::Array(arr.into_iter().map(sort_json).collect()),
-        other => other,
-    }
+    evidenceos_verifier::canonical_json(v).map_err(|_| EvidenceOSError::Internal)
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -374,7 +364,7 @@ impl ClaimCapsule {
         canonical_json(self)
     }
     pub fn capsule_hash_hex(&self) -> EvidenceOSResult<String> {
-        Ok(sha256_hex(&self.to_json_bytes()?))
+        evidenceos_verifier::capsule_hash_hex(self).map_err(|_| EvidenceOSError::Internal)
     }
     pub fn etl_leaf_hash(&self) -> EvidenceOSResult<[u8; 32]> {
         Ok(etl_leaf_hash(&self.to_json_bytes()?))

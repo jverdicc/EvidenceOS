@@ -17,7 +17,7 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,7 +35,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::auth::{derive_caller_identity, CallerIdentity};
 use crate::config::OracleTtlPolicy;
+use crate::key_management::{load_signing_key_from_kms, SigningKeySource};
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
@@ -57,7 +59,7 @@ use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl
 use evidenceos_core::holdout_crypto::{decrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
 use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
-use evidenceos_core::nullspec_contract::NullSpecContractV1 as RegistryNullSpecContractV1;
+use evidenceos_core::nullspec_contract::DraftNullSpecContractV1 as RegistryNullSpecContractV1;
 use evidenceos_core::nullspec_registry::{NullSpecAuthorityKeyring, NullSpecRegistry};
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
@@ -80,6 +82,7 @@ const MAX_ARTIFACTS: usize = 128;
 const MAX_REASON_CODES: usize = 32;
 const MAX_DEPENDENCY_ITEMS: usize = 256;
 const MAX_METADATA_FIELD_LEN: usize = 128;
+const IDEMPOTENCY_TTL: Duration = Duration::from_secs(300);
 const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
@@ -441,6 +444,10 @@ struct Claim {
     freeze_preimage: Option<FreezePreimage>,
     #[serde(default)]
     operation_id: String,
+    #[serde(default)]
+    owner_principal_id: String,
+    #[serde(default)]
+    created_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -732,6 +739,23 @@ type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
 const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
 const MAGNITUDE_ENVELOPE_REASON_CODE: u32 = 9205;
+const LEDGER_NUMERIC_GUARD_REASON_CODE: u32 = 9206;
+
+#[derive(Debug, Clone)]
+struct IdempotencyCachedResponse {
+    response: pb::ExecuteClaimV2Response,
+}
+
+#[derive(Debug, Clone)]
+enum IdempotencyEntry {
+    InFlight {
+        expires_at: Instant,
+    },
+    Ready {
+        expires_at: Instant,
+        cached: IdempotencyCachedResponse,
+    },
+}
 
 #[derive(Debug)]
 struct KernelState {
@@ -748,6 +772,7 @@ struct KernelState {
     revocation_subscribers: Mutex<Vec<RevocationSubscriber>>,
     operator_config: Mutex<OperatorRuntimeConfig>,
     nullspec_registry_state: Mutex<NullSpecRegistryState>,
+    execute_claim_v2_idempotency: Mutex<HashMap<(String, String), IdempotencyEntry>>,
 }
 
 #[derive(Debug)]
@@ -791,6 +816,79 @@ pub struct EvidenceOsService {
     require_disjointness_attestation: bool,
     enforce_operator_provenance: bool,
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
+    domain_safety: DomainSafetyConfig,
+}
+
+#[derive(Debug, Clone)]
+struct DomainSafetyConfig {
+    require_structured_outputs: bool,
+    require_structured_output_domains: HashSet<String>,
+    deny_free_text_outputs: bool,
+    force_heavy_lane_on_domain: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainSafetyDecision {
+    Allow,
+    ForceHeavyLane,
+    Reject,
+}
+
+impl DomainSafetyConfig {
+    fn from_env(production_mode: bool) -> Self {
+        Self {
+            require_structured_outputs: env_flag("EVIDENCEOS_REQUIRE_STRUCTURED_OUTPUTS", true),
+            require_structured_output_domains: env_domain_set(
+                "EVIDENCEOS_REQUIRE_STRUCTURED_OUTPUTS_DOMAINS",
+                "CBRN",
+            ),
+            deny_free_text_outputs: env_flag("EVIDENCEOS_DENY_FREE_TEXT_OUTPUTS", production_mode),
+            force_heavy_lane_on_domain: env_domain_set(
+                "EVIDENCEOS_FORCE_HEAVY_LANE_ON_DOMAIN",
+                "CBRN",
+            ),
+        }
+    }
+
+    fn decision_for(
+        &self,
+        domain: &str,
+        output_schema_id: &str,
+        lane: Lane,
+    ) -> DomainSafetyDecision {
+        let normalized_domain = domain.trim().to_ascii_uppercase();
+        if self.deny_free_text_outputs && output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
+            return DomainSafetyDecision::Reject;
+        }
+        if self.require_structured_outputs
+            && self
+                .require_structured_output_domains
+                .contains(&normalized_domain)
+            && output_schema_id != structured_claims::SCHEMA_ID
+        {
+            return DomainSafetyDecision::Reject;
+        }
+        if self.force_heavy_lane_on_domain.contains(&normalized_domain) && lane != Lane::Heavy {
+            return DomainSafetyDecision::ForceHeavyLane;
+        }
+        DomainSafetyDecision::Allow
+    }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(default)
+}
+
+fn env_domain_set(name: &str, default: &str) -> HashSet<String> {
+    std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .collect()
 }
 
 impl EvidenceOsService {
@@ -874,6 +972,7 @@ impl EvidenceOsService {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let enforce_operator_provenance = production_mode && require_disjointness_attestation;
+        let domain_safety = DomainSafetyConfig::from_env(production_mode);
 
         let operator_config = load_operator_runtime_config(&root, enforce_operator_provenance)?;
 
@@ -910,6 +1009,10 @@ impl EvidenceOsService {
             };
 
         let holdouts_root = root.join("holdouts");
+        let admission_provider: Arc<dyn AdmissionProvider> =
+            Arc::new(StaticAdmissionProvider::from_env());
+        let default_credit_limit = admission_provider.max_credit("anonymous");
+        let account_store = AccountStore::open(&root, default_credit_limit)?;
 
         let state = Arc::new(KernelState {
             claims: Mutex::new(
@@ -930,6 +1033,7 @@ impl EvidenceOsService {
             keyring,
             revocation_subscribers: Mutex::new(Vec::new()),
             operator_config: Mutex::new(operator_config),
+            account_store: Mutex::new(account_store),
             nullspec_registry_state: Mutex::new(NullSpecRegistryState {
                 registry_dir: nullspec_config.registry_dir,
                 authority_keys_dir: nullspec_config.authority_keys_dir,
@@ -939,6 +1043,7 @@ impl EvidenceOsService {
                 last_reload_attempt: Instant::now(),
                 reload_interval: nullspec_config.reload_interval,
             }),
+            execute_claim_v2_idempotency: Mutex::new(HashMap::new()),
         });
         recover_pending_mutation(&state)?;
         persist_all(&state)?;
@@ -999,6 +1104,18 @@ impl EvidenceOsService {
             );
         }
 
+        let operator_principals = std::env::var("EVIDENCEOS_OPERATOR_PRINCIPALS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec!["anonymous".to_string()]);
+
         Ok(Self {
             state,
             insecure_v1_enabled,
@@ -1016,7 +1133,39 @@ impl EvidenceOsService {
             require_disjointness_attestation,
             enforce_operator_provenance,
             tee_attestor,
+            domain_safety,
         })
+    }
+
+    fn domain_for_policy(
+        &self,
+        claim_name: &str,
+        holdout_ref: &str,
+        nullspec_id_hex: &str,
+    ) -> Result<String, Status> {
+        let nullspec_store = NullSpecStore::open(&self.state.data_path)
+            .map_err(|_| Status::internal("nullspec store init failed"))?;
+        let active_id = if nullspec_id_hex.is_empty() {
+            nullspec_store
+                .active_for(claim_name, holdout_ref)
+                .map_err(|_| Status::internal("nullspec mapping read failed"))?
+        } else {
+            let decoded = hex::decode(nullspec_id_hex)
+                .map_err(|_| Status::invalid_argument("invalid nullspec_id hex"))?;
+            Some(
+                decoded
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Status::invalid_argument("invalid nullspec_id length"))?,
+            )
+        };
+        if let Some(active_id) = active_id {
+            let contract = nullspec_store
+                .get(&active_id)
+                .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
+            return Ok(contract.domain);
+        }
+        Ok("UNSPECIFIED".to_string())
     }
 
     fn synthetic_holdout_enabled(&self) -> bool {
@@ -1118,13 +1267,7 @@ impl EvidenceOsService {
             .map_err(|_| Status::failed_precondition("invalid signed settlement file"))?;
         let mut applied = 0usize;
         for record in records {
-            let etl_index = {
-                let mut etl = self.state.etl.lock();
-                let (idx, _) = etl
-                    .append(&record.proposal.capsule_bytes)
-                    .map_err(|_| Status::internal("etl append failed"))?;
-                idx
-            };
+            let etl_index = record.proposal.etl_index;
             if let Ok(claim_id) = decode_hex_hash32(&record.proposal.claim_id_hex, "claim_id") {
                 if let Some(claim) = self.state.claims.lock().get_mut(&claim_id) {
                     claim.etl_index = Some(etl_index);
@@ -1428,26 +1571,94 @@ impl EvidenceOsService {
         Ok(())
     }
 
-    fn principal_id_from_metadata(metadata: &tonic::metadata::MetadataMap) -> String {
-        if let Some(v) = metadata.get("authorization").and_then(|v| v.to_str().ok()) {
-            if let Some(token) = v.strip_prefix("Bearer ") {
-                return format!("bearer:{}", hex::encode(sha256_bytes(token.as_bytes())));
-            }
-        }
-        if let Some(v) = metadata
-            .get("x-evidenceos-signature")
-            .and_then(|v| v.to_str().ok())
-        {
-            return format!("hmac:{}", hex::encode(sha256_bytes(v.as_bytes())));
-        }
-        if let Some(v) = metadata
-            .get("x-client-cert-fp")
-            .and_then(|v| v.to_str().ok())
-        {
-            return format!("mtls:{}", hex::encode(sha256_bytes(v.as_bytes())));
-        }
-        "anonymous".to_string()
+    fn caller_identity(metadata: &tonic::metadata::MetadataMap) -> CallerIdentity {
+        derive_caller_identity(metadata)
     }
+
+    #[allow(clippy::result_large_err)]
+    fn enforce_claim_access(
+        caller: &CallerIdentity,
+        claim: &Claim,
+        rpc_name: &str,
+    ) -> Result<(), Status> {
+        if caller.is_operator() {
+            tracing::warn!(
+                target: "evidenceos.authz",
+                rpc = rpc_name,
+                claim_id = %hex::encode(claim.claim_id),
+                owner_principal_id = %claim.owner_principal_id,
+                caller_principal_id = %caller.principal_id,
+                "AUTHZ_OPERATOR_OVERRIDE",
+            );
+            return Ok(());
+        }
+        if claim.owner_principal_id == caller.principal_id {
+            return Ok(());
+        }
+        Err(Status::permission_denied(
+            "AUTHZ_CLAIM_OWNER_MISMATCH: caller does not own claim",
+        ))
+    }
+
+    fn request_id_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Result<String, Status> {
+        let Some(raw) = metadata.get("x-request-id") else {
+            return Err(Status::invalid_argument("missing x-request-id"));
+        };
+        let req_id = raw
+            .to_str()
+            .map_err(|_| Status::invalid_argument("invalid x-request-id"))?
+            .trim();
+        if req_id.is_empty() || req_id.len() > 128 {
+            return Err(Status::invalid_argument("invalid x-request-id"));
+        }
+        Ok(req_id.to_string())
+    }
+
+    fn idempotency_lookup_execute_claim_v2(
+        &self,
+        principal_id: &str,
+        request_id: &str,
+    ) -> Result<Option<pb::ExecuteClaimV2Response>, Status> {
+        let now = Instant::now();
+        let mut cache = self.state.execute_claim_v2_idempotency.lock();
+        cache.retain(|_, entry| match entry {
+            IdempotencyEntry::InFlight { expires_at } => *expires_at > now,
+            IdempotencyEntry::Ready { expires_at, .. } => *expires_at > now,
+        });
+        let key = (principal_id.to_string(), request_id.to_string());
+        if let Some(entry) = cache.get(&key) {
+            return match entry {
+                IdempotencyEntry::Ready { cached, .. } => Ok(Some(cached.response.clone())),
+                IdempotencyEntry::InFlight { .. } => Err(Status::aborted(
+                    "request with x-request-id already in progress",
+                )),
+            };
+        }
+        cache.insert(
+            key,
+            IdempotencyEntry::InFlight {
+                expires_at: now + IDEMPOTENCY_TTL,
+            },
+        );
+        Ok(None)
+    }
+
+    fn idempotency_store_execute_claim_v2(
+        &self,
+        principal_id: String,
+        request_id: String,
+        response: pb::ExecuteClaimV2Response,
+    ) {
+        let mut cache = self.state.execute_claim_v2_idempotency.lock();
+        cache.insert(
+            (principal_id, request_id),
+            IdempotencyEntry::Ready {
+                expires_at: Instant::now() + IDEMPOTENCY_TTL,
+                cached: IdempotencyCachedResponse { response },
+            },
+        );
+    }
+
     fn observe_probe(
         &self,
         principal_id: String,
@@ -1564,6 +1775,43 @@ impl EvidenceOsService {
             )));
         }
         Ok(())
+    }
+
+    fn require_operator(&self, principal_id: &str) -> Result<(), Status> {
+        if self.operator_principals.iter().any(|p| p == principal_id) {
+            return Ok(());
+        }
+        Err(Status::permission_denied("operator role required"))
+    }
+
+    fn default_credit_limit_for(&self, principal_id: &str) -> u64 {
+        self.admission_provider.max_credit(principal_id)
+    }
+
+    fn charge_principal_credit(
+        &self,
+        principal_id: &str,
+        k_bits: Option<u64>,
+        fuel: Option<u64>,
+        max_memory_pages: Option<u64>,
+    ) -> Result<u64, Status> {
+        let charge = self
+            .access_credit_pricing
+            .charge(k_bits, fuel, max_memory_pages);
+        let default_limit = self.default_credit_limit_for(principal_id);
+        self.admission_provider.admit(principal_id, charge)?;
+        let mut store = self.state.account_store.lock();
+        let _ = store.ensure_account(principal_id, default_limit)?;
+        match store.burn(principal_id, charge, default_limit) {
+            Ok(remaining) => {
+                self.telemetry.record_credit_burned(principal_id, charge);
+                Ok(remaining)
+            }
+            Err(status) => {
+                self.telemetry.record_credit_denied(principal_id);
+                Err(status)
+            }
+        }
     }
 
     fn canary_key(claim_name: &str, holdout_ref: &str) -> String {
@@ -1819,12 +2067,37 @@ fn write_secret_key(key_path: &Path, secret: &[u8; 32]) -> Result<(), Status> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn ensure_secret_key_permissions(path: &Path) -> Result<(), Status> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| Status::internal("read signing key metadata failed"))?;
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(Status::failed_precondition(
+            "signing key permissions are too broad; require 0600 or stricter",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_secret_key_permissions(_path: &Path) -> Result<(), Status> {
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)]
 fn load_or_create_keyring(
     data_dir: &Path,
 ) -> Result<([u8; 32], HashMap<[u8; 32], SigningKey>), Status> {
     let keys_dir = data_dir.join(KEYRING_DIR_REL_PATH);
     std::fs::create_dir_all(&keys_dir).map_err(|_| Status::internal("mkdir keys failed"))?;
+
+    if matches!(SigningKeySource::from_env()?, SigningKeySource::Kms) {
+        let signing_key = load_signing_key_from_kms()?;
+        let key_id = key_id_from_verifying_key(&signing_key.verifying_key());
+        let mut keyring = HashMap::new();
+        keyring.insert(key_id, signing_key);
+        return Ok((key_id, keyring));
+    }
 
     let mut keyring = HashMap::new();
     for entry in
@@ -1846,6 +2119,7 @@ fn load_or_create_keyring(
             Err(_) => continue,
         };
         let key_id = parse_hash32(&bytes, "key_id")?;
+        ensure_secret_key_permissions(&path)?;
         let secret =
             std::fs::read(&path).map_err(|_| Status::internal("read signing key failed"))?;
         if secret.len() != 32 {
@@ -1863,6 +2137,7 @@ fn load_or_create_keyring(
 
     let legacy_key_path = data_dir.join(ETL_SIGNING_KEY_REL_PATH);
     if legacy_key_path.exists() {
+        ensure_secret_key_permissions(&legacy_key_path)?;
         let bytes = std::fs::read(&legacy_key_path)
             .map_err(|_| Status::internal("read signing key failed"))?;
         if bytes.len() != 32 {
@@ -1907,15 +2182,26 @@ fn load_or_create_keyring(
         return Err(Status::internal("active key id not found in keyring"));
     }
 
-    std::fs::write(
-        &active_path,
-        format!(
-            "{}
-",
-            hex::encode(active_key_id)
-        ),
-    )
-    .map_err(|_| Status::internal("write active key id failed"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&active_path)
+            .map_err(|_| Status::internal("write active key id failed"))?;
+        f.write_all(format!("{}\n", hex::encode(active_key_id)).as_bytes())
+            .and_then(|_| f.flush())
+            .map_err(|_| Status::internal("write active key id failed"))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&active_path, format!("{}\n", hex::encode(active_key_id)))
+            .map_err(|_| Status::internal("write active key id failed"))?;
+    }
 
     Ok((active_key_id, keyring))
 }
@@ -2159,6 +2445,9 @@ fn policy_oracle_input_json(
 ) -> Result<Vec<u8>, Status> {
     let payload = serde_json::json!({
         "alpha_micros": (ledger.alpha * 1_000_000.0).round() as u32,
+        "log_alpha_target": ledger.log_alpha_target(),
+        "log_alpha_prime": ledger.log_alpha_prime(),
+        "barrier_threshold": ledger.barrier_threshold(),
         "canonical_output_len": canonical_output.len() as u32,
         "canonical_output_sha256": hex::encode(sha256_bytes(canonical_output)),
         "claim_id": hex::encode(claim.claim_id),
@@ -2648,7 +2937,7 @@ fn oracle_resolution_hash(resolution: &OracleResolution) -> Result<[u8; 32], Sta
 }
 
 fn compute_nullspec_e_value(
-    contract: &evidenceos_core::nullspec::NullSpecContractV1,
+    contract: &evidenceos_core::nullspec::SignedNullSpecContractV1,
     oracle_buckets: &[u32],
 ) -> Result<(f64, String), Status> {
     match (&contract.kind, &contract.eprocess) {
@@ -2767,6 +3056,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::CreateClaimRequest>,
     ) -> Result<Response<pb::CreateClaimResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let req = request.into_inner();
         if req.epoch_size == 0 {
             return Err(Status::invalid_argument("epoch_size must be > 0"));
@@ -2843,6 +3133,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             oracle_pins: None,
             freeze_preimage: None,
             operation_id,
+            owner_principal_id: caller.principal_id.clone(),
+            created_at_unix_ms: current_time_unix_ms()?,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -2875,6 +3167,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::CommitArtifactsRequest>,
     ) -> Result<Response<pb::CommitArtifactsResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let req = request.into_inner();
         if req.artifacts.is_empty() || req.artifacts.len() > MAX_ARTIFACTS {
             return Err(Status::invalid_argument(
@@ -2890,6 +3183,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::enforce_claim_access(&caller, claim, "CommitArtifacts")?;
             if claim.metadata_locked
                 || matches!(
                     claim.state,
@@ -2985,12 +3279,16 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::FreezeRequest>,
     ) -> Result<Response<pb::FreezeResponse>, Status> {
-        let req = request.into_inner();
+        let (metadata, extensions, req) = decompose_request(request);
         let response = <Self as EvidenceOsV2>::freeze_gates(
             self,
-            Request::new(pb::FreezeGatesRequest {
-                claim_id: req.claim_id,
-            }),
+            recompose_request(
+                metadata,
+                extensions,
+                pb::FreezeGatesRequest {
+                    claim_id: req.claim_id,
+                },
+            ),
         )
         .await?;
         Ok(Response::new(pb::FreezeResponse {
@@ -3002,12 +3300,14 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::FreezeGatesRequest>,
     ) -> Result<Response<pb::FreezeGatesResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
         let state = {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::enforce_claim_access(&caller, claim, "FreezeGates")?;
             self.freeze_claim_gates(claim).inspect_err(|_err| {
                 let _ = self.record_incident(claim, "freeze_gates_failed");
             })?;
@@ -3023,12 +3323,16 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::SealRequest>,
     ) -> Result<Response<pb::SealResponse>, Status> {
-        let req = request.into_inner();
+        let (metadata, extensions, req) = decompose_request(request);
         let response = <Self as EvidenceOsV2>::seal_claim(
             self,
-            Request::new(pb::SealClaimRequest {
-                claim_id: req.claim_id,
-            }),
+            recompose_request(
+                metadata,
+                extensions,
+                pb::SealClaimRequest {
+                    claim_id: req.claim_id,
+                },
+            ),
         )
         .await?;
         Ok(Response::new(pb::SealResponse {
@@ -3040,12 +3344,14 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::SealClaimRequest>,
     ) -> Result<Response<pb::SealClaimResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
         let state = {
             let mut claims = self.state.claims.lock();
             let claim = claims
                 .get_mut(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::enforce_claim_access(&caller, claim, "SealClaim")?;
             if claim.state == ClaimState::Sealed && claim.freeze_preimage.is_some() {
                 claim.state
             } else {
@@ -3065,11 +3371,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::ExecuteClaimRequest>,
     ) -> Result<Response<pb::ExecuteClaimResponse>, Status> {
+        let principal_id = Self::principal_id_from_metadata(request.metadata());
         if !self.insecure_v1_enabled {
             return Err(Status::invalid_argument(
                 "v1 ExecuteClaim disabled; use ExecuteClaimV2",
             ));
         }
+        let caller = Self::caller_identity(request.metadata());
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         if req.reason_codes.len() > MAX_REASON_CODES {
@@ -3090,6 +3398,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             if claim.state == ClaimState::Settled || claim.state == ClaimState::Certified {
                 return Err(Status::failed_precondition("execution already settled"));
             }
+            Self::enforce_claim_access(&caller, claim, "ExecuteClaim")?;
             claim.operation_id = build_operation_id(
                 claim.topic_id,
                 claim.dependency_merkle_root,
@@ -3190,6 +3499,28 @@ impl EvidenceOsV2 for EvidenceOsService {
                     let _ = self.record_incident(claim, "ledger_kout_overrun");
                     Status::failed_precondition("ledger kout budget exhausted")
                 })?;
+            let principal_k_bits =
+                if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
+                    Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
+                } else {
+                    None
+                };
+            let principal_fuel = if fuel_total > 0 {
+                Some(fuel_total)
+            } else {
+                None
+            };
+            let principal_mem_pages = if vault_result.max_memory_pages > 0 {
+                Some(vault_result.max_memory_pages)
+            } else {
+                None
+            };
+            self.charge_principal_credit(
+                &principal_id,
+                principal_k_bits,
+                principal_fuel,
+                principal_mem_pages,
+            )?;
             if claim.lane == Lane::Heavy && canonical_output.len() > 1 {
                 self.record_incident(claim, "heavy_lane_output_policy")?;
                 return Err(Status::failed_precondition(
@@ -3370,7 +3701,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::CreateClaimV2Request>,
     ) -> Result<Response<pb::CreateClaimV2Response>, Status> {
-        let principal_id = Self::principal_id_from_metadata(request.metadata());
+        let caller = Self::caller_identity(request.metadata());
         let req = request.into_inner();
         validate_required_str_field(&req.claim_name, "claim_name", 128)?;
         let oracle_id = if req.oracle_id.trim().is_empty() {
@@ -3508,6 +3839,23 @@ impl EvidenceOsV2 for EvidenceOsService {
             self.telemetry
                 .record_lane_escalation(Self::lane_name(requested), Self::lane_name(lane));
         }
+        let domain = self.domain_for_policy(&req.claim_name, &req.holdout_ref, &nullspec_id)?;
+        let lane = match self
+            .domain_safety
+            .decision_for(&domain, &canonical_output_schema_id, lane)
+        {
+            DomainSafetyDecision::Allow => lane,
+            DomainSafetyDecision::ForceHeavyLane => {
+                self.telemetry
+                    .record_lane_escalation(Self::lane_name(lane), Self::lane_name(Lane::Heavy));
+                Lane::Heavy
+            }
+            DomainSafetyDecision::Reject => {
+                return Err(Status::failed_precondition(
+                    "domain policy requires CBRN_SC_V1 structured outputs",
+                ));
+            }
+        };
         let lane_cfg = LaneConfig::for_lane(lane, req.oracle_num_symbols, access_credit)?;
         let claim_pln_cfg = claim_pln_config(lane, &pln_cfg)?;
         let ledger = ConservationLedger::new(alpha)
@@ -3537,7 +3885,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             Some(phys),
         );
         self.observe_probe(
-            principal_id,
+            caller.principal_id.clone(),
             operation_id.clone(),
             hex::encode(topic.topic_id),
             hex::encode(semantic_hash),
@@ -3587,6 +3935,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             oracle_pins: None,
             freeze_preimage: None,
             operation_id,
+            owner_principal_id: caller.principal_id,
+            created_at_unix_ms: current_time_unix_ms()?,
         };
         self.state.claims.lock().insert(claim_id, claim.clone());
         self.state
@@ -3623,6 +3973,12 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::ExecuteClaimV2Request>,
     ) -> Result<Response<pb::ExecuteClaimV2Response>, Status> {
         let principal_id = Self::principal_id_from_metadata(request.metadata());
+        let request_id = Self::request_id_from_metadata(request.metadata())?;
+        if let Some(cached) =
+            self.idempotency_lookup_execute_claim_v2(&principal_id, &request_id)?
+        {
+            return Ok(Response::new(cached));
+        }
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         let (
@@ -3678,8 +4034,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "execute_claim_v2",
                 Some(claim.phys_hir_hash),
             );
+            Self::enforce_claim_access(&caller, claim, "ExecuteClaimV2")?;
             self.observe_probe(
-                principal_id.clone(),
+                caller.principal_id.clone(),
                 claim.operation_id.clone(),
                 hex::encode(claim.topic_id),
                 hex::encode(claim.phys_hir_hash),
@@ -3875,6 +4232,28 @@ impl EvidenceOsV2 for EvidenceOsService {
                     return Err(Status::failed_precondition("holdout budget exhausted"));
                 }
             }
+            let principal_k_bits =
+                if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
+                    Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
+                } else {
+                    None
+                };
+            let principal_fuel = if fuel_total > 0 {
+                Some(fuel_total)
+            } else {
+                None
+            };
+            let principal_mem_pages = if vault_result.max_memory_pages > 0 {
+                Some(vault_result.max_memory_pages)
+            } else {
+                None
+            };
+            self.charge_principal_credit(
+                &principal_id,
+                principal_k_bits,
+                principal_fuel,
+                principal_mem_pages,
+            )?;
             let (e_value, eprocess_kind_id) =
                 compute_nullspec_e_value(&contract, &vault_result.oracle_buckets)?;
             let canary_key = Self::canary_key(&claim.claim_name, &claim.holdout_ref);
@@ -3912,8 +4291,10 @@ impl EvidenceOsV2 for EvidenceOsService {
                 e_value,
                 None,
             )?;
+            let ledger_numeric_guard_failure = claim.ledger.certification_guard_failure();
             let can_certify = claim.ledger.can_certify();
             let mut decision = if claim.ledger.frozen
+                || ledger_numeric_guard_failure.is_some()
                 || claim.lane == Lane::Heavy
                 || physhir_mismatch
                 || magnitude_envelope_violation
@@ -3952,6 +4333,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             if magnitude_envelope_violation {
                 reason_codes.push(MAGNITUDE_ENVELOPE_REASON_CODE);
+            }
+            if ledger_numeric_guard_failure.is_some() {
+                reason_codes.push(LEDGER_NUMERIC_GUARD_REASON_CODE);
             }
             let oracle_input = policy_oracle_input_json(
                 claim,
@@ -4069,7 +4453,10 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule.nullspec_id_hex = Some(hex::encode(contract.nullspec_id));
             capsule.oracle_resolution_hash_hex = Some(hex::encode(contract.oracle_resolution_hash));
             capsule.eprocess_kind = Some(eprocess_kind_id);
-            capsule.nullspec_contract_hash_hex = Some(hex::encode(contract.compute_id()));
+            capsule.nullspec_contract_hash_hex =
+                Some(hex::encode(contract.compute_id().map_err(|_| {
+                    Status::internal("nullspec id compute failed")
+                })?));
             capsule.semantic_hash_hex = Some(hex::encode(claim.semantic_hash));
             capsule.physhir_hash_hex = Some(hex::encode(claim.phys_hir_hash));
             capsule.lineage_root_hash_hex = Some(hex::encode(claim.lineage_root_hash));
@@ -4104,12 +4491,18 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "capsule_hash",
             )?;
             let etl_index = if self.offline_settlement_ingest {
+                let etl = self.state.etl.lock();
+                let sth_hash_hex = hex::encode(etl.root_hash());
+                drop(etl);
                 let proposal = UnsignedSettlementProposal {
                     schema_version: 1,
                     claim_id_hex: hex::encode(claim.claim_id),
                     claim_state: Self::state_name(claim.state).to_string(),
                     epoch: claim.epoch_counter,
-                    capsule_bytes: capsule_bytes.clone(),
+                    etl_index: 0,
+                    sth_hash_hex,
+                    decision,
+                    reason_codes: reason_codes.clone(),
                     capsule_hash_hex: hex::encode(capsule_hash),
                 };
                 write_unsigned_proposal(&self.state.data_path, &proposal)
@@ -4159,7 +4552,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_all(&self.state)?;
         clear_pending_mutation(&self.state)?;
 
-        Ok(Response::new(pb::ExecuteClaimV2Response {
+        let response = pb::ExecuteClaimV2Response {
             state: state.to_proto(),
             decision,
             reason_codes,
@@ -4168,17 +4561,29 @@ impl EvidenceOsV2 for EvidenceOsService {
             certified,
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
-        }))
+        };
+        self.idempotency_store_execute_claim_v2(
+            principal_id.clone(),
+            request_id.clone(),
+            response.clone(),
+        );
+        Ok(Response::new(response))
     }
 
     async fn get_capsule(
         &self,
         request: Request<pb::GetCapsuleRequest>,
     ) -> Result<Response<pb::GetCapsuleResponse>, Status> {
-        let claim_id = request.into_inner().claim_id;
+        let (metadata, extensions, req) = decompose_request(request);
         let resp = <Self as EvidenceOsV2>::fetch_capsule(
             self,
-            Request::new(pb::FetchCapsuleRequest { claim_id }),
+            recompose_request(
+                metadata,
+                extensions,
+                pb::FetchCapsuleRequest {
+                    claim_id: req.claim_id,
+                },
+            ),
         )
         .await?
         .into_inner();
@@ -4304,11 +4709,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::FetchCapsuleRequest>,
     ) -> Result<Response<pb::FetchCapsuleResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let claim_id = parse_hash32(&request.into_inner().claim_id, "claim_id")?;
         let claims = self.state.claims.lock();
         let claim = claims
             .get(&claim_id)
             .ok_or_else(|| Status::not_found("claim not found"))?;
+        Self::enforce_claim_access(&caller, claim, "FetchCapsuleV2")?;
         let capsule_bytes = claim
             .capsule_bytes
             .clone()
@@ -4366,6 +4773,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         &self,
         request: Request<pb::RevokeClaimRequest>,
     ) -> Result<Response<pb::RevokeClaimResponse>, Status> {
+        let caller = Self::caller_identity(request.metadata());
         let req = request.into_inner();
         if req.reason.is_empty() || req.reason.len() > 256 {
             return Err(Status::invalid_argument("reason must be in [1,256]"));
@@ -4376,6 +4784,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let claim = claims
                 .get(&claim_id)
                 .ok_or_else(|| Status::not_found("claim not found"))?;
+            Self::enforce_claim_access(&caller, claim, "RevokeClaimV2")?;
             claim
                 .last_capsule_hash
                 .ok_or_else(|| Status::failed_precondition("capsule hash unavailable"))?
@@ -4453,6 +4862,46 @@ impl EvidenceOsV2 for EvidenceOsService {
         }))
     }
 
+    async fn grant_credit(
+        &self,
+        request: Request<pb::GrantCreditRequest>,
+    ) -> Result<Response<pb::GrantCreditResponse>, Status> {
+        let operator_principal = Self::principal_id_from_metadata(request.metadata());
+        self.require_operator(&operator_principal)?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.principal_id, "principal_id", MAX_PRINCIPAL_ID_LEN)?;
+        validate_required_str_field(&req.reason, "reason", MAX_CREDIT_REASON_LEN)?;
+        if req.amount == 0 {
+            return Err(Status::invalid_argument("amount must be > 0"));
+        }
+        self.admission_provider
+            .admit(&req.principal_id, req.amount)?;
+        let default_limit = self.default_credit_limit_for(&req.principal_id);
+        let mut store = self.state.account_store.lock();
+        let balance = store.grant_credit(&req.principal_id, req.amount, default_limit)?;
+        Ok(Response::new(pb::GrantCreditResponse {
+            credit_balance: balance,
+        }))
+    }
+
+    async fn set_credit_limit(
+        &self,
+        request: Request<pb::SetCreditLimitRequest>,
+    ) -> Result<Response<pb::SetCreditLimitResponse>, Status> {
+        let operator_principal = Self::principal_id_from_metadata(request.metadata());
+        self.require_operator(&operator_principal)?;
+        let req = request.into_inner();
+        validate_required_str_field(&req.principal_id, "principal_id", MAX_PRINCIPAL_ID_LEN)?;
+        self.admission_provider
+            .admit(&req.principal_id, req.limit)?;
+        let default_limit = self.default_credit_limit_for(&req.principal_id);
+        let mut store = self.state.account_store.lock();
+        let limit = store.set_credit_limit(&req.principal_id, req.limit, default_limit)?;
+        Ok(Response::new(pb::SetCreditLimitResponse {
+            credit_limit: limit,
+        }))
+    }
+
     async fn watch_revocations(
         &self,
         _request: Request<pb::WatchRevocationsRequest>,
@@ -4475,6 +4924,38 @@ impl EvidenceOsV2 for EvidenceOsService {
 }
 
 use tokio_stream::StreamExt;
+
+fn current_time_unix_ms() -> Result<u64, Status> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|v| v.as_millis() as u64)
+        .map_err(|_| Status::internal("system clock before unix epoch"))
+}
+
+fn decompose_request<T>(
+    request: Request<T>,
+) -> (tonic::metadata::MetadataMap, tonic::Extensions, T) {
+    let (metadata, extensions, message) = request.into_parts();
+    (metadata, extensions, message)
+}
+
+fn recompose_request<T>(
+    metadata: tonic::metadata::MetadataMap,
+    extensions: tonic::Extensions,
+    message: T,
+) -> Request<T> {
+    Request::from_parts(metadata, extensions, message)
+}
+
+fn transcode_request<T, U>(request: Request<T>) -> Result<Request<U>, Status>
+where
+    T: Message,
+    U: Message + Default,
+{
+    let (metadata, extensions, message) = decompose_request(request);
+    let transcoded: U = transcode_message(message)?;
+    Ok(recompose_request(metadata, extensions, transcoded))
+}
 
 fn transcode_message<T, U>(value: T) -> Result<U, Status>
 where
@@ -4520,8 +5001,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::CreateClaimRequest>,
     ) -> Result<Response<v1::CreateClaimResponse>, Status> {
-        let req_v2: v2::CreateClaimRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::create_claim(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::CreateClaimRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::create_claim(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4529,8 +5010,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::CreateClaimV2Request>,
     ) -> Result<Response<v1::CreateClaimV2Response>, Status> {
-        let req_v2: v2::CreateClaimV2Request = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::create_claim_v2(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::CreateClaimV2Request> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::create_claim_v2(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4538,8 +5019,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::CommitArtifactsRequest>,
     ) -> Result<Response<v1::CommitArtifactsResponse>, Status> {
-        let req_v2: v2::CommitArtifactsRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::commit_artifacts(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::CommitArtifactsRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::commit_artifacts(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4547,8 +5028,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::FreezeRequest>,
     ) -> Result<Response<v1::FreezeResponse>, Status> {
-        let req_v2: v2::FreezeRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::freeze(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::FreezeRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::freeze(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4556,8 +5037,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::FreezeGatesRequest>,
     ) -> Result<Response<v1::FreezeGatesResponse>, Status> {
-        let req_v2: v2::FreezeGatesRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::freeze_gates(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::FreezeGatesRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::freeze_gates(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4565,8 +5046,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::SealRequest>,
     ) -> Result<Response<v1::SealResponse>, Status> {
-        let req_v2: v2::SealRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::seal(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::SealRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::seal(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4574,8 +5055,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::SealClaimRequest>,
     ) -> Result<Response<v1::SealClaimResponse>, Status> {
-        let req_v2: v2::SealClaimRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::seal_claim(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::SealClaimRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::seal_claim(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4583,8 +5064,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::ExecuteClaimRequest>,
     ) -> Result<Response<v1::ExecuteClaimResponse>, Status> {
-        let req_v2: v2::ExecuteClaimRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::execute_claim(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::ExecuteClaimRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::execute_claim(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4592,8 +5073,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::ExecuteClaimV2Request>,
     ) -> Result<Response<v1::ExecuteClaimV2Response>, Status> {
-        let req_v2: v2::ExecuteClaimV2Request = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::execute_claim_v2(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::ExecuteClaimV2Request> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::execute_claim_v2(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4601,8 +5082,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::GetCapsuleRequest>,
     ) -> Result<Response<v1::GetCapsuleResponse>, Status> {
-        let req_v2: v2::GetCapsuleRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::get_capsule(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::GetCapsuleRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::get_capsule(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4659,8 +5140,8 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::FetchCapsuleRequest>,
     ) -> Result<Response<v1::FetchCapsuleResponse>, Status> {
-        let req_v2: v2::FetchCapsuleRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::fetch_capsule(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::FetchCapsuleRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::fetch_capsule(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
@@ -4668,11 +5149,28 @@ impl EvidenceOsV1 for EvidenceOsService {
         &self,
         request: Request<v1::RevokeClaimRequest>,
     ) -> Result<Response<v1::RevokeClaimResponse>, Status> {
-        let req_v2: v2::RevokeClaimRequest = transcode_message(request.into_inner())?;
-        let response = <Self as EvidenceOsV2>::revoke_claim(self, Request::new(req_v2)).await?;
+        let req_v2: Request<v2::RevokeClaimRequest> = transcode_request(request)?;
+        let response = <Self as EvidenceOsV2>::revoke_claim(self, req_v2).await?;
         Ok(Response::new(transcode_message(response.into_inner())?))
     }
 
+    async fn grant_credit(
+        &self,
+        request: Request<v1::GrantCreditRequest>,
+    ) -> Result<Response<v1::GrantCreditResponse>, Status> {
+        let req_v2: v2::GrantCreditRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::grant_credit(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
+
+    async fn set_credit_limit(
+        &self,
+        request: Request<v1::SetCreditLimitRequest>,
+    ) -> Result<Response<v1::SetCreditLimitResponse>, Status> {
+        let req_v2: v2::SetCreditLimitRequest = transcode_message(request.into_inner())?;
+        let response = <Self as EvidenceOsV2>::set_credit_limit(self, Request::new(req_v2)).await?;
+        Ok(Response::new(transcode_message(response.into_inner())?))
+    }
     async fn watch_revocations(
         &self,
         request: Request<v1::WatchRevocationsRequest>,
@@ -4735,6 +5233,29 @@ mod tests {
         assert!(matches!(fast.aspec_policy.lane, AspecLane::HighAssurance));
         assert!(matches!(heavy.aspec_policy.lane, AspecLane::LowAssurance));
         assert!(heavy.aspec_policy.max_loop_bound >= fast.aspec_policy.max_loop_bound);
+    }
+
+    #[test]
+    fn domain_safety_policy_rejects_unsafe_modes_for_high_risk_domain() {
+        let cfg = DomainSafetyConfig {
+            require_structured_outputs: true,
+            require_structured_output_domains: HashSet::from(["CBRN".to_string()]),
+            deny_free_text_outputs: true,
+            force_heavy_lane_on_domain: HashSet::from(["CBRN".to_string()]),
+        };
+
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::LEGACY_SCHEMA_ID, Lane::Fast),
+            DomainSafetyDecision::Reject
+        );
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::SCHEMA_ID, Lane::Fast),
+            DomainSafetyDecision::ForceHeavyLane
+        );
+        assert_eq!(
+            cfg.decision_for("CBRN", structured_claims::SCHEMA_ID, Lane::Heavy),
+            DomainSafetyDecision::Allow
+        );
     }
 
     #[test]
@@ -4904,6 +5425,68 @@ mod tests {
     }
 
     #[test]
+    fn execute_claim_v2_idempotency_returns_cached_response_for_same_request_id() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let principal_id = "principal-a";
+        let request_id = "req-1";
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
+            .expect("lookup")
+            .is_none());
+
+        let response = pb::ExecuteClaimV2Response {
+            state: pb::ClaimState::Settled as i32,
+            decision: pb::Decision::Approve as i32,
+            reason_codes: vec![1, 2],
+            canonical_output: vec![9],
+            e_value: 0.25,
+            certified: false,
+            capsule_hash: vec![7; 32],
+            etl_index: 10,
+        };
+        svc.idempotency_store_execute_claim_v2(
+            principal_id.to_string(),
+            request_id.to_string(),
+            response.clone(),
+        );
+
+        let cached = svc
+            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
+            .expect("cached lookup")
+            .expect("cached response");
+        assert_eq!(cached, response);
+    }
+
+    #[test]
+    fn execute_claim_v2_idempotency_tracks_distinct_request_ids_independently() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2("principal-a", "req-a")
+            .expect("lookup req-a")
+            .is_none());
+        assert!(svc
+            .idempotency_lookup_execute_claim_v2("principal-a", "req-b")
+            .expect("lookup req-b")
+            .is_none());
+    }
+
+    #[test]
     fn registry_holdout_provider_decrypts_encrypted_labels() {
         let dir = TempDir::new().expect("tmp");
         let holdout_ref = "holdout-enc";
@@ -5069,6 +5652,8 @@ mod tests {
             oracle_pins: None,
             freeze_preimage: None,
             operation_id: "op".to_string(),
+            owner_principal_id: "test-owner".to_string(),
+            created_at_unix_ms: 1,
         };
         let err = vault_context(
             &claim,
@@ -5126,6 +5711,8 @@ mod tests {
             oracle_pins: None,
             freeze_preimage: None,
             operation_id: "op".to_string(),
+            owner_principal_id: "test-owner".to_string(),
+            created_at_unix_ms: 1,
         }
     }
 

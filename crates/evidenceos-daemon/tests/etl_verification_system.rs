@@ -1,9 +1,13 @@
-use evidenceos_core::crypto_transcripts::verify_sth_signature;
-use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
+use evidenceos_core::crypto_transcripts::verify_sth_signature as verify_sth_signature_core;
+use evidenceos_core::etl::{
+    verify_consistency_proof as verify_consistency_proof_core,
+    verify_inclusion_proof as verify_inclusion_proof_core,
+};
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
+use evidenceos_verifier::{verify_consistency_proof, verify_inclusion_proof, verify_sth_signature};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -145,6 +149,7 @@ fn rotate_key(data_dir: &std::path::Path, seed: u8) {
 
 fn verify_sth_with_response_key(sth: &pb::SignedTreeHead, key: &[u8]) {
     verify_sth_signature(sth, key).expect("sth signature");
+    verify_sth_signature_core(sth, key).expect("sth signature core");
 }
 
 #[tokio::test]
@@ -178,6 +183,13 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
         ip.tree_size as usize,
         &root_hash
     ));
+    assert!(verify_inclusion_proof_core(
+        &path,
+        &leaf,
+        ip.leaf_index as usize,
+        ip.tree_size as usize,
+        &root_hash
+    ));
 
     verify_sth_signature(&sth, &pubk.ed25519_public_key).expect("sth signature");
 
@@ -199,6 +211,13 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
         .map(|x| x.try_into().expect("cp path"))
         .collect();
     assert!(verify_consistency_proof(
+        &old_root,
+        &new_root,
+        cp.old_tree_size as usize,
+        cp.new_tree_size as usize,
+        &cp_path
+    ));
+    assert!(verify_consistency_proof_core(
         &old_root,
         &new_root,
         cp.old_tree_size as usize,
