@@ -6,7 +6,7 @@ use evidenceos_core::holdout_crypto::{
     decrypt_holdout_labels, encrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider,
 };
 use evidenceos_core::nullspec::{
-    EProcessKind, NullSpecContractV1, NullSpecKind, NULLSPEC_SCHEMA_V1,
+    EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
 };
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_protocol::{
@@ -663,7 +663,7 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
                 .map(|c| (*c as f64 + smooth) / denom)
                 .collect();
             let alpha_vec = vec![alpha; p0.len()];
-            let mut contract = NullSpecContractV1 {
+            let mut contract = SignedNullSpecContractV1 {
                 schema: NULLSPEC_SCHEMA_V1.to_string(),
                 nullspec_id: [0_u8; 32],
                 oracle_id,
@@ -686,12 +686,12 @@ fn run_nullspec(cmd: NullspecCmd) -> Result<serde_json::Value, String> {
                 .signing_payload_bytes()
                 .map_err(|_| "signing payload encode failed".to_string())?;
             contract.signature_ed25519 = sk.sign(&payload).to_bytes().to_vec();
-            contract.nullspec_id = contract.compute_id();
+            contract.nullspec_id = contract.compute_id().expect("id");
             Ok(json!(contract))
         }
         NullspecCmd::Install { data_dir, contract } => {
             let bytes = fs::read(contract).map_err(|e| e.to_string())?;
-            let contract: NullSpecContractV1 =
+            let contract: SignedNullSpecContractV1 =
                 serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             let store =
                 NullSpecStore::open(&data_dir).map_err(|_| "open store failed".to_string())?;

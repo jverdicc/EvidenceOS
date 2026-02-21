@@ -1,8 +1,43 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::nullspec::NullSpecContractV1;
+use crate::nullspec::SignedNullSpecContractV1;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyNullSpecContractV1 {
+    schema: String,
+    nullspec_id: [u8; 32],
+    oracle_id: String,
+    oracle_resolution_hash: [u8; 32],
+    holdout_handle: String,
+    epoch_created: u64,
+    ttl_epochs: u64,
+    kind: crate::nullspec::NullSpecKind,
+    eprocess: crate::nullspec::EProcessKind,
+    calibration_manifest_hash: Option<[u8; 32]>,
+    created_by: String,
+    signature_ed25519: Vec<u8>,
+}
+
+impl From<LegacyNullSpecContractV1> for SignedNullSpecContractV1 {
+    fn from(value: LegacyNullSpecContractV1) -> Self {
+        Self {
+            schema: value.schema,
+            nullspec_id: value.nullspec_id,
+            oracle_id: value.oracle_id,
+            oracle_resolution_hash: value.oracle_resolution_hash,
+            holdout_handle: value.holdout_handle,
+            epoch_created: value.epoch_created,
+            ttl_epochs: value.ttl_epochs,
+            kind: value.kind,
+            eprocess: value.eprocess,
+            calibration_manifest_hash: value.calibration_manifest_hash,
+            created_by: value.created_by,
+            signature_ed25519: value.signature_ed25519,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct ActiveMappings {
@@ -35,21 +70,25 @@ impl NullSpecStore {
             dir,
             active_map_file,
         })
+        .and_then(|store| {
+            store.migrate_legacy_contracts()?;
+            Ok(store)
+        })
     }
 
-    pub fn install(&self, contract: &NullSpecContractV1) -> EvidenceOSResult<()> {
+    pub fn install(&self, contract: &SignedNullSpecContractV1) -> EvidenceOSResult<()> {
         let id = hex::encode(contract.nullspec_id);
         let path = self.dir.join(format!("{id}.json"));
-        fs::write(path, contract.canonical_bytes()).map_err(|_| EvidenceOSError::Internal)
+        fs::write(path, contract.canonical_bytes()?).map_err(|_| EvidenceOSError::Internal)
     }
 
-    pub fn get(&self, id: &[u8; 32]) -> EvidenceOSResult<NullSpecContractV1> {
+    pub fn get(&self, id: &[u8; 32]) -> EvidenceOSResult<SignedNullSpecContractV1> {
         let path = self.dir.join(format!("{}.json", hex::encode(id)));
         let bytes = fs::read(path).map_err(|_| EvidenceOSError::NotFound)?;
         serde_json::from_slice(&bytes).map_err(|_| EvidenceOSError::Internal)
     }
 
-    pub fn list(&self) -> EvidenceOSResult<Vec<NullSpecContractV1>> {
+    pub fn list(&self) -> EvidenceOSResult<Vec<SignedNullSpecContractV1>> {
         let mut out = Vec::new();
         let entries = fs::read_dir(&self.dir).map_err(|_| EvidenceOSError::Internal)?;
         for entry in entries {
@@ -62,7 +101,7 @@ impl NullSpecStore {
                 continue;
             }
             let bytes = fs::read(path).map_err(|_| EvidenceOSError::Internal)?;
-            let c: NullSpecContractV1 =
+            let c: SignedNullSpecContractV1 =
                 serde_json::from_slice(&bytes).map_err(|_| EvidenceOSError::Internal)?;
             out.push(c);
         }
@@ -126,5 +165,36 @@ impl NullSpecStore {
     fn write_mappings(&self, mappings: &ActiveMappings) -> EvidenceOSResult<()> {
         let bytes = serde_json::to_vec(mappings).map_err(|_| EvidenceOSError::Internal)?;
         fs::write(&self.active_map_file, bytes).map_err(|_| EvidenceOSError::Internal)
+    }
+
+    fn migrate_legacy_contracts(&self) -> EvidenceOSResult<()> {
+        let entries = fs::read_dir(&self.dir).map_err(|_| EvidenceOSError::Internal)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| EvidenceOSError::Internal)?;
+            let path = entry.path();
+            if path.file_name().and_then(|n| n.to_str()) == Some("active_map.json") {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|_| EvidenceOSError::Internal)?;
+            let contract =
+                if let Ok(current) = serde_json::from_slice::<SignedNullSpecContractV1>(&bytes) {
+                    current
+                } else {
+                    let legacy: LegacyNullSpecContractV1 =
+                        serde_json::from_slice(&bytes).map_err(|_| EvidenceOSError::Internal)?;
+                    SignedNullSpecContractV1::from(legacy)
+                };
+            let canonical = contract.canonical_bytes()?;
+            let canonical_id = contract.compute_id()?;
+            let canonical_path = self.dir.join(format!("{}.json", hex::encode(canonical_id)));
+            fs::write(&canonical_path, canonical).map_err(|_| EvidenceOSError::Internal)?;
+            if canonical_path != path {
+                fs::remove_file(path).map_err(|_| EvidenceOSError::Internal)?;
+            }
+        }
+        Ok(())
     }
 }

@@ -39,6 +39,7 @@ http = "1"
 
 
 [dev-dependencies]
+evidenceos-verifier = { path = "../evidenceos-verifier", version = "0.1.0" }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tempfile = "3"

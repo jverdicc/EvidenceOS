@@ -7,6 +7,16 @@ There is no active DP execution lane, no DP syscall surface, and no claim-level 
 
 ## Why DP was removed
 
+## CODEX-E07 resolution (current state)
+
+EvidenceOS currently enforces **host-managed DP only**:
+
+- Guest DP primitives (`dp_laplace_i64`, `dp_gaussian_i64`) are forbidden imports.
+- In sealed/high-assurance operation, no guest-callable entropy-bearing DP syscall surface exists.
+- Any future DP behavior must be applied by trusted host logic over validated structured outputs, with explicit audit artifacts.
+
+This keeps the verification plane deterministic and removes hidden entropy channels from guest code.
+
 The prior state exposed DP-related budget fields without a coherent, certifiable execution path under ASPEC policy controls. Shipping a half-implemented DP lane risks false assurance and unclear security boundaries.
 
 ## Requirements to safely reintroduce DP

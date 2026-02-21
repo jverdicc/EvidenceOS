@@ -23,6 +23,7 @@ use clap::Parser;
 use ed25519_dalek::VerifyingKey;
 use evidenceos_attest::{load_policy, verify_attestation_blob};
 use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
+use evidenceos_core::magnitude_envelope::{set_active_registry, EnvelopeRegistry};
 use evidenceos_core::oracle_registry::OracleRegistry;
 use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ use tokio::sync::broadcast;
 use tracing_subscriber::EnvFilter;
 
 use evidenceos_daemon::auth::{AuthConfig, RequestGuard};
-use evidenceos_daemon::config::{DaemonConfig, DaemonOracleConfig};
+use evidenceos_daemon::config::{load_envelope_trusted_keys, DaemonConfig, DaemonOracleConfig};
 use evidenceos_daemon::http_preflight;
 use evidenceos_daemon::pln_profile::load_pln_profile;
 use evidenceos_daemon::server::{EvidenceOsService, NullSpecRegistryConfig};
@@ -113,6 +114,12 @@ struct Args {
     preflight_timeout_ms: u64,
     #[arg(long, default_value_t = 50)]
     preflight_rate_limit_rps: u32,
+    #[arg(long)]
+    envelope_packs_dir: Option<String>,
+    #[arg(long)]
+    trusted_envelope_issuer_keys: Option<String>,
+    #[arg(long)]
+    require_signed_envelopes: Option<bool>,
 }
 
 #[tokio::main]
@@ -179,6 +186,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         WasmOracleSandboxPolicy::default(),
     )?;
     tracing::info!(count=%registry.oracle_ids().len(), "loaded oracle bundles");
+
+    let envelope_packs_dir = args
+        .envelope_packs_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(&args.data_dir).join("envelope-packs"));
+    let trusted_envelope_keys = load_envelope_trusted_keys(
+        args.trusted_envelope_issuer_keys
+            .as_deref()
+            .map(std::path::Path::new),
+    )?;
+    let production_mode = std::env::var("EVIDENCEOS_PRODUCTION_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let require_signed_envelopes = args.require_signed_envelopes.unwrap_or(production_mode);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let envelope_registry = EnvelopeRegistry::load_from_signed_packs_dir(
+        &envelope_packs_dir,
+        &trusted_envelope_keys,
+        now,
+        require_signed_envelopes,
+    )
+    .map_err(|_| "failed to load envelope packs")?;
+    set_active_registry(envelope_registry).map_err(|_| "failed to install envelope registry")?;
 
     let svc = EvidenceOsService::build_with_options_and_nullspec(
         &args.data_dir,
@@ -273,6 +306,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         preflight_high_risk_tools: args.preflight_high_risk_tools.clone(),
         preflight_timeout_ms: args.preflight_timeout_ms,
         preflight_rate_limit_rps: args.preflight_rate_limit_rps,
+        envelope_packs_dir: envelope_packs_dir.clone(),
+        trusted_envelope_issuer_keys: args
+            .trusted_envelope_issuer_keys
+            .clone()
+            .map(std::path::PathBuf::from),
+        require_signed_envelopes,
     };
 
     let (shutdown_tx, _) = broadcast::channel::<()>(2);
@@ -293,6 +332,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tasks = vec![tokio::spawn(async move {
         grpc.await.map_err(|e| e.to_string())
     })];
+
+    #[cfg(unix)]
+    {
+        let envelope_packs_dir = envelope_packs_dir.clone();
+        let trusted_envelope_keys = trusted_envelope_keys.clone();
+        tokio::spawn(async move {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                Ok(mut hup) => {
+                    while hup.recv().await.is_some() {
+                        let now = match std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                        {
+                            Ok(v) => v.as_secs(),
+                            Err(err) => {
+                                tracing::error!(error=%err, "failed to read system clock for envelope reload");
+                                continue;
+                            }
+                        };
+                        match EnvelopeRegistry::load_from_signed_packs_dir(
+                            &envelope_packs_dir,
+                            &trusted_envelope_keys,
+                            now,
+                            require_signed_envelopes,
+                        ) {
+                            Ok(reloaded) => {
+                                if set_active_registry(reloaded).is_ok() {
+                                    tracing::info!("reloaded envelope packs on SIGHUP");
+                                } else {
+                                    tracing::error!("failed to install reloaded envelope registry");
+                                }
+                            }
+                            Err(_) => tracing::error!("failed to reload envelope packs on SIGHUP"),
+                        }
+                    }
+                }
+                Err(err) => tracing::error!(error=%err, "failed to register SIGHUP handler"),
+            }
+        });
+    }
 
     if let Some(http_listen) = daemon_cfg.preflight_http_listen.clone() {
         let listener = http_preflight::bind_listener(&http_listen).await?;
