@@ -15,15 +15,17 @@ Start here:
 
 Focus on: adaptive leakage model (W/k), lane transitions, deterministic settlement, ETL auditability, and fail-closed behavior.
 
-## If you are an ML eval engineer
+## If you are an ML eval engineer / researcher
 
 Start here:
-1. [`examples/exfiltration_demo/`](../examples/exfiltration_demo/)
-2. [`docs/threat_model_worked_example.md`](threat_model_worked_example.md)
-3. [`docs/uvp_blackbox_interface.md`](uvp_blackbox_interface.md)
-4. [`docs/ORACLES.md`](ORACLES.md)
+1. [`docs/EPISTEMIC_TRIAL_HARNESS.md`](EPISTEMIC_TRIAL_HARNESS.md)
+2. [`docs/TRIAL_HARNESS_ANALYSIS.md`](TRIAL_HARNESS_ANALYSIS.md)
+3. [`examples/exfiltration_demo/`](../examples/exfiltration_demo/)
+4. [`docs/threat_model_worked_example.md`](threat_model_worked_example.md)
+5. [`docs/uvp_blackbox_interface.md`](uvp_blackbox_interface.md)
+6. [`docs/ORACLES.md`](ORACLES.md)
 
-Focus on: how probing pressure is metered, how oracle outputs are constrained, and how to reason about verification under adaptive querying.
+Focus on: how to run the Epistemic Trial Harness end-to-end, how probing pressure is metered, how oracle outputs are constrained, and how to reason about verification under adaptive querying.
 
 ## If you are in governance / policy
 

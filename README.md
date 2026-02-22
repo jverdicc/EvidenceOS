@@ -22,7 +22,8 @@ The result is a verification system with explicit risk posture, deterministic se
 1. **Worked threat-model example (recommended first read):** [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
 2. **Black-box UVP interface explainer:** [`docs/uvp_blackbox_interface.md`](docs/uvp_blackbox_interface.md)
 3. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
-4. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
+4. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
+5. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 
 > 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
 > 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
