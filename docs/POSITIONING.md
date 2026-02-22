@@ -187,3 +187,24 @@ EvidenceOS sees that all three oracles touch the same "holdout" (the software bi
 
 
 **Status:** Scenarios 6.1 and 6.4 are sim-tested (Experiments 2, 11). Scenario 6.3 is Live (Experiments 1, 8, 9). Scenario 6.2 joint revocation is Architecture specified. See `TEST_COVERAGE_MATRIX.md`.
+
+## Section 7: Enabling Healthy Discovery (The Safety Paradox)
+
+A common misconception is that a Conservation Ledger "kills" exploration. In reality, EvidenceOS enables healthy discovery by mathematically distinguishing between *exploration* (learning the data) and *optimization* (gaming the data).
+
+**1. The Generosity of the Budget**
+In standard "lock-down" systems, administrators are forced to set extremely restrictive rate limits because they have no way to measure cumulative leakage. They treat every user like a potential attacker. 
+EvidenceOS allows for a "Safety Paradox": Because the operator knows exactly how many bits of information are at risk, they can set a generous initial leakage budget (k) that allows 99% of harmless, exploratory users to never even see a throttle, while still guaranteeing that no agent can cross the catastrophic threshold.
+
+**2. Exploration vs. Optimization**
+Healthy discovery is usually "broad and shallow"—a user asks a variety of questions to understand a topic. This consumes budget slowly across many different TopicHashes. 
+Adversarial discovery is "narrow and deep"—an optimizer asks hundreds of variations of the same question to find a high-precision exploit. EvidenceOS is designed specifically to stall the "narrow and deep" path while leaving the "broad and shallow" path open for discovery.
+
+> *Note: Visualization of query distribution heatmaps is a roadmap item for v2. See `examples/simulations/demo4_sybil.py` for a related empirical demonstration of how TopicHash budgeting collapses "narrow" extraction attempts.*
+
+**3. The Path to Re-Certification**
+Unlike a "ban," which is often permanent and opaque, EvidenceOS provides a clear path back to healthy use. When a topic is `FROZEN`, it is a signal that the current data epoch is exhausted. Healthy users simply wait for the next **DLC Epoch** (the release of fresh, uncorrelated holdout data). This converts security from a game of "cops and robbers" into a transparent resource management cycle.
+
+**The Result:** By mathematically bounding the worst-case scenario, EvidenceOS actually reduces the "friction of suspicion," allowing researchers and developers to move faster within a known, safe envelope.
+
+*Status: Architecture specified. Budget parameter guidance is a roadmap item. See docs/NULLSPEC.md for current NullSpec contract configuration.*
