@@ -26,6 +26,7 @@ class ReportArtifacts:
     holm_csv: str
     consort_plot: str
     consort_csv: str
+    consort_dot: str
     summary_json: str
 
 
@@ -49,6 +50,8 @@ def _build_dataframe(capsule_rows: list[dict[str, Any]]) -> pd.DataFrame:
                     rec.get("adversary_type") if rec.get("adversary_type") is not None else "unknown"
                 ),
                 "holdout_ref": str(rec.get("holdout_ref") if rec.get("holdout_ref") is not None else "none"),
+                "holdout_bucket": str(rec.get("holdout_bucket") if rec.get("holdout_bucket") is not None else "none"),
+                "oracle_id": str(rec.get("oracle_id") if rec.get("oracle_id") is not None else "unknown"),
             }
         )
     return pd.DataFrame(rows)
@@ -98,8 +101,8 @@ def _cox_outputs(df: pd.DataFrame, out_dir: Path) -> tuple[Path, Path]:
     ph_csv = out_dir / "cox_ph_assumption.csv"
 
     model_df = pd.get_dummies(
-        df[["time", "event", "arm_id", "intervention_id", "lane", "nullspec_id", "adversary_type", "holdout_ref"]],
-        columns=["arm_id", "intervention_id", "lane", "nullspec_id", "adversary_type", "holdout_ref"],
+        df[["time", "event", "arm_id", "intervention_id", "lane", "oracle_id", "nullspec_id", "adversary_type", "holdout_ref", "holdout_bucket"]],
+        columns=["arm_id", "intervention_id", "lane", "oracle_id", "nullspec_id", "adversary_type", "holdout_ref", "holdout_bucket"],
         drop_first=True,
     )
 
@@ -178,9 +181,10 @@ def _holm_bonferroni_outputs(df: pd.DataFrame, out_dir: Path, alpha: float = 0.0
     return holm_csv
 
 
-def _consort_outputs(records: list[dict[str, Any]], capsule_rows: list[dict[str, Any]], out_dir: Path) -> tuple[Path, Path]:
+def _consort_outputs(records: list[dict[str, Any]], capsule_rows: list[dict[str, Any]], out_dir: Path) -> tuple[Path, Path, Path]:
     consort_csv = out_dir / "consort_flow.csv"
     consort_png = out_dir / "consort_flow.png"
+    consort_dot = out_dir / "consort_flow.dot"
 
     preflight = [r for r in records if "preflight" in str(r.get("schema", "")).lower()]
     randomized = [r for r in capsule_rows if r.get("arm_id") is not None or r.get("intervention_id") is not None]
@@ -197,6 +201,14 @@ def _consort_outputs(records: list[dict[str, Any]], capsule_rows: list[dict[str,
     ]
     pd.DataFrame(rows).to_csv(consort_csv, index=False)
 
+    dot_lines = ["digraph consort {", "  rankdir=TB;"]
+    for row in rows:
+        dot_lines.append(f"  {row['stage']} [label=\"{row['stage']}\\nn={row['count']}\"];" )
+    for src, dst in zip(rows, rows[1:]):
+        dot_lines.append(f"  {src['stage']} -> {dst['stage']};")
+    dot_lines.append("}")
+    consort_dot.write_text("\n".join(dot_lines) + "\n", encoding="utf-8")
+
     plt.figure(figsize=(8, 4))
     y = list(reversed(range(len(rows))))
     for i, row in enumerate(rows):
@@ -211,7 +223,7 @@ def _consort_outputs(records: list[dict[str, Any]], capsule_rows: list[dict[str,
     plt.savefig(consort_png, dpi=180)
     plt.close()
 
-    return consort_png, consort_csv
+    return consort_png, consort_csv, consort_dot
 
 
 def generate_report(etl_path: Path, out_dir: Path) -> ReportArtifacts:
@@ -226,7 +238,7 @@ def generate_report(etl_path: Path, out_dir: Path) -> ReportArtifacts:
     cox_summary_csv, cox_ph_csv = _cox_outputs(df, out_dir)
     rmst_csv = _rmst_outputs(df, out_dir)
     holm_csv = _holm_bonferroni_outputs(df, out_dir)
-    consort_plot, consort_csv = _consort_outputs(records, capsule_rows, out_dir)
+    consort_plot, consort_csv, consort_dot = _consort_outputs(records, capsule_rows, out_dir)
 
     summary = {
         "etl_path": str(etl_path),
@@ -243,6 +255,7 @@ def generate_report(etl_path: Path, out_dir: Path) -> ReportArtifacts:
                 holm_csv=holm_csv.name,
                 consort_plot=consort_plot.name,
                 consort_csv=consort_csv.name,
+                consort_dot=consort_dot.name,
                 summary_json="summary.json",
             )
         ),
@@ -259,6 +272,7 @@ def generate_report(etl_path: Path, out_dir: Path) -> ReportArtifacts:
         holm_csv=str(holm_csv),
         consort_plot=str(consort_plot),
         consort_csv=str(consort_csv),
+        consort_dot=str(consort_dot),
         summary_json=str(summary_path),
     )
 
