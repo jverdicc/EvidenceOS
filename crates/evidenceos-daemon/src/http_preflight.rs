@@ -23,6 +23,7 @@ use crate::policy_oracle::{PolicyOracleEngine, PreflightPolicyDecision};
 use crate::probe::{
     ProbeClock, ProbeDetector, ProbeObservation, ProbeSnapshot, ProbeVerdict, SystemClock,
 };
+use crate::public_error::PublicErrorCode;
 use crate::telemetry::Telemetry;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,9 +39,9 @@ pub struct PreflightToolCallRequest {
 #[allow(non_snake_case)]
 pub struct PreflightToolCallResponse {
     pub decision: String,
-    pub reasonCode: String,
+    pub reason_code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasonDetail: Option<String>,
+    pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewrittenParams: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,14 +115,14 @@ async fn preflight_tool_call(
         Ok(resp) => {
             state
                 .telemetry
-                .record_preflight_request(&resp.decision, &resp.reasonCode);
+                .record_preflight_request(&resp.decision, &resp.reason_code);
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(err) => {
             state.telemetry.record_preflight_failure(err.kind);
             state
                 .telemetry
-                .record_preflight_request(&err.response.decision, &err.response.reasonCode);
+                .record_preflight_request(&err.response.decision, &err.response.reason_code);
             (err.status, Json(err.response)).into_response()
         }
     }
@@ -142,8 +143,8 @@ impl HttpErr {
             kind,
             response: PreflightToolCallResponse {
                 decision: "DENY".to_string(),
-                reasonCode: "InvalidArgument".to_string(),
-                reasonDetail: Some(detail.to_string()),
+                reason_code: PublicErrorCode::InvalidInput.as_str().to_string(),
+                detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
             },
@@ -157,8 +158,8 @@ impl HttpErr {
             kind: "unauthorized",
             response: PreflightToolCallResponse {
                 decision: "DENY".to_string(),
-                reasonCode: "Unauthorized".to_string(),
-                reasonDetail: Some("missing or invalid bearer token".to_string()),
+                reason_code: PublicErrorCode::Unauthorized.as_str().to_string(),
+                detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
             },
@@ -172,8 +173,8 @@ impl HttpErr {
             kind: "rate_limited",
             response: PreflightToolCallResponse {
                 decision: "DOWNGRADE".to_string(),
-                reasonCode: "RateLimited".to_string(),
-                reasonDetail: Some("preflight rate limit exceeded".to_string()),
+                reason_code: PublicErrorCode::RateLimited.as_str().to_string(),
+                detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
             },
@@ -192,8 +193,8 @@ impl HttpErr {
             kind: "policy_timeout",
             response: PreflightToolCallResponse {
                 decision: decision.to_string(),
-                reasonCode: "PolicyTimeout".to_string(),
-                reasonDetail: Some("policy preflight timeout".to_string()),
+                reason_code: PublicErrorCode::Unavailable.as_str().to_string(),
+                detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
             },
@@ -265,7 +266,7 @@ pub async fn preflight_tool_call_impl(
         agent_id = ?req.agentId,
         params_hash = %params_hash,
         decision = %response.decision,
-        reason_code = %response.reasonCode,
+        reason_code = %response.reason_code,
         "preflight probe evaluated"
     );
 
@@ -291,8 +292,8 @@ pub async fn preflight_tool_call_impl(
             downgrade_params(&req.toolName, &req.params, &state.high_risk_tools);
         if response.rewrittenParams.is_none() {
             response.decision = "DENY".to_string();
-            response.reasonCode = "UnsafeRewrite".to_string();
-            response.reasonDetail = Some("unable to safely rewrite parameters".to_string());
+            response.reason_code = "UNSAFE_REWRITE".to_string();
+            response.detail = maybe_auditor_detail(headers, "unable to safely rewrite parameters");
         }
     }
 
@@ -303,7 +304,7 @@ pub async fn preflight_tool_call_impl(
         session_id = %operation,
         agent_id = ?req.agentId,
         decision = %response.decision,
-        reason_code = %response.reasonCode,
+        reason_code = %response.reason_code,
         "preflight decision"
     );
     tracing::info!(
@@ -314,7 +315,7 @@ pub async fn preflight_tool_call_impl(
         session_id = ?req.sessionId,
         agent_id = ?req.agentId,
         decision = %response.decision,
-        reason_code = %response.reasonCode,
+        reason_code = %response.reason_code,
         "preflight audit event"
     );
     Ok(response)
@@ -364,29 +365,29 @@ fn map_probe_verdict(
     match verdict {
         ProbeVerdict::Clean => PreflightToolCallResponse {
             decision: "ALLOW".to_string(),
-            reasonCode: "ProbeClean".to_string(),
-            reasonDetail: None,
+            reason_code: "PROBE_CLEAN".to_string(),
+            detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
         },
-        ProbeVerdict::Throttle { reason, .. } => PreflightToolCallResponse {
+        ProbeVerdict::Throttle { reason: _, .. } => PreflightToolCallResponse {
             decision: "DOWNGRADE".to_string(),
-            reasonCode: "ProbeThrottle".to_string(),
-            reasonDetail: Some((*reason).to_string()),
+            reason_code: "PROBE_THROTTLE".to_string(),
+            detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
         },
-        ProbeVerdict::Escalate { reason } => PreflightToolCallResponse {
+        ProbeVerdict::Escalate { reason: _ } => PreflightToolCallResponse {
             decision: "REQUIRE_HUMAN".to_string(),
-            reasonCode: "ProbeEscalate".to_string(),
-            reasonDetail: Some((*reason).to_string()),
+            reason_code: "PROBE_ESCALATE".to_string(),
+            detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
         },
-        ProbeVerdict::Freeze { reason } => PreflightToolCallResponse {
+        ProbeVerdict::Freeze { reason: _ } => PreflightToolCallResponse {
             decision: "DENY".to_string(),
-            reasonCode: "ProbeFreeze".to_string(),
-            reasonDetail: Some((*reason).to_string()),
+            reason_code: "PROBE_FREEZE".to_string(),
+            detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
         },
@@ -398,14 +399,16 @@ fn apply_policy_veto(response: &mut PreflightToolCallResponse, policy: Preflight
         PreflightPolicyDecision::Approve { .. } => {}
         PreflightPolicyDecision::Reject { reason } => {
             response.decision = "DENY".to_string();
-            response.reasonCode = "PolicyVeto".to_string();
-            response.reasonDetail = Some(reason);
+            response.reason_code = "POLICY_VETO".to_string();
+            response.detail = None;
+            tracing::info!(target: "evidenceos.preflight.audit", detail=%reason, "policy veto detail");
         }
         PreflightPolicyDecision::Defer { reason } => {
             if response.decision != "DENY" {
                 response.decision = "REQUIRE_HUMAN".to_string();
-                response.reasonCode = "PolicyDefer".to_string();
-                response.reasonDetail = Some(reason);
+                response.reason_code = "POLICY_DEFER".to_string();
+                response.detail = None;
+                tracing::info!(target: "evidenceos.preflight.audit", detail=%reason, "policy defer detail");
             }
         }
     }
@@ -570,4 +573,17 @@ pub async fn bind_listener(addr: &str) -> Result<tokio::net::TcpListener, std::i
         }
     };
     tokio::net::TcpListener::bind(socket).await
+}
+
+fn maybe_auditor_detail(headers: &HeaderMap, detail: &str) -> Option<String> {
+    if headers
+        .get("x-evidenceos-role")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("auditor"))
+        .unwrap_or(false)
+    {
+        Some(detail.to_string())
+    } else {
+        None
+    }
 }
