@@ -39,7 +39,7 @@ pub type TopicId = [u8; 32];
 pub type CapsuleHash = [u8; 32];
 
 pub const PROTOCOL_SEMVER: &str = "2.1.0";
-pub const PROTO_SHA256: &str = "6cde13b72b42e46d149364e18ad2f96b3874526f4e0c6a98d744dc11be183851";
+pub const PROTO_SHA256: &str = "9d53726935aa537ab68849be060bc20cef2fe675b57a1ec8fc974aab928a4099";
 
 pub const MIN_DAEMON_VERSION: &str = "0.1.0-alpha";
 pub const MAX_DAEMON_VERSION_EXCLUSIVE: &str = "0.2.0";

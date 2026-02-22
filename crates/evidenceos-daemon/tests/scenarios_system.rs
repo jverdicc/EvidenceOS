@@ -181,6 +181,8 @@ async fn scenarios_produce_deterministic_public_evidence() {
 
                         oracle_id: "builtin.accuracy".to_string(),
                         nullspec_id: String::new(),
+                        dp_epsilon_budget: None,
+                        dp_delta_budget: None,
                     };
                     match server.client.create_claim_v2(request).await {
                         Ok(resp) => {

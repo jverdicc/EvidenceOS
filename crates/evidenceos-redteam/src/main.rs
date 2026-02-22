@@ -149,6 +149,8 @@ async fn error_probe_adversary(
             access_credit: 0,
             oracle_id: String::new(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         },
     ];
 
@@ -280,5 +282,7 @@ fn create_claim_request(
         access_credit: 64,
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: nullspec_id.to_string(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     }
 }

@@ -3329,6 +3329,8 @@ mod tests {
             access_credit: 32,
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         }
     }
 
@@ -3350,6 +3352,39 @@ mod tests {
         .expect_err("unknown holdout should fail");
         assert_eq!(err.code(), Code::InvalidArgument);
         assert_eq!(err.message(), "unknown holdout_ref");
+    }
+
+    #[tokio::test]
+    async fn create_claim_v2_rejects_negative_dp_budget() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-a";
+        let handle = [7u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let mut req = claim_request(holdout_ref);
+        req.dp_epsilon_budget = Some(-0.1);
+        let err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+            .await
+            .expect_err("negative dp budget should fail");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        assert!(err.message().contains("dp_epsilon_budget"));
     }
 
     #[tokio::test]
@@ -3799,6 +3834,8 @@ mod tests {
             claim_name: "c".to_string(),
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
@@ -3861,6 +3898,8 @@ mod tests {
             claim_name: "c".to_string(),
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],

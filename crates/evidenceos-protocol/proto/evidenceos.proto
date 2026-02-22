@@ -136,6 +136,8 @@ message CreateClaimV2Request {
   uint64 access_credit = 7;
   string oracle_id = 8;
   string nullspec_id = 9;
+  optional double dp_epsilon_budget = 10;
+  optional double dp_delta_budget = 11;
 }
 
 message CreateClaimV2Response {

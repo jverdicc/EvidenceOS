@@ -92,6 +92,8 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8, epoch_size
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     })
     .await
     .expect("create claim v2")

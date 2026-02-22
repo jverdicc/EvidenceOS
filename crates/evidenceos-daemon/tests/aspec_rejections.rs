@@ -44,6 +44,8 @@ fn create_claim_req() -> pb::CreateClaimV2Request {
         access_credit: 64,
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     }
 }
 

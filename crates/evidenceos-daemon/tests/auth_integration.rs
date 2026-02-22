@@ -159,6 +159,8 @@ async fn daemon_enforces_max_request_size() {
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     });
     req.metadata_mut().insert(
         "authorization",
@@ -204,6 +206,8 @@ async fn agent_role_cannot_fetch_capsule_or_etl_proofs() {
                 access_credit: 64,
                 oracle_id: "builtin.accuracy".to_string(),
                 nullspec_id: String::new(),
+                dp_epsilon_budget: None,
+                dp_delta_budget: None,
             },
             "agent-secret",
         ))

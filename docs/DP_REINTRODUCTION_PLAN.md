@@ -2,8 +2,10 @@
 
 ## Current release status
 
-DP host imports and per-claim DP budget knobs were removed from the runtime for this release.
-There is no active DP execution lane, no DP syscall surface, and no claim-level DP budget wiring.
+DP mechanisms remain disabled (no guest DP syscall surface, no host Laplace/Gaussian mechanism API), but minimum-conformance DP accounting is now active:
+- claims may set optional `dp_epsilon_budget` / `dp_delta_budget` at create time;
+- the conservation ledger meters `epsilon_total` / `delta_total`;
+- configured DP budgets are enforced fail-closed (ledger freezes on budget overrun).
 
 ## Why DP was removed
 
@@ -18,6 +20,17 @@ EvidenceOS currently enforces **host-managed DP only**:
 This keeps the verification plane deterministic and removes hidden entropy channels from guest code.
 
 The prior state exposed DP-related budget fields without a coherent, certifiable execution path under ASPEC policy controls. Shipping a half-implemented DP lane risks false assurance and unclear security boundaries.
+
+
+## What “DP lane implemented” means for minimum paper conformance
+
+For this phase, **DP lane implemented** means:
+
+1. **Accounting is implemented**: each DP-relevant action must increment ledger `epsilon_total` and `delta_total`.
+2. **Enforcement is implemented**: optional per-claim `ε/δ` budgets are validated and enforced fail-closed by the kernel ledger.
+3. **Serialization is implemented**: ledger snapshots include configured DP budgets so auditors can verify whether enforcement was active.
+
+It explicitly does **not** yet mean a deployed DP mechanism exists. Noise generation and mechanism APIs remain a future step.
 
 ## Requirements to safely reintroduce DP
 

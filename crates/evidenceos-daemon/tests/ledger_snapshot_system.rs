@@ -35,6 +35,8 @@ fn req(name: &str, access_credit: u64, oracle_num_symbols: u32) -> pb::CreateCla
         access_credit,
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     }
 }
 

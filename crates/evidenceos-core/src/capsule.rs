@@ -78,6 +78,8 @@ pub struct LedgerSnapshot {
     pub epsilon_total: f64,
     pub delta_total: f64,
     pub access_credit_spent: f64,
+    pub epsilon_budget: Option<f64>,
+    pub delta_budget: Option<f64>,
     pub compute_fuel_spent: f64,
 }
 
@@ -97,6 +99,8 @@ impl LedgerSnapshot {
             epsilon_total: snapshot.epsilon_total,
             delta_total: snapshot.delta_total,
             access_credit_spent: snapshot.access_credit_spent,
+            epsilon_budget: snapshot.epsilon_budget,
+            delta_budget: snapshot.delta_budget,
             compute_fuel_spent: 0.0,
         }
     }
