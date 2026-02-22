@@ -39,8 +39,9 @@ pub struct PreflightToolCallRequest {
 #[allow(non_snake_case)]
 pub struct PreflightToolCallResponse {
     pub decision: String,
+    #[serde(rename = "reasonCode")]
     pub reason_code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "reasonDetail", skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rewrittenParams: Option<Map<String, Value>>,
@@ -471,9 +472,12 @@ fn validate_authorization(headers: &HeaderMap, cfg: &DaemonConfig) -> Result<(),
 
 #[allow(clippy::result_large_err)]
 fn validate_request_id(headers: &HeaderMap) -> Result<String, HttpErr> {
-    let Some(value) = headers.get("x-request-id") else {
+    let Some(value) = headers
+        .get("x-request-id")
+        .or_else(|| headers.get("x-evidenceos-request-id"))
+    else {
         return Err(HttpErr::invalid_argument(
-            "missing x-request-id header",
+            "missing x-request-id or x-evidenceos-request-id header",
             "missing_request_id",
         ));
     };

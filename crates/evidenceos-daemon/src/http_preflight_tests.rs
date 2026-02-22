@@ -126,6 +126,43 @@ async fn requires_request_id_header() {
 }
 
 #[tokio::test]
+async fn accepts_legacy_request_id_alias_header() {
+    let cfg = DaemonConfig::default();
+    let st = state(cfg);
+    let body = json!({"toolName":"exec","params":{}}).to_string();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-evidenceos-request-id",
+        HeaderValue::from_static("legacy-req-1"),
+    );
+
+    let resp = preflight_tool_call_impl(&st, &headers, body.as_bytes())
+        .await
+        .expect("alias should be accepted");
+    assert_eq!(resp.decision, "ALLOW");
+}
+
+#[tokio::test]
+async fn prefers_x_request_id_when_both_request_id_headers_present() {
+    let cfg = DaemonConfig::default();
+    let st = state(cfg);
+    let body = json!({"toolName":"exec","params":{}}).to_string();
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-request-id", HeaderValue::from_static("preferred-id"));
+    headers.insert(
+        "x-evidenceos-request-id",
+        HeaderValue::from_static("legacy-id"),
+    );
+
+    let resp = preflight_tool_call_impl(&st, &headers, body.as_bytes())
+        .await
+        .expect("x-request-id should be preferred when both are present");
+    assert_eq!(resp.decision, "ALLOW");
+}
+
+#[tokio::test]
 async fn principal_comes_from_auth_not_agent_id() {
     let cfg = DaemonConfig {
         preflight_require_bearer_token: Some("secret".to_string()),
