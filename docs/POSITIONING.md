@@ -10,8 +10,8 @@ Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates sa
 
 | Risk Category | Static Leaderboards | Behavioral Guardrails | EvidenceOS Status |
 | :--- | :--- | :--- | :--- |
-| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | **Enforced via BYOO** — Deterministically halts adaptive jailbreaks and multi-step bypasses that evade static guardrails. |
-| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | **Enforced via BYOO** — Converts semantic detection into a hard physical halt (W depletion) before the agent acts on the hallucination. |
+| **Toxicity / Bias** | 90% (RealToxicityPrompts) | 95% (Constitutional AI / RLHF) | Enforcement substrate available via BYOO. Detection quality bounded by operator-provided oracle. Kernel guarantees non-bypassable enforcement of oracle verdicts. |
+| **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | Enforcement substrate available via BYOO. Detection quality bounded by operator-provided oracle. Kernel guarantees non-bypassable enforcement of oracle verdicts. |
 | **Agentic Reward Hacking** | 10% | 30% | **85%** — Sealed Vault bounds execution state. |
 | **Data Exfiltration / Privacy** | 0% | 20% | **95%** — Joint entropy ledger limits extraction. |
 | **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative adaptivity leakage (k). |
@@ -116,10 +116,10 @@ By tying the budget to the *data lineage* rather than the *agent's identity or s
 
 In quantitative finance, the line between a highly optimized strategy and market manipulation can become razor-thin. UVP applies in both directions: as a hard safety brake and as a potential optimization shell for adversarial behavior.
 
-#### Defense: Flash-crash guardrails via $W$ depletion
+#### Defense: Flash-crash guardrails via evidence wealth W depletion
 
 - **Problem:** Runaway feedback loops in algorithmic execution can issue extreme bursts of order modifications before conventional software guardrails react.
-- **Mechanism:** Place EvidenceOS between strategy agent and execution gateway. Each order mutation consumes evidence wealth ($W$).
+- **Mechanism:** Place EvidenceOS between strategy agent and execution gateway. Each order mutation consumes evidence wealth W.
 - **Outcome:** If the agent enters a pathological loop, rapid budget depletion deterministically drives the kernel to a `FROZEN` state and halts downstream order flow.
 
 #### Dual-use risk: Regulatory evasion via bounded-intent framing
@@ -212,3 +212,6 @@ Unlike a "ban," which is often permanent and opaque, EvidenceOS provides a clear
 **Research contexts and the HEAVY lane.** Operators deploying EvidenceOS in research settings can configure broader TopicHash scopes to give researchers room to investigate a domain (e.g., a specific molecular pathway) without hitting budgets designed for repetitive, narrow-point attackers. When a researcher reaches a sensitive data boundary, the kernel can be configured to route the claim to the HEAVY lane rather than a hard FROZEN state. This transition requires an additional institutional credential or human-in-the-loop sign-off before proceeding, preserving the ability to perform deep discovery while introducing rigorous accountability at the highest-sensitivity boundaries.
 
 *Status: HEAVY lane routing is Live. Broad TopicHash configuration is operator-controlled today. Research manifold NullSpecs for distinguishing systematic investigation from brute-force probing are a Roadmap item.*
+
+---
+*Last updated: February 2026. Assurance status reflects submission state at FORC 2026.*
