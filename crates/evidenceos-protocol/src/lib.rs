@@ -41,6 +41,9 @@ pub type CapsuleHash = [u8; 32];
 pub const PROTOCOL_SEMVER: &str = "2.1.0";
 pub const PROTO_SHA256: &str = "6cde13b72b42e46d149364e18ad2f96b3874526f4e0c6a98d744dc11be183851";
 
+pub const MIN_DAEMON_VERSION: &str = "0.1.0-alpha";
+pub const MAX_DAEMON_VERSION_EXCLUSIVE: &str = "0.2.0";
+
 pub const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 pub const DOMAIN_CAPSULE_HASH: &[u8] = b"evidenceos:capsule:v2";
 pub const DOMAIN_STH_SIGNATURE_V1: &[u8] = b"evidenceos:sth:v1";
@@ -121,6 +124,108 @@ pub trait CanonicalCodec<const L: usize>: Sized {
     fn decode_symbol(bytes: CanonicalBytes<L>) -> Result<Self, ErrorCode>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatibilityMode {
+    Production,
+    Development,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonVersionCheck {
+    pub allowed_range: String,
+    pub actual_version: String,
+    pub message: String,
+}
+
+#[must_use]
+pub fn daemon_version_supported(version: &str) -> bool {
+    validate_daemon_version(version).is_ok()
+}
+
+pub fn validate_daemon_version(version: &str) -> Result<(), DaemonVersionCheck> {
+    let allowed_range = format!(">= {MIN_DAEMON_VERSION}, < {MAX_DAEMON_VERSION_EXCLUSIVE}");
+    let parsed = parse_daemon_version(version).map_err(|message| DaemonVersionCheck {
+        allowed_range: allowed_range.clone(),
+        actual_version: version.to_string(),
+        message,
+    })?;
+    let min = parse_daemon_version(MIN_DAEMON_VERSION).map_err(|message| DaemonVersionCheck {
+        allowed_range: allowed_range.clone(),
+        actual_version: version.to_string(),
+        message,
+    })?;
+    let max = parse_daemon_version(MAX_DAEMON_VERSION_EXCLUSIVE).map_err(|message| {
+        DaemonVersionCheck {
+            allowed_range: allowed_range.clone(),
+            actual_version: version.to_string(),
+            message,
+        }
+    })?;
+
+    if parsed < min || parsed >= max {
+        return Err(DaemonVersionCheck {
+            allowed_range: allowed_range.clone(),
+            actual_version: version.to_string(),
+            message: format!(
+                "daemon_version `{version}` is incompatible; expected {allowed_range}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn parse_daemon_version(input: &str) -> Result<(u64, u64, u64, u8), String> {
+    let mut parts = input.splitn(2, '-');
+    let core = parts
+        .next()
+        .ok_or_else(|| format!("invalid daemon_version `{input}`: missing core"))?;
+    let has_prerelease = parts.next().is_some();
+
+    let mut nums = core.split('.');
+    let major = nums
+        .next()
+        .ok_or_else(|| format!("invalid daemon_version `{input}`: missing major"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid daemon_version `{input}`: invalid major"))?;
+    let minor = nums
+        .next()
+        .ok_or_else(|| format!("invalid daemon_version `{input}`: missing minor"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid daemon_version `{input}`: invalid minor"))?;
+    let patch = nums
+        .next()
+        .ok_or_else(|| format!("invalid daemon_version `{input}`: missing patch"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid daemon_version `{input}`: invalid patch"))?;
+    if nums.next().is_some() {
+        return Err(format!(
+            "invalid daemon_version `{input}`: too many core components"
+        ));
+    }
+
+    let stability_rank = if has_prerelease { 0 } else { 1 };
+    Ok((major, minor, patch, stability_rank))
+}
+
+#[must_use]
+pub fn daemon_version_gate_message(check: &DaemonVersionCheck, mode: CompatibilityMode) -> String {
+    let base = format!(
+        "Daemon version handshake failed: {} (allowed range: {}; reported: {}).",
+        check.message, check.allowed_range, check.actual_version
+    );
+    match mode {
+        CompatibilityMode::Production => {
+            format!("{base} Refusing to start in production mode. Upgrade EvidenceOS/DiscOS to matching releases.")
+        }
+        CompatibilityMode::Development => {
+            format!(
+                "{base} Development mode override enabled; continuing with compatibility warning."
+            )
+        }
+    }
+}
+
 impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
@@ -130,9 +235,10 @@ impl fmt::Display for ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        sha256_domain, CanonicalBytes, CanonicalCodec, ErrorCode, DOMAIN_CLAIM_ID,
-        DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1, DOMAIN_REVOCATIONS_SNAPSHOT_V1,
-        DOMAIN_STH_SIGNATURE_V1,
+        daemon_version_gate_message, daemon_version_supported, sha256_domain,
+        validate_daemon_version, CanonicalBytes, CanonicalCodec, CompatibilityMode, ErrorCode,
+        DOMAIN_CLAIM_ID, DOMAIN_EPOCH_CONTROL_V1, DOMAIN_ORACLE_OPERATOR_RECORD_V1,
+        DOMAIN_REVOCATIONS_SNAPSHOT_V1, DOMAIN_STH_SIGNATURE_V1,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,5 +309,29 @@ mod tests {
             hex::encode(digest),
             "87793298a928d7506f292db3201b2c471623211631bbb31d22ae30bb28ea5ea5"
         );
+    }
+    #[test]
+    fn daemon_version_gate_accepts_supported_range() {
+        assert!(daemon_version_supported("0.1.0-alpha"));
+        assert!(validate_daemon_version("0.1.5").is_ok());
+    }
+
+    #[test]
+    fn daemon_version_gate_rejects_unsupported_range() {
+        let low = validate_daemon_version("0.0.9").expect_err("too old should fail");
+        assert!(low.message.contains("incompatible"));
+
+        let high = validate_daemon_version("0.2.0").expect_err("too new should fail");
+        assert!(high.message.contains("incompatible"));
+    }
+
+    #[test]
+    fn daemon_version_gate_messages_match_mode() {
+        let check = validate_daemon_version("0.2.1").expect_err("must fail");
+        let prod = daemon_version_gate_message(&check, CompatibilityMode::Production);
+        assert!(prod.contains("Refusing to start in production mode"));
+
+        let dev = daemon_version_gate_message(&check, CompatibilityMode::Development);
+        assert!(dev.contains("Development mode override enabled"));
     }
 }
