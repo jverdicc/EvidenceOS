@@ -10,6 +10,9 @@ license.workspace = true
 [features]
 default = []
 trial-harness = []
+kms-aws = ["dep:aws-config", "dep:aws-sdk-kms", "dep:tokio"]
+kms-gcp = ["dep:google-cloud-kms", "dep:google-cloud-googleapis", "dep:tokio"]
+kms-azure = ["dep:azure_identity", "dep:azure_security_keyvault_keys", "dep:tokio"]
 
 [dependencies]
 evidenceos-protocol = { path = "../evidenceos-protocol" }
@@ -33,6 +36,13 @@ wasmtime = { version = "25", default-features = false, features = ["cranelift", 
 tracing = "0.1"
 prost = "0.13"
 tonic = { version = "0.12", features = ["transport", "tls"] }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+aws-config = { version = "1", optional = true }
+aws-sdk-kms = { version = "1", optional = true }
+google-cloud-kms = { version = "0.6", optional = true }
+google-cloud-googleapis = { version = "0.15", optional = true }
+azure_identity = { version = "0.21", optional = true }
+azure_security_keyvault_keys = { version = "0.21", optional = true }
 
 [dev-dependencies]
 proptest = "1"

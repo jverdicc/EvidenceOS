@@ -70,10 +70,10 @@ The chart configures:
 
 KMS hook env vars:
 - `EVIDENCEOS_KMS_PROVIDER`: `mock`, `aws`, `gcp`, `azure`
-- `EVIDENCEOS_KMS_KEY_ID`: external key ID (optional for `mock`)
+- `EVIDENCEOS_KMS_KEY_ID`: required for cloud KMS providers; format `<kms-key-resource>|<base64-ciphertext>` (optional for `mock`)
 - `EVIDENCEOS_KMS_MOCK_KEY_HEX`: required only for `mock` provider.
 
-`aws/gcp/azure` hooks are currently explicit stubs returning `UNIMPLEMENTED`, intended for enterprise plugin extension.
+`aws/gcp/azure` providers are implemented behind feature flags (`kms-aws`, `kms-gcp`, `kms-azure`) and perform decrypt/unwrap against the configured cloud KMS.
 
 ## 5) Key permission requirements
 
