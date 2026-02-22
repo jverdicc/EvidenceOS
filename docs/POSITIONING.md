@@ -21,6 +21,22 @@ Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates sa
 
 **Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its k-budget and facing deterministic termination (`FROZEN`).
 
+### 1.2 The Paradigm Shift: Detection vs. Enforcement
+
+To understand the improvement EvidenceOS offers, one must distinguish between trying to "align" an agent's behavior and simply bounding its information-theoretic reach.
+
+| Feature | Current Industry Standard | EvidenceOS / UVP |
+| :--- | :--- | :--- |
+| **Foundation** | Probabilistic / Behavioral | Deterministic / Information-Theoretic |
+| **State** | Stateless / Session-based | Stateful / Ledger-based |
+| **Defense Strategy** | Detection & Redacting | Budgeting & Throttling |
+| **Primary Metric** | Semantic Intent (Guessing) | Transcript Support (Measuring) |
+| **Vulnerability** | Adaptive Probing & Swarms | **Hard-bounded by Physics** |
+
+
+
+**The Core Thesis of EvidenceOS:** Modern safety research has shown that **Intelligence cannot be perfectly aligned, but Information can be perfectly bounded.** EvidenceOS shifts the safety burden from the model's "alignment" to the kernel's "conservation math."
+
 **The Canonical Realization Map.** The mechanism that makes Theorem 1 mechanically enforceable (rather than conventionally assumed) is the Canonical Realization Map R: Y → {0,1}^ℓ. The kernel enforces four checkable conditions at the wire boundary: (i) alphabet closure — every oracle response maps to exactly one element; (ii) no padding leakage — the kernel rejects byte sequences encoding metadata beyond the canonical bits; (iii) non-canonical rejection — ambiguous encodings are rejected before the leakage charge is assessed; (iv) charge on canonical output only — leakage k_i = log2|Y_i| is assessed against the post-canonicalization alphabet, not internal state. Together, these ensure the transcript support size is exactly 2^k_tot, making Theorem 1 tight with respect to the kernel-visible interface.
 
 Status: Canonical realization is Live in the Rust kernel. See UVP paper Section 5.1.
