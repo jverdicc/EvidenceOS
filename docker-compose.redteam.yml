@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  evidenceos:
+    environment:
+      EVIDENCEOS_KEY_PROVIDER: "file"
+      EVIDENCEOS_PRODUCTION_MODE: "1"
+      EVIDENCEOS_STRICT_PLN: "1"
+      EVIDENCEOS_STRICT_PLN_FAST_EXECUTE_FLOOR_MS: "10"
+      EVIDENCEOS_STRICT_PLN_HEAVY_EXECUTE_FLOOR_MS: "10"
+      EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT: "1"
+      EVIDENCEOS_DENY_FREE_TEXT_OUTPUTS: "1"
+    command:
+      [
+        "--listen",
+        "0.0.0.0:50051",
+        "--data-dir",
+        "/data",
+        "--oracle-dir",
+        "/oracles",
+        "--allow-insecure-no-tls",
+        "--allow-plaintext-holdouts"
+      ]

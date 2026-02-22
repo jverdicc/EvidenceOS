@@ -58,6 +58,22 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+      - name: Build red-team harness
+        run: cargo build -p evidenceos-redteam
+
+      - name: Start red-team daemon fixture
+        run: docker compose -f docker-compose.yml -f docker-compose.redteam.yml up -d --build
+
+      - name: Run red-team suite (EvidenceOS)
+        run: cargo run -p evidenceos-redteam -- --mode evidenceos
+
+      - name: Run red-team suite (DiscOS subset)
+        run: cargo run -p evidenceos-redteam -- --mode discos-subset
+
+      - name: Stop red-team daemon fixture
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.redteam.yml down -v
+
       - name: Verify FORC10 reproducibility harness
         run: make -C artifacts/forc10 verify
 
