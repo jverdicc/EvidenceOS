@@ -14,17 +14,19 @@ Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates sa
 | **Single-Shot Hallucinations** | 80% (TruthfulQA) | 60% (System Prompts) | Enforcement substrate available via BYOO. Detection quality bounded by operator-provided oracle. Kernel guarantees non-bypassable enforcement of oracle verdicts. |
 | **Agentic Reward Hacking** | 10% | 30% | **85%** — Sealed Vault bounds execution state. |
 | **Data Exfiltration / Privacy** | 0% | 20% | **95%** — Joint entropy ledger limits extraction. |
-| **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative adaptivity leakage (k). |
-| **CBRN Proliferation** | 0% | 15% | **100%*** — Mathematical halt via W depletion & PhysHIR. |
+| **Capability Spillover** | 5% | 10% | **100%*** — Meters cumulative leakage k. |
+| **CBRN Proliferation** | 0% | 15% | **100%*** — Mathematical halt via evidence wealth W depletion & ASPEC. |
 
-*\* 100% coverage means EvidenceOS provides the only formal mechanism addressing this risk class. It does not mean deployment is complete or that all assumptions are resolved. Mechanism coverage is protocol-level. Sim-tested evidence is in TEST_COVERAGE_MATRIX.md. Live test evidence is in TEST_EVIDENCE.md. See NullSpec governance (Open Problem 1 in the paper) for current limitations.*
+**The Core Thesis of EvidenceOS:** Modern safety research has demonstrated that **Intelligence cannot be perfectly aligned, but Information can be perfectly bounded.** EvidenceOS shifts the safety burden from trying to "fix" the model's behavioral alignment to enforcing deterministic "conservation math" at the kernel level.
 
-**Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its k-budget and facing deterministic termination (`FROZEN`).
+### 1.1 The Logic of Soundness (Intuition for Theorem 1)
+EvidenceOS provides a mathematical floor for AI safety. The protocol ensures that the probability of a "False Pass" (an agent bypassing a safety boundary) is strictly bounded by the size of the interaction transcript. Even against a perfectly adaptive adversary, the risk of a safety violation is limited by: 
+$P(\text{False Pass}) \leq \alpha \cdot 2^{-k_{tot}}$
+
+This means the total leakage budget (k) sets a deterministic limit on an agent’s ability to "guess" or "brute-force" a restricted data boundary. 
+
 
 ### 1.2 The Paradigm Shift: Detection vs. Enforcement
-
-To understand the improvement EvidenceOS offers, one must distinguish between trying to "align" an agent's behavior and simply bounding its information-theoretic reach.
-
 | Feature | Current Industry Standard | EvidenceOS / UVP |
 | :--- | :--- | :--- |
 | **Foundation** | Probabilistic / Behavioral | Deterministic / Information-Theoretic |
@@ -35,11 +37,15 @@ To understand the improvement EvidenceOS offers, one must distinguish between tr
 
 
 
-**The Core Thesis of EvidenceOS:** Modern safety research has shown that **Intelligence cannot be perfectly aligned, but Information can be perfectly bounded.** EvidenceOS shifts the safety burden from the model's "alignment" to the kernel's "conservation math."
+### 1.3 ASPEC: Pre-execution Rejection (Zero-Cost Gates)
+Before any leakage is charged to the ledger, EvidenceOS rejects structurally invalid claims via **ASPEC** (Admissibility Specification for Proposing Executable Claims) checks. 
 
-**The Canonical Realization Map.** The mechanism that makes Theorem 1 mechanically enforceable (rather than conventionally assumed) is the Canonical Realization Map R: Y → {0,1}^ℓ. The kernel enforces four checkable conditions at the wire boundary: (i) alphabet closure — every oracle response maps to exactly one element; (ii) no padding leakage — the kernel rejects byte sequences encoding metadata beyond the canonical bits; (iii) non-canonical rejection — ambiguous encodings are rejected before the leakage charge is assessed; (iv) charge on canonical output only — leakage k_i = log2|Y_i| is assessed against the post-canonicalization alphabet, not internal state. Together, these ensure the transcript support size is exactly 2^k_tot, making Theorem 1 tight with respect to the kernel-visible interface.
+**Live ASPEC Checks:**
+- **Forbidden Imports:** Rejects any claim attempting to access network, system time, or external entropy.
+- **Complexity Bounds:** Rejects claims with loops, recursion, or memory growth beyond static bounds.
+- **Output Contracts:** Rejects raw float outputs in sealed lanes, enforcing symbolic quantization.
 
-Status: Canonical realization is Live in the Rust kernel. See UVP paper Section 5.1.
+*Status: ASPEC checks and the Soundness Floor are Live. Formal proof of Theorem 1 is under peer review (FORC 2026).*
 
 ---
 
@@ -66,7 +72,7 @@ EvidenceOS is inherently dual-use. Any mechanism that mathematically meters and 
 In an unbounded system, a malicious agent might probe messily, eventually tripping heuristic anomaly detectors due to noisy, high-volume requests. However, an agent operating under EvidenceOS that knows its exact leakage budget (e.g., k = 32 bits) will stop being noisy. It treats the budget as a strict resource constraint, internally simulating the mathematically optimal sequence of queries to extract the 32 absolute most valuable bits of the holdout dataset without wasting a single query on low-value information. 
 
 **The Stealth Factor:**
-This introduces the risk of perfect stealth. If an adversary or compromised agent knows the exact boundary where EvidenceOS transitions to a `HEAVY` or `FROZEN` state, they can mathematically guarantee their probing stays beneath standard Security Operations Center (SOC) anomaly detection thresholds. They can execute a slow, highly optimized extraction campaign with 100% certainty that they will not trigger the alarm.
+This introduces the risk of perfect stealth. If an adversary or compromised agent can estimate the exact boundary where EvidenceOS transitions to `HEAVY` review or `FROZEN` rejection, they can mathematically tune probing to stay below conventional Security Operations Center (SOC) anomaly thresholds. They can execute a slow, highly optimized extraction campaign that remains low-noise until the deterministic boundary is reached.
 
 **The Architectural Trade-off:**
 While this creates a perfectly optimized environment for bounded extraction, it is an explicit and necessary systems engineering trade-off. 
@@ -106,7 +112,7 @@ EvidenceOS defeats this because it is a **stateful kernel**. Traditional APIs tr
 
 Here is how EvidenceOS physically enforces the budget across distributed boundaries:
 
-* **Across Different Users (TopicHash Budgeting):** When multiple agents ask questions, EvidenceOS does not just check their individual account limits. The kernel hashes the *semantic topic* and the *target holdout dataset* of the claim into a `TopicHash`. If 1,000 different agent identities ask for pieces of the same restricted biological sequence, the kernel maps them all to the same `TopicHash`. All 1,000 identities are charged against one single, shared leakage pool. Once the topic budget is saturated, the entire swarm is locked out.
+* **Across Different Users (TopicHash Budgeting):** When multiple agents ask questions, EvidenceOS does not just check their individual account limits. The kernel maps each claim into a pre-committed `TopicHash` keyed by semantic topic and target holdout lineage. If 1,000 different agent identities ask for pieces of the same restricted biological sequence, the kernel maps them all to the same `TopicHash`. All 1,000 identities are charged against one single, shared leakage pool. Once the topic budget is saturated, the entire swarm is locked out.
   
 * **Across Sessions and Variable Time (The Persistent Ledger):**
   Standard API rate limits reset at midnight or when a session token expires. EvidenceOS budgets do not reset with time. Every query's budget consumption is written to the **Conservation Ledger** and permanently anchored in the append-only Evidence Transparency Log (ETL). If an adversary asks one question today, disconnects, and comes back three months later with a new session ID to ask the second question, the ledger simply resumes the math from where it left off. 
@@ -198,7 +204,7 @@ As queries arrive, the kernel recognizes that Identity A and Identity B are char
 **Adversary:** A trader builds an AI to "reverse-engineer" a competitor’s signal. The AI makes tiny, iterative changes to its strategy and looks for high-precision changes in the Oracle score to find a "gradient" to optimize.
 **The Trigger:** **Metric Stall (Hysteresis)**.
 EvidenceOS quantizes oracle outputs into coarse buckets and applies hysteresis: if a mutation is smaller than the configured threshold Δσ, the kernel returns the previous bucket unchanged. The agent receives no gradient signal from small moves. To obtain new information it must make a large non-local jump, consuming a full k charge for a single new symbol.
-**The Outcome:** The AI cannot "feel" the gradient. It either receives zero new information or is forced to burn its budget on noisy, non-local jumps. The certification barrier outpaces the agent, and the kernel enters `HEAVY` lane lock-down.
+**The Outcome:** The AI cannot "feel" the gradient. It either receives zero new information or is forced to burn leakage k on noisy, non-local jumps. The certification barrier outpaces the agent, and the kernel escalates into the `HEAVY` lane for supervised continuation or deterministic freeze.
 
 
 
@@ -253,10 +259,9 @@ Unlike a "ban," which is often permanent and opaque, EvidenceOS provides a clear
 
 *Status: Architecture specified. Budget parameter guidance is a roadmap item. See docs/NULLSPEC.md for current NullSpec contract configuration.*
 
-**Research contexts and the HEAVY lane.** Operators deploying EvidenceOS in research settings can configure broader TopicHash scopes to give researchers room to investigate a domain (e.g., a specific molecular pathway) without hitting budgets designed for repetitive, narrow-point attackers. When a researcher reaches a sensitive data boundary, the kernel can be configured to route the claim to the HEAVY lane rather than a hard FROZEN state. This transition requires an additional institutional credential or human-in-the-loop sign-off before proceeding, preserving the ability to perform deep discovery while introducing rigorous accountability at the highest-sensitivity boundaries.
+**Research contexts and the HEAVY lane.** Operators deploying EvidenceOS in research settings can configure broader TopicHash scopes to give researchers room to investigate a domain (e.g., a specific molecular pathway) without hitting budgets designed for repetitive, narrow-point attackers. When a researcher reaches a sensitive data boundary, the kernel can be configured to route the claim to the HEAVY lane rather than immediately issuing a hard FROZEN state. This transition requires an additional institutional credential or human-in-the-loop sign-off before proceeding, preserving the ability to perform deep discovery while introducing rigorous accountability at the highest-sensitivity boundaries.
 
 *Status: HEAVY lane routing is Live. Broad TopicHash configuration is operator-controlled today. Research manifold NullSpecs for distinguishing systematic investigation from brute-force probing are a Roadmap item.*
 
 ---
-*Last updated: February 2026. Assurance status reflects
-submission state at FORC 2026.*
+*Last updated: February 2026. Assurance status reflects submission state at FORC 2026.*
