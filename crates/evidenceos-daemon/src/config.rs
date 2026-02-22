@@ -17,6 +17,7 @@ pub struct DaemonConfig {
     pub envelope_packs_dir: PathBuf,
     pub trusted_envelope_issuer_keys: Option<PathBuf>,
     pub require_signed_envelopes: bool,
+    pub trial_harness_enabled: bool,
 }
 
 impl Default for DaemonConfig {
@@ -39,6 +40,7 @@ impl Default for DaemonConfig {
             envelope_packs_dir: PathBuf::from("./data/envelope-packs"),
             trusted_envelope_issuer_keys: None,
             require_signed_envelopes: false,
+            trial_harness_enabled: false,
         }
     }
 }

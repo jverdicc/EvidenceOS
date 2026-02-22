@@ -130,6 +130,8 @@ struct Args {
     trusted_envelope_issuer_keys: Option<String>,
     #[arg(long)]
     require_signed_envelopes: Option<bool>,
+    #[arg(long, default_value_t = false)]
+    enable_trials: bool,
 }
 
 #[tokio::main]
@@ -165,6 +167,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(
             "insecure synthetic holdout mode enabled; do not use in production environments"
         );
+    }
+    let trial_harness_enabled = args.enable_trials
+        || std::env::var("EVIDENCEOS_TRIAL_HARNESS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    if trial_harness_enabled {
+        std::env::set_var("EVIDENCEOS_TRIAL_HARNESS", "1");
     }
     if let Some(default_holdout_k_bits_budget) = args.default_holdout_k_bits_budget {
         std::env::set_var(
@@ -369,6 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .map(std::path::PathBuf::from),
         require_signed_envelopes,
+        trial_harness_enabled,
     };
 
     let (shutdown_tx, _) = broadcast::channel::<()>(2);
