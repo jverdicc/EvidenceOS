@@ -1,8 +1,9 @@
-# DiscOS Trial Harness Analysis
+# EvidenceOS Epistemic Trial Harness Analysis
 
 This analysis package provides a userland pipeline for survival analysis and CONSORT-style flow artifacts from an ETL export.
 
 For the statistical contract (trial unit definitions, endpoint mapping, competing risks assumptions, and concealment limits), see [`docs/EPISTEMIC_TRIAL_HARNESS.md`](EPISTEMIC_TRIAL_HARNESS.md).
+For the blessed analysis entrypoint for this repository, use this document's one-command workflow (`python -m analysis.survival ...`) and treat it as the canonical pipeline.
 
 ## Install
 
