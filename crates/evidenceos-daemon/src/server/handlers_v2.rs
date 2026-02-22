@@ -627,12 +627,15 @@ impl EvidenceOsV2 for EvidenceOsService {
                 capsule.trial_arm_parameters_hash_hex =
                     Some(hex::encode(assignment.arm_parameters_hash));
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+                let trial_config_hash_hex = self.trial_config_hash.map(hex::encode);
+                capsule.trial_config_hash_hex = trial_config_hash_hex.clone();
                 capsule.trial = Some(TrialMetadata {
                     intervention_id: Some(assignment.intervention_id.clone()),
                     intervention_version: Some(assignment.intervention_version.clone()),
                     arm_parameters_hash_hex: Some(hex::encode(assignment.arm_parameters_hash)),
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
+                    trial_config_hash_hex,
                 });
             }
             capsule.state = if claim.state == ClaimState::Certified {
@@ -1572,12 +1575,15 @@ impl EvidenceOsV2 for EvidenceOsService {
                 capsule.trial_arm_parameters_hash_hex =
                     Some(hex::encode(assignment.arm_parameters_hash));
                 capsule.trial_nonce_hex = Some(hex::encode(assignment.trial_nonce));
+                let trial_config_hash_hex = self.trial_config_hash.map(hex::encode);
+                capsule.trial_config_hash_hex = trial_config_hash_hex.clone();
                 capsule.trial = Some(TrialMetadata {
                     intervention_id: Some(assignment.intervention_id.clone()),
                     intervention_version: Some(assignment.intervention_version.clone()),
                     arm_parameters_hash_hex: Some(hex::encode(assignment.arm_parameters_hash)),
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
+                    trial_config_hash_hex,
                 });
             }
             capsule.state = if claim.state == ClaimState::Certified {

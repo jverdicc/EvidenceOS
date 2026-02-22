@@ -28,6 +28,7 @@ pub struct LifecycleEvent<'a> {
     pub epoch: u64,
     pub from: &'a str,
     pub to: &'a str,
+    pub trial_config_hash_hex: Option<&'a str>,
 }
 
 #[derive(Debug, Default)]

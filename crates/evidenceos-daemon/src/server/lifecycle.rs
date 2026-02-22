@@ -73,6 +73,7 @@ impl EvidenceOsService {
         Self::transition_claim_internal(claim, to)?;
         let claim_id = hex::encode(claim.claim_id);
         let topic_id = hex::encode(claim.topic_id);
+        let trial_config_hash_hex = self.trial_config_hash.map(hex::encode);
         let event = LifecycleEvent {
             claim_id: &claim_id,
             topic_id: &topic_id,
@@ -84,6 +85,7 @@ impl EvidenceOsService {
             epoch: claim.epoch_counter,
             from: Self::state_name(from),
             to: Self::state_name(to),
+            trial_config_hash_hex: trial_config_hash_hex.as_deref(),
         };
         self.telemetry.lifecycle_event(&event);
         let remaining = claim.ledger.k_bits_budget().map_or(0.0, |budget| {

@@ -157,6 +157,8 @@ pub struct TrialMetadata {
     pub arm_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_nonce_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_config_hash_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,6 +224,8 @@ pub struct ClaimCapsule {
     pub trial_nonce_hex: Option<String>,
     #[serde(default)]
     pub trial_commitment_hash_hex: Option<String>,
+    #[serde(default)]
+    pub trial_config_hash_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<TrialMetadata>,
     pub environment_attestations: EnvironmentAttestations,
@@ -386,6 +390,7 @@ impl ClaimCapsule {
             trial_arm_parameters_hash_hex: None,
             trial_nonce_hex: None,
             trial_commitment_hash_hex: None,
+            trial_config_hash_hex: None,
             trial: None,
             environment_attestations: EnvironmentAttestations {
                 runtime_version,

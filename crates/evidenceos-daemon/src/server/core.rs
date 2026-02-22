@@ -46,7 +46,9 @@ use crate::public_error::{public_status, PublicErrorCode};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::trial::{
-    validate_and_build_delta, BaselineCovariates, StratumKey, TrialAssignment, TrialRouter,
+    default_trial_arms_config, interventions_from_trial_config, load_trial_arms_config,
+    validate_and_build_delta, AssignmentMode, BaselineCovariates, StratumKey, TrialAssignment,
+    TrialRouter,
 };
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
@@ -912,6 +914,7 @@ pub struct EvidenceOsService {
     tee_attestor: Option<Arc<dyn TeeAttestor>>,
     domain_safety: DomainSafetyConfig,
     trial_router: Arc<TrialRouter>,
+    trial_config_hash: Option<[u8; 32]>,
     admission_provider: Arc<dyn AdmissionProvider>,
     access_credit_pricing: AccessCreditPricing,
     operator_principals: Vec<String>,
@@ -1290,6 +1293,54 @@ impl EvidenceOsService {
             .transpose()?
             .unwrap_or(HoldoutPoolScope::Global);
 
+        let trial_config_path = std::env::var("EVIDENCEOS_TRIAL_ARMS_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("config/trial_arms.json"));
+        let loaded_trial_config = if trial_config_path.exists() {
+            Some(load_trial_arms_config(&trial_config_path)?)
+        } else {
+            let fallback = default_trial_arms_config();
+            let canonical = evidenceos_core::capsule::canonical_json(&fallback)
+                .map_err(|_| Status::internal("trial config canonicalization failed"))?;
+            let mut h = Sha256::new();
+            h.update(canonical);
+            let digest = h.finalize();
+            let mut config_hash = [0u8; 32];
+            config_hash.copy_from_slice(&digest);
+            Some(crate::trial::LoadedTrialConfig {
+                config: fallback,
+                config_hash,
+            })
+        };
+        let (trial_router, trial_config_hash) = if let Some(loaded) = loaded_trial_config {
+            let arm_count = loaded.config.arms.len() as u16;
+            let blocked = matches!(loaded.config.assignment_mode, AssignmentMode::Blocked);
+            let block_size = loaded.config.block_size.unwrap_or(usize::from(arm_count));
+            let interventions = interventions_from_trial_config(&loaded.config);
+            tracing::info!(
+                event = "trial_config_loaded",
+                trial_config_path = %trial_config_path.display(),
+                trial_config_hash_hex = %hex::encode(loaded.config_hash),
+                arm_count,
+                assignment_mode = if blocked { "blocked" } else { "hashed" },
+                stratify = loaded.config.stratify,
+                block_size,
+                "loaded epistemic trial config"
+            );
+            (
+                Arc::new(TrialRouter::with_options(
+                    arm_count,
+                    blocked,
+                    loaded.config.stratify,
+                    block_size,
+                    interventions,
+                )?),
+                Some(loaded.config_hash),
+            )
+        } else {
+            (Arc::new(TrialRouter::new(1, false, HashMap::new())?), None)
+        };
+
         Ok(Self {
             state,
             insecure_v1_enabled,
@@ -1308,7 +1359,8 @@ impl EvidenceOsService {
             enforce_operator_provenance,
             tee_attestor,
             domain_safety,
-            trial_router: Arc::new(TrialRouter::new(2, true, HashMap::new())?),
+            trial_router,
+            trial_config_hash,
             admission_provider,
             access_credit_pricing: AccessCreditPricing::from_env(),
             operator_principals,
@@ -3284,6 +3336,82 @@ mod tests {
                 .expect("trial assignment")
         };
         assert_eq!(first_assignment, second_assignment);
+    }
+
+    #[tokio::test]
+    async fn create_claim_v2_trial_interventions_scale_k_budget_between_arms() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-trial-scale";
+        let handle = [6u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let mut req_a = claim_request(holdout_ref);
+        req_a.claim_name = "claim-a".to_string();
+        req_a.signals.as_mut().expect("signals").semantic_hash = vec![11; 32];
+        let resp_a =
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_a))
+                .await
+                .expect("create a");
+        let claim_a = parse_hash32(&resp_a.get_ref().claim_id, "claim_id").expect("claim a id");
+
+        let mut req_b = claim_request(holdout_ref);
+        req_b.claim_name = "claim-b".to_string();
+        req_b.signals.as_mut().expect("signals").semantic_hash = vec![12; 32];
+        let resp_b =
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_b))
+                .await
+                .expect("create b");
+        let claim_b = parse_hash32(&resp_b.get_ref().claim_id, "claim_id").expect("claim b id");
+
+        let (arm_a, budget_a) = {
+            let claims = svc.state.claims.lock();
+            let claim = claims.get(&claim_a).expect("claim a");
+            (
+                claim
+                    .trial_assignment
+                    .as_ref()
+                    .expect("trial assignment a")
+                    .arm_id,
+                claim.ledger.k_bits_budget().expect("k budget a"),
+            )
+        };
+        let (arm_b, budget_b) = {
+            let claims = svc.state.claims.lock();
+            let claim = claims.get(&claim_b).expect("claim b");
+            (
+                claim
+                    .trial_assignment
+                    .as_ref()
+                    .expect("trial assignment b")
+                    .arm_id,
+                claim.ledger.k_bits_budget().expect("k budget b"),
+            )
+        };
+
+        assert_ne!(arm_a, arm_b);
+        let (control_budget, treatment_budget) = if arm_a == 0 {
+            (budget_a, budget_b)
+        } else {
+            (budget_b, budget_a)
+        };
+        assert!((treatment_budget - (control_budget * 0.75)).abs() < 1e-6);
     }
 
     #[tokio::test]
