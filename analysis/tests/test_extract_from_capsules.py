@@ -24,11 +24,17 @@ def _write_etl(path: Path, records: list[dict]) -> Path:
     return path
 
 
-def _capsule(claim_id: str, k_bits_total: float, decision: int = 1, frozen: bool | None = None):
+def _capsule(
+    claim_id: str,
+    k_bits_total: float,
+    decision: int = 1,
+    frozen: bool | None = None,
+    state: str | None = None,
+):
     ledger = {"k_bits_total": k_bits_total}
     if frozen is not None:
         ledger["frozen"] = frozen
-    return {
+    record = {
         "schema": "evidenceos.v2.claim_capsule",
         "claim_id_hex": claim_id,
         "topic_id_hex": "topic-1",
@@ -41,6 +47,9 @@ def _capsule(claim_id: str, k_bits_total: float, decision: int = 1, frozen: bool
         "holdout_handle_hash_hex": "abcd",
         "nullspec_id_hex": "nullspec-1",
     }
+    if state is not None:
+        record["state"] = state
+    return record
 
 
 def test_extractor_emits_kbits_and_frozen(tmp_path: Path) -> None:
@@ -60,6 +69,19 @@ def test_extractor_emits_kbits_and_frozen(tmp_path: Path) -> None:
     assert rows[1]["k_bits_total"] == 3.0
     assert rows[1]["frozen_event"] == 1
     assert out.exists()
+
+
+def test_extractor_treats_frozen_state_as_event_when_ledger_flag_missing(tmp_path: Path) -> None:
+    etl = _write_etl(
+        tmp_path / "capsules-frozen-state.etl",
+        [_capsule("c4", 9.0, decision=1, frozen=None, state="FROZEN")],
+    )
+    out = tmp_path / "capsules-frozen-state.csv"
+    rows = run_extraction(etl, out)
+
+    assert len(rows) == 1
+    assert rows[0]["frozen_event"] == 1
+    assert rows[0]["outcome"] == "FROZEN"
 
 
 def test_missing_required_field_fails_closed(tmp_path: Path) -> None:

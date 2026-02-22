@@ -31,6 +31,7 @@ pub enum ClaimState {
     Revoked,
     Tainted,
     Stale,
+    #[serde(alias = "FROZEN")]
     Frozen,
 }
 

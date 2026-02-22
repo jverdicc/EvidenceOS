@@ -231,7 +231,7 @@ fn outcome_from_claim_state(state: ClaimState) -> Option<&'static str> {
         ClaimState::Certified => Some("CERTIFIED"),
         ClaimState::Revoked => Some("REVOKED"),
         ClaimState::Tainted => Some("TAINTED"),
-        ClaimState::Frozen => Some("FREEZE"),
+        ClaimState::Frozen => Some("FROZEN"),
         ClaimState::Stale => Some("STALE"),
         ClaimState::Uncommitted | ClaimState::Sealed | ClaimState::Executing => None,
     }
@@ -630,7 +630,7 @@ mod tests {
         let db = temp.path().join("index.sqlite");
         build_index(&etl, &db).expect("index build");
 
-        let query = "SELECT COUNT(*) FROM settlements WHERE arm_id = 7 AND outcome = 'FREEZE';";
+        let query = "SELECT COUNT(*) FROM settlements WHERE arm_id = 7 AND outcome = 'FROZEN';";
         let out = Command::new("sqlite3")
             .arg(&db)
             .arg(query)
@@ -639,6 +639,72 @@ mod tests {
         assert!(out.status.success());
         let rows = String::from_utf8(out.stdout).expect("utf8");
         assert_eq!(rows.trim(), "1");
+    }
+
+    #[test]
+    fn indexes_capsule_with_uppercase_frozen_state() {
+        let temp = TempDir::new().expect("temp");
+        let etl = temp.path().join("etl.log");
+        let mut f = File::create(&etl).expect("etl");
+
+        let capsule = serde_json::json!({
+            "schema": CLAIM_CAPSULE_SCHEMA,
+            "claim_id_hex": "11",
+            "topic_id_hex": "22",
+            "output_schema_id": "legacy/v1",
+            "code_ir_manifests": [],
+            "dependency_capsule_hashes": [],
+            "structured_output_hash_hex": "aa",
+            "canonical_output_hash_hex": "bb",
+            "kout_bits_upper_bound": 0,
+            "wasm_hash_hex": "cc",
+            "judge_trace_hash_hex": "dd",
+            "holdout_ref": "h",
+            "holdout_commitment_hex": "ee",
+            "ledger": {
+                "alpha": 0.1,
+                "log_alpha_target": 0.0,
+                "alpha_prime": 0.1,
+                "log_alpha_prime": 0.0,
+                "k_bits_total": 2.0,
+                "barrier_threshold": 0.0,
+                "barrier": 0.0,
+                "wealth": 0.0,
+                "w_max": 0.0,
+                "epsilon_total": 0.0,
+                "delta_total": 0.0,
+                "access_credit_spent": 0.0,
+                "compute_fuel_spent": 0.0
+            },
+            "ledger_receipts": [],
+            "e_value": 1.0,
+            "certified": false,
+            "decision": 1,
+            "reason_codes": [],
+            "environment_attestations": {
+                "runtime_version": "r",
+                "aspec_version": "a",
+                "protocol_version": "p"
+            },
+            "state": "FROZEN",
+            "trial_arm_id": 9,
+            "trial_intervention_id": "int-9"
+        });
+
+        append_record(&mut f, &serde_json::to_vec(&capsule).expect("capsule"));
+        drop(f);
+
+        let db = temp.path().join("index.sqlite");
+        build_index(&etl, &db).expect("index build");
+
+        let out = Command::new("sqlite3")
+            .arg(&db)
+            .arg("SELECT outcome FROM settlements WHERE arm_id = 9;")
+            .output()
+            .expect("sqlite3 query");
+        assert!(out.status.success());
+        let row = String::from_utf8(out.stdout).expect("utf8");
+        assert_eq!(row.trim(), "FROZEN");
     }
 
     #[test]
