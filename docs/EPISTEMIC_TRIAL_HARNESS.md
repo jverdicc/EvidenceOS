@@ -108,3 +108,48 @@ Before running a trial harness report, lock:
 - endpoint mapping (which ETL outcomes map to primary/competing/censoring),
 - interference mitigation plan (isolation vs cluster-robust analysis),
 - censoring assumptions and sensitivity analyses.
+
+## 8) Configuring trial arms (runtime)
+
+EvidenceOS now supports config-driven epistemic interventions via `config/trial_arms.json`.
+
+- Default path: `config/trial_arms.json`
+- Override path: `EVIDENCEOS_TRIAL_ARMS_CONFIG=/path/to/trial_arms.json`
+
+Schema:
+
+- `arms`: array of `{ arm_id, intervention_id, intervention_version, actions, descriptors, arm_parameters }`
+- `assignment_mode`: `"hashed"` or `"blocked"`
+- `stratify`: `true|false`
+- `block_size`: required for `blocked` mode
+
+`actions` are typed objects:
+
+- `{ "type": "scale_alpha_ppm", "ppm": 1000000 }`
+- `{ "type": "scale_access_credit_ppm", "ppm": 1000000 }`
+- `{ "type": "scale_k_bits_budget_ppm", "ppm": 750000 }`
+
+Built-in sample (`config/trial_arms.json`) defines:
+
+- control arm: identity scaling (1.0x alpha/access-credit/k-budget)
+- treatment arm: tightened `k` budget (`k_bits_scale_ppm = 750000`)
+
+Labs can add additional arms without Rust code changes by editing this file.
+
+## 9) Enable/disable behavior and auditability
+
+- At startup, EvidenceOS loads the trial config and logs `trial_config_hash_hex`.
+- The same hash is carried into telemetry lifecycle events and claim capsules (`trial_config_hash_hex`) to prevent silent configuration swaps.
+- If no external config file exists, daemon uses the built-in two-arm control/treatment defaults.
+
+## 10) Reproducing assignment from `trial_nonce` in hashed mode
+
+For `assignment_mode = "hashed"`, assignment is deterministic:
+
+```text
+arm_id = SHA256("evidenceos:trial_assignment:v1" || trial_nonce || stratum_bytes)[0..2] mod arm_count
+```
+
+`stratum_bytes` is a tagged encoding of lane, holdout family, oracle ID, and nullspec ID.
+
+Given `(trial_nonce_hex, stratum, arm_count)`, replaying the function above reproduces arm assignment exactly.

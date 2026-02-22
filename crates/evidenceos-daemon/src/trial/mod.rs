@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use getrandom::getrandom;
@@ -88,6 +89,176 @@ pub struct TrialAssignment {
     pub arm_parameters_hash: [u8; 32],
     pub descriptors: InterventionDescriptors,
     pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentMode {
+    Hashed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrialArmConfig {
+    pub arm_id: u16,
+    pub intervention_id: String,
+    pub intervention_version: String,
+    pub actions: Vec<InterventionActionConfig>,
+    pub descriptors: InterventionDescriptors,
+    pub arm_parameters: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrialArmsConfig {
+    pub arms: Vec<TrialArmConfig>,
+    pub assignment_mode: AssignmentMode,
+    pub stratify: bool,
+    pub block_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedTrialConfig {
+    pub config: TrialArmsConfig,
+    pub config_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InterventionActionConfig {
+    ScaleAlphaPpm { ppm: u32 },
+    ScaleAccessCreditPpm { ppm: u32 },
+    ScaleKBitsBudgetPpm { ppm: u32 },
+    ResetLedgerTotals,
+    SetFrozenState { frozen: bool },
+}
+
+impl InterventionActionConfig {
+    fn into_action(self) -> InterventionAction {
+        match self {
+            Self::ScaleAlphaPpm { ppm } => InterventionAction::ScaleAlphaPpm(ppm),
+            Self::ScaleAccessCreditPpm { ppm } => InterventionAction::ScaleAccessCreditPpm(ppm),
+            Self::ScaleKBitsBudgetPpm { ppm } => InterventionAction::ScaleKBitsBudgetPpm(ppm),
+            Self::ResetLedgerTotals => InterventionAction::ResetLedgerTotals,
+            Self::SetFrozenState { frozen } => InterventionAction::SetFrozenState(frozen),
+        }
+    }
+}
+
+pub fn load_trial_arms_config(path: &Path) -> Result<LoadedTrialConfig, Status> {
+    let raw =
+        std::fs::read(path).map_err(|_| Status::failed_precondition("trial config read failed"))?;
+    let parsed = serde_json::from_slice::<TrialArmsConfig>(&raw)
+        .map_err(|_| Status::invalid_argument("invalid trial_arms.json schema"))?;
+    validate_trial_arms_config(&parsed)?;
+    let canonical = evidenceos_core::capsule::canonical_json(&parsed)
+        .map_err(|_| Status::invalid_argument("trial config canonicalization failed"))?;
+    let mut h = Sha256::new();
+    h.update(canonical);
+    let digest = h.finalize();
+    let mut config_hash = [0u8; 32];
+    config_hash.copy_from_slice(&digest);
+    Ok(LoadedTrialConfig {
+        config: parsed,
+        config_hash,
+    })
+}
+
+fn validate_trial_arms_config(config: &TrialArmsConfig) -> Result<(), Status> {
+    if config.arms.is_empty() {
+        return Err(Status::invalid_argument(
+            "trial config requires at least one arm",
+        ));
+    }
+    let mut by_arm = HashMap::new();
+    for arm in &config.arms {
+        if arm.intervention_id.trim().is_empty() || arm.intervention_version.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "intervention_id and intervention_version are required",
+            ));
+        }
+        if by_arm.insert(arm.arm_id, ()).is_some() {
+            return Err(Status::invalid_argument("duplicate arm_id in trial config"));
+        }
+        let actions = arm
+            .actions
+            .clone()
+            .into_iter()
+            .map(InterventionActionConfig::into_action)
+            .collect::<Vec<_>>();
+        let _ = validate_and_build_delta(&actions)?;
+        let _ = hash_arm_parameters(&arm.arm_parameters)?;
+    }
+    if matches!(config.assignment_mode, AssignmentMode::Blocked) {
+        let block_size = config
+            .block_size
+            .ok_or_else(|| Status::invalid_argument("block_size is required in blocked mode"))?;
+        if block_size == 0 || block_size % config.arms.len() != 0 {
+            return Err(Status::invalid_argument(
+                "block_size must be > 0 and divisible by number of arms",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigurableIntervention {
+    intervention_id: String,
+    intervention_version: String,
+    actions: Vec<InterventionAction>,
+    descriptors: InterventionDescriptors,
+    arm_parameters: Value,
+}
+
+impl ConfigurableIntervention {
+    pub fn from_arm_config(arm: &TrialArmConfig) -> Self {
+        Self {
+            intervention_id: arm.intervention_id.clone(),
+            intervention_version: arm.intervention_version.clone(),
+            actions: arm
+                .actions
+                .clone()
+                .into_iter()
+                .map(InterventionActionConfig::into_action)
+                .collect(),
+            descriptors: arm.descriptors.clone(),
+            arm_parameters: arm.arm_parameters.clone(),
+        }
+    }
+}
+
+impl EpistemicIntervention for ConfigurableIntervention {
+    fn id(&self) -> &str {
+        &self.intervention_id
+    }
+
+    fn version(&self) -> &str {
+        &self.intervention_version
+    }
+
+    fn arm_parameters(&self) -> Value {
+        self.arm_parameters.clone()
+    }
+
+    fn oracle_policy(&self) -> OraclePolicyDescriptor {
+        self.descriptors.oracle_policy.clone()
+    }
+
+    fn dependence_policy(&self) -> DependencePolicyDescriptor {
+        self.descriptors.dependence_policy.clone()
+    }
+
+    fn nullspec_policy(&self) -> NullSpecPolicyDescriptor {
+        self.descriptors.nullspec_policy.clone()
+    }
+
+    fn output_policy(&self) -> OutputPolicyDescriptor {
+        self.descriptors.output_policy.clone()
+    }
+
+    fn actions(&self) -> Vec<InterventionAction> {
+        self.actions.clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -522,6 +693,90 @@ impl TrialRouter {
     }
 }
 
+pub fn default_trial_arms_config() -> TrialArmsConfig {
+    TrialArmsConfig {
+        arms: vec![
+            TrialArmConfig {
+                arm_id: 0,
+                intervention_id: "control.identity_scaling".to_string(),
+                intervention_version: "v1".to_string(),
+                actions: vec![
+                    InterventionActionConfig::ScaleAlphaPpm { ppm: 1_000_000 },
+                    InterventionActionConfig::ScaleAccessCreditPpm { ppm: 1_000_000 },
+                    InterventionActionConfig::ScaleKBitsBudgetPpm { ppm: 1_000_000 },
+                ],
+                descriptors: InterventionDescriptors {
+                    oracle_policy: OraclePolicyDescriptor {
+                        policy_id: "oracle.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    dependence_policy: DependencePolicyDescriptor {
+                        policy_id: "dependence.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    nullspec_policy: NullSpecPolicyDescriptor {
+                        policy_id: "nullspec.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    output_policy: OutputPolicyDescriptor {
+                        policy_id: "output.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                },
+                arm_parameters: serde_json::json!({"alpha_scale_ppm":1_000_000,"access_credit_scale_ppm":1_000_000,"k_bits_scale_ppm":1_000_000}),
+            },
+            TrialArmConfig {
+                arm_id: 1,
+                intervention_id: "treatment.tighten_k_budget".to_string(),
+                intervention_version: "v1".to_string(),
+                actions: vec![
+                    InterventionActionConfig::ScaleAlphaPpm { ppm: 1_000_000 },
+                    InterventionActionConfig::ScaleAccessCreditPpm { ppm: 1_000_000 },
+                    InterventionActionConfig::ScaleKBitsBudgetPpm { ppm: 750_000 },
+                ],
+                descriptors: InterventionDescriptors {
+                    oracle_policy: OraclePolicyDescriptor {
+                        policy_id: "oracle.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    dependence_policy: DependencePolicyDescriptor {
+                        policy_id: "dependence.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    nullspec_policy: NullSpecPolicyDescriptor {
+                        policy_id: "nullspec.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                    output_policy: OutputPolicyDescriptor {
+                        policy_id: "output.default.v1".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                },
+                arm_parameters: serde_json::json!({"alpha_scale_ppm":1_000_000,"access_credit_scale_ppm":1_000_000,"k_bits_scale_ppm":750_000}),
+            },
+        ],
+        assignment_mode: AssignmentMode::Blocked,
+        stratify: true,
+        block_size: Some(2),
+    }
+}
+
+pub fn interventions_from_trial_config(
+    config: &TrialArmsConfig,
+) -> HashMap<u16, Arc<dyn EpistemicIntervention>> {
+    config
+        .arms
+        .iter()
+        .map(|arm| {
+            (
+                arm.arm_id,
+                Arc::new(ConfigurableIntervention::from_arm_config(arm))
+                    as Arc<dyn EpistemicIntervention>,
+            )
+        })
+        .collect()
+}
+
 pub struct NoopIntervention;
 
 impl EpistemicIntervention for NoopIntervention {
@@ -573,6 +828,74 @@ impl EpistemicIntervention for NoopIntervention {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_trial_arms_config_and_build_interventions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("trial_arms.json");
+        let json = serde_json::json!({
+            "arms": [
+                {
+                    "arm_id": 0,
+                    "intervention_id": "control.identity_scaling",
+                    "intervention_version": "v1",
+                    "actions": [
+                        {"type": "scale_alpha_ppm", "ppm": 1000000},
+                        {"type": "scale_access_credit_ppm", "ppm": 1000000},
+                        {"type": "scale_k_bits_budget_ppm", "ppm": 1000000}
+                    ],
+                    "descriptors": {
+                        "oracle_policy": {"policy_id": "oracle.default.v1", "params": {}},
+                        "dependence_policy": {"policy_id": "dependence.default.v1", "params": {}},
+                        "nullspec_policy": {"policy_id": "nullspec.default.v1", "params": {}},
+                        "output_policy": {"policy_id": "output.default.v1", "params": {}}
+                    },
+                    "arm_parameters": {"k_bits_scale_ppm": 1000000}
+                },
+                {
+                    "arm_id": 1,
+                    "intervention_id": "treatment.tighten_k_budget",
+                    "intervention_version": "v1",
+                    "actions": [
+                        {"type": "scale_alpha_ppm", "ppm": 1000000},
+                        {"type": "scale_access_credit_ppm", "ppm": 1000000},
+                        {"type": "scale_k_bits_budget_ppm", "ppm": 750000}
+                    ],
+                    "descriptors": {
+                        "oracle_policy": {"policy_id": "oracle.default.v1", "params": {}},
+                        "dependence_policy": {"policy_id": "dependence.default.v1", "params": {}},
+                        "nullspec_policy": {"policy_id": "nullspec.default.v1", "params": {}},
+                        "output_policy": {"policy_id": "output.default.v1", "params": {}}
+                    },
+                    "arm_parameters": {"k_bits_scale_ppm": 750000}
+                }
+            ],
+            "assignment_mode": "blocked",
+            "stratify": true,
+            "block_size": 2
+        });
+        std::fs::write(&path, serde_json::to_vec(&json).expect("json")).expect("write");
+        let loaded = load_trial_arms_config(&path).expect("load");
+        assert_eq!(loaded.config.arms.len(), 2);
+        assert_ne!(loaded.config_hash, [0u8; 32]);
+
+        let interventions = interventions_from_trial_config(&loaded.config);
+        let control = interventions.get(&0).expect("control").actions();
+        let treatment = interventions.get(&1).expect("treatment").actions();
+        let control_delta = validate_and_build_delta(&control).expect("control delta");
+        let treatment_delta = validate_and_build_delta(&treatment).expect("treatment delta");
+        assert_eq!(control_delta.k_bits_scale_ppm, 1_000_000);
+        assert_eq!(treatment_delta.k_bits_scale_ppm, 750_000);
+    }
+
+    #[test]
+    fn default_trial_config_has_non_noop_arm() {
+        let config = default_trial_arms_config();
+        let interventions = interventions_from_trial_config(&config);
+        let treatment = interventions.get(&1).expect("arm 1").actions();
+        let delta = validate_and_build_delta(&treatment).expect("delta");
+        assert_eq!(delta.k_bits_scale_ppm, 750_000);
+    }
 
     #[test]
     fn assignment_is_deterministic_for_same_nonce_and_stratum() {
