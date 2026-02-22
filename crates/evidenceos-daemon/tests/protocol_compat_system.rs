@@ -105,6 +105,8 @@ async fn daemon_protocol_v1_and_v2_smoke() {
         .into_inner();
     assert_eq!(info.protocol_semver, evidenceos_protocol::PROTOCOL_SEMVER);
     assert_eq!(info.proto_hash, evidenceos_protocol::PROTO_SHA256);
+    evidenceos_protocol::validate_daemon_version(&info.daemon_version)
+        .expect("daemon version should satisfy client compatibility range");
 
     let v2_claim = v2
         .create_claim_v2(v2_create(7))
@@ -196,4 +198,12 @@ async fn proto_roundtrip_backcompat_capsule() {
     assert_eq!(v1_fetch_err.code(), v2_fetch_err.code());
 
     handle.abort();
+}
+
+#[test]
+fn daemon_client_compatibility_policy_is_pinned() {
+    evidenceos_protocol::validate_daemon_version("0.1.0-alpha")
+        .expect("minimum supported daemon version should be accepted");
+    evidenceos_protocol::validate_daemon_version("0.2.0")
+        .expect_err("next minor daemon version should be rejected until client policy is updated");
 }

@@ -66,4 +66,14 @@ Client policy (DiscOS):
 
 1. Hard-fail on protocol major mismatch.
 2. Hard-fail on `proto_hash` mismatch unless explicitly overridden (for example, `--allow-protocol-drift`).
-3. Log the returned metadata for auditability.
+3. Validate `daemon_version` is within the pinned compatibility range published by `evidenceos-protocol` (`>=0.1.0-alpha, <0.2.0` in this release).
+4. In production mode, fail closed on daemon-version mismatch with an actionable upgrade/downgrade message; in development mode, continue with an explicit warning.
+5. Log the returned metadata for auditability.
+
+## Dependency source pinning (DiscOS + EvidenceOS)
+
+`evidenceos-protocol` is the canonical shared dependency for both daemon and DiscOS clients.
+
+- Preferred source: crates.io release of `evidenceos-protocol`, pinned by semver.
+- Fallback source: git dependency pinned to the exact commit corresponding to the EvidenceOS release tag.
+- Do **not** depend on a different upstream repo copy of protocol definitions when validating compatibility, to avoid protocol drift.
