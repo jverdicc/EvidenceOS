@@ -85,48 +85,34 @@ The authors acknowledge this reality. We note that deployment in high-risk domai
 
 ---
 
-## Section 4: Connection to Active Research (Capability Spillover)
+## Section 4: Connection to Active Research (The Enforcement Gap)
 
-**What is Capability Spillover?**
-Global AI safety programs (such as SPAR) are actively researching a threat known as "Capability Spillover." This occurs when a highly advanced AI system pieces together dangerous or forbidden knowledge (like biological synthesis pathways or zero-day cyber-attack vectors) through a long sequence of tiny, seemingly innocent interactions. 
+**State of the Art: Capability Evaluation**
+Frontier AI safety research programs (such as METR, SPAR, and Apollo Research) have pioneered sophisticated "Agentic Evaluations" to identify **Capability Spillover**. This is the process where a highly capable AI system—even one that passes isolated safety filters—accumulates dangerous influence or restricted knowledge (e.g., biological synthesis pathways or cyber-exploit chains) through long-horizon, multi-step reasoning.
 
-Think of it like an adversary collecting puzzle pieces. No single question the AI asks is flagged as dangerous by a standard safety filter, but over thousands of interactions, the AI connects the dots and "spills over" into possessing a restricted capability.
+These research programs are highly advanced, utilizing sandboxed environments and agentic scaffolding to measure how an AI might connect seemingly benign "puzzle pieces" to achieve a forbidden outcome.
 
-**The Failure of Behavioral Detection:**
-Current industry guardrails attempt to stop this *behaviorally*—by evaluating each prompt in isolation and asking, "Is this specific request dangerous?" Because each individual step in a spillover attack looks entirely benign, traditional safety filters let them pass. The system is completely blind to the threat because it ignores the context of the aggregate transcript. 
+**The Enforcement Gap**
+While the industry has become adept at *measuring* spillover risk in controlled lab settings, a critical gap remains in *production enforcement*. Most deployment-level guardrails still operate as behavioral classifiers—evaluating prompts or responses in relatively short context windows. 
 
-**The EvidenceOS Solution (Architectural Prevention):**
-EvidenceOS addresses this gap at the foundational protocol level. Instead of trying to guess if a seemingly safe question is actually part of a larger, hidden puzzle, EvidenceOS meters the *total amount of information* the AI is allowed to extract. 
+The challenge is that even if a model is "evaluated" as safe in a lab, it lacks a stateful, cross-session mechanism to enforce those safety boundaries in a live environment. There is no "bit-budget" for the agent’s lifetime.
 
-It tracks cumulative adaptivity leakage (k) as a finite physical resource. Every interaction, no matter how safe it looks, costs a fraction of the budget. By enforcing a hard mathematical boundary on the total transcript, EvidenceOS makes it physically impossible for the AI to collect enough pieces to execute a spillover attack. 
+**The EvidenceOS Solution: From Evaluation to Enforcement**
+EvidenceOS transitions these research insights into a production-level operating system primitive. Rather than attempting to re-detect a dangerous behavior that a safety filter might miss, EvidenceOS focuses on the **Information-Theoretic Bound**. 
 
-We shift the paradigm from trying to detect bad behavior *after* the fact, to making the acquisition of dangerous capabilities architecturally impossible by cutting off the data supply.
+It treats cumulative adaptivity leakage (k) as a conserved physical resource. By enforcing a hard mathematical boundary on the total information transcript across the agent’s entire operational life, EvidenceOS makes it physically impossible for the agent to acquire enough "puzzle pieces" to execute a spillover attack, regardless of how "benign" the individual steps appear. 
+
+We shift the paradigm from **Refusal-Based Safety** (hoping the model refuses a dangerous request) to **Capacity-Based Safety** (architecturally capping the model's ability to extract the necessary information).
 
 ### 4.1 How EvidenceOS Stops Distributed Spillover (Swarms & Time-Shifted Attacks)
 
-A standard critique of leakage-budgeting is that an adversary can simply distribute their attack. If an AI agent needs 100 puzzle pieces, the operator might spin up 100 different dummy accounts (a Sybil attack), query five different APIs, or spread the queries out over six months to evade rate limits. 
+A primary threat vector identified in spillover research is the "Low and Slow" or "Distributed" attack. EvidenceOS is a **stateful kernel** designed to mitigate these vectors by shifting the accounting from the *identity of the requester* to the *information being requested*.
 
-EvidenceOS defeats this because it is a **stateful kernel**. Traditional APIs track the *identity of the requester*. EvidenceOS tracks the *information being requested*.
+* **Across Different Users (TopicHash Budgeting):** The kernel recognizes when multiple agent identities are charging the same pre-committed TopicHash (defined by the operator at deployment). If 1,000 different agents ask for pieces of the same restricted biological sequence, they are all charged against one single, shared leakage pool.
+* **Across Sessions and Variable Time (The Persistent Ledger):** EvidenceOS budgets do not reset. Every query’s budget consumption is written to the **Conservation Ledger** and permanently anchored in the append-only Evidence Transparency Log (ETL). An adversary cannot "wait out" a rate limit or rotate sessions to bypass the math.
+* **Across Protocol Time (DLC Epoch Settlement):** To prevent timing-side-channel attacks—where an adversary learns about the holdout data by observing execution latency—EvidenceOS uses a Deterministic Logical Clock (DLC). Output timing is decoupled from data-dependent computation, ensuring that "how fast" a model responds leaks zero bits of information.
 
-
-
-Here is how EvidenceOS physically enforces the budget across distributed boundaries:
-
-* **Across Different Users (TopicHash Budgeting):** When multiple agents ask questions, EvidenceOS does not just check their individual account limits. The kernel maps each claim into a pre-committed `TopicHash` keyed by semantic topic and target holdout lineage. If 1,000 different agent identities ask for pieces of the same restricted biological sequence, the kernel maps them all to the same `TopicHash`. All 1,000 identities are charged against one single, shared leakage pool. Once the topic budget is saturated, the entire swarm is locked out.
-  
-* **Across Sessions and Variable Time (The Persistent Ledger):**
-  Standard API rate limits reset at midnight or when a session token expires. EvidenceOS budgets do not reset with time. Every query's budget consumption is written to the **Conservation Ledger** and permanently anchored in the append-only Evidence Transparency Log (ETL). If an adversary asks one question today, disconnects, and comes back three months later with a new session ID to ask the second question, the ledger simply resumes the math from where it left off. 
-
-**Across Protocol Time (DLC Epoch Settlement).** Standard evaluation APIs expose wall-clock timing as an implicit output channel. EvidenceOS uses a Deterministic Logical Clock (DLC): kernel responses are released only on deterministic logical epoch boundaries, decoupling output timing from data-dependent runtime. An adversary observing latency learns nothing about holdout-dependent computation. For high-assurance deployments, Path-Length Normalization (PLN) additionally pads execution to a fixed cycle budget, driving timing mutual information to near zero (Experiment 3: DLC+PLN reduces attacker accuracy from 0.994 to 0.504).
-
-
-
-* **Across Different Channels (Joint-Interface Accounting):**
-  An advanced adversary might try to extract the puzzle by attacking different systems—asking the "Accuracy Oracle" a few questions, then pivoting to the "Safety Oracle" to ask a few more, hoping the different endpoints don't talk to each other. EvidenceOS uses Joint-Interface Accounting. If two different oracles touch the same underlying holdout dataset, their leakage is pooled into a joint budget. An attacker cannot bypass the math by arbitraging different endpoints.
-
-By tying the budget to the *data lineage* rather than the *agent's identity or session*, EvidenceOS binds the adversary regardless of how they slice their attack across time, space, or identity.
-
----
+By tying the budget to the **Data Lineage** rather than the session or agent ID, EvidenceOS provides the enforcement "choke point" for the risks identified by the broader safety research community.
 
 ## Section 5: Detailed Use Cases (Defense + Dual-Use)
 
