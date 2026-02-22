@@ -208,3 +208,7 @@ Unlike a "ban," which is often permanent and opaque, EvidenceOS provides a clear
 **The Result:** By mathematically bounding the worst-case scenario, EvidenceOS actually reduces the "friction of suspicion," allowing researchers and developers to move faster within a known, safe envelope.
 
 *Status: Architecture specified. Budget parameter guidance is a roadmap item. See docs/NULLSPEC.md for current NullSpec contract configuration.*
+
+**Research contexts and the HEAVY lane.** Operators deploying EvidenceOS in research settings can configure broader TopicHash scopes to give researchers room to investigate a domain (e.g., a specific molecular pathway) without hitting budgets designed for repetitive, narrow-point attackers. When a researcher reaches a sensitive data boundary, the kernel can be configured to route the claim to the HEAVY lane rather than a hard FROZEN state. This transition requires an additional institutional credential or human-in-the-loop sign-off before proceeding, preserving the ability to perform deep discovery while introducing rigorous accountability at the highest-sensitivity boundaries.
+
+*Status: HEAVY lane routing is Live. Broad TopicHash configuration is operator-controlled today. Research manifold NullSpecs for distinguishing systematic investigation from brute-force probing are a Roadmap item.*
