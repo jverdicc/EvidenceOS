@@ -5,15 +5,36 @@
       "intervention_id": "control.identity_scaling",
       "intervention_version": "v1",
       "actions": [
-        {"type": "scale_alpha_ppm", "ppm": 1000000},
-        {"type": "scale_access_credit_ppm", "ppm": 1000000},
-        {"type": "scale_k_bits_budget_ppm", "ppm": 1000000}
+        {
+          "type": "scale_alpha_ppm",
+          "ppm": 1000000
+        },
+        {
+          "type": "scale_access_credit_ppm",
+          "ppm": 1000000
+        },
+        {
+          "type": "scale_k_bits_budget_ppm",
+          "ppm": 1000000
+        }
       ],
       "descriptors": {
-        "oracle_policy": {"policy_id": "oracle.default.v1", "params": {}},
-        "dependence_policy": {"policy_id": "dependence.default.v1", "params": {}},
-        "nullspec_policy": {"policy_id": "nullspec.default.v1", "params": {}},
-        "output_policy": {"policy_id": "output.default.v1", "params": {}}
+        "oracle_policy": {
+          "policy_id": "oracle.default.v1",
+          "params": {}
+        },
+        "dependence_policy": {
+          "policy_id": "dependence.default.v1",
+          "params": {}
+        },
+        "nullspec_policy": {
+          "policy_id": "nullspec.default.v1",
+          "params": {}
+        },
+        "output_policy": {
+          "policy_id": "output.default.v1",
+          "params": {}
+        }
       },
       "arm_parameters": {
         "alpha_scale_ppm": 1000000,
@@ -26,15 +47,36 @@
       "intervention_id": "treatment.tighten_k_budget",
       "intervention_version": "v1",
       "actions": [
-        {"type": "scale_alpha_ppm", "ppm": 1000000},
-        {"type": "scale_access_credit_ppm", "ppm": 1000000},
-        {"type": "scale_k_bits_budget_ppm", "ppm": 750000}
+        {
+          "type": "scale_alpha_ppm",
+          "ppm": 1000000
+        },
+        {
+          "type": "scale_access_credit_ppm",
+          "ppm": 1000000
+        },
+        {
+          "type": "scale_k_bits_budget_ppm",
+          "ppm": 750000
+        }
       ],
       "descriptors": {
-        "oracle_policy": {"policy_id": "oracle.default.v1", "params": {}},
-        "dependence_policy": {"policy_id": "dependence.default.v1", "params": {}},
-        "nullspec_policy": {"policy_id": "nullspec.default.v1", "params": {}},
-        "output_policy": {"policy_id": "output.default.v1", "params": {}}
+        "oracle_policy": {
+          "policy_id": "oracle.default.v1",
+          "params": {}
+        },
+        "dependence_policy": {
+          "policy_id": "dependence.default.v1",
+          "params": {}
+        },
+        "nullspec_policy": {
+          "policy_id": "nullspec.default.v1",
+          "params": {}
+        },
+        "output_policy": {
+          "policy_id": "output.default.v1",
+          "params": {}
+        }
       },
       "arm_parameters": {
         "alpha_scale_ppm": 1000000,
@@ -43,7 +85,7 @@
       }
     }
   ],
-  "assignment_mode": "blocked",
+  "assignment_mode": "hashed",
   "stratify": true,
   "block_size": 2
 }

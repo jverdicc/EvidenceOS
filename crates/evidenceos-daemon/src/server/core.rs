@@ -47,8 +47,8 @@ use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::trial::{
     default_trial_arms_config, interventions_from_trial_config, load_trial_arms_config,
-    validate_and_build_delta, AssignmentMode, BaselineCovariates, StratumKey, TrialAssignment,
-    TrialRouter,
+    validate_and_build_delta, AssignmentMode, BaselineCovariates, PersistedTrialAllocatorState,
+    StratumKey, TrialAssignment, TrialRouter,
 };
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
@@ -598,6 +598,7 @@ impl<'de> Deserialize<'de> for ClaimPlnConfig {
             max_fuel: u64,
         }
         let raw = Raw::deserialize(deserializer)?;
+
         Ok(Self {
             target_fuel: raw.target_fuel,
             max_fuel: raw.max_fuel,
@@ -806,6 +807,8 @@ struct PersistedState {
     topic_pools: Vec<([u8; 32], TopicBudgetPool)>,
     holdout_pools: Vec<(HoldoutPoolKey, HoldoutBudgetPool)>,
     canary_states: Vec<(String, CanaryState)>,
+    #[serde(default)]
+    trial_allocator_state: Option<PersistedTrialAllocatorState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1312,6 +1315,8 @@ impl EvidenceOsService {
                 config_hash,
             })
         };
+        let persisted_trial_allocator_state = persisted.trial_allocator_state.clone();
+
         let (trial_router, trial_config_hash) = if let Some(loaded) = loaded_trial_config {
             let arm_count = loaded.config.arms.len() as u16;
             let blocked = matches!(loaded.config.assignment_mode, AssignmentMode::Blocked);
@@ -1340,6 +1345,10 @@ impl EvidenceOsService {
         } else {
             (Arc::new(TrialRouter::new(1, false, HashMap::new())?), None)
         };
+
+        if let Some(allocator_state) = persisted_trial_allocator_state.as_ref() {
+            trial_router.restore_blocked_state(allocator_state)?;
+        }
 
         Ok(Self {
             state,
@@ -1515,7 +1524,7 @@ impl EvidenceOsService {
             applied += 1;
         }
         if applied > 0 {
-            persist_all(&self.state)?;
+            persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         }
         Ok(applied)
     }
@@ -1771,6 +1780,13 @@ fn remove_file_durable(path: &Path) -> Result<(), Status> {
 }
 
 fn persist_all(state: &ServerState) -> Result<(), Status> {
+    persist_all_with_trial_router(state, None)
+}
+
+fn persist_all_with_trial_router(
+    state: &ServerState,
+    trial_router: Option<&TrialRouter>,
+) -> Result<(), Status> {
     let persisted = PersistedState {
         claims: state.claims.lock().values().cloned().collect(),
         revocations: state.revocations.lock().clone(),
@@ -1792,6 +1808,7 @@ fn persist_all(state: &ServerState) -> Result<(), Status> {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
+        trial_allocator_state: trial_router.and_then(TrialRouter::export_blocked_state),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|_| Status::internal("serialize state failed"))?;

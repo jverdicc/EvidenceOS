@@ -153,3 +153,20 @@ arm_id = SHA256("evidenceos:trial_assignment:v1" || trial_nonce || stratum_bytes
 `stratum_bytes` is a tagged encoding of lane, holdout family, oracle ID, and nullspec ID.
 
 Given `(trial_nonce_hex, stratum, arm_count)`, replaying the function above reproduces arm assignment exactly.
+
+## 11) How to audit trial assignment
+
+EvidenceOS supports two assignment modes with distinct audit procedures:
+
+- **Hashed mode (default):**
+  - Read `trial_nonce_hex` plus stratum fields (lane, holdout family, oracle ID, nullspec ID) from the claim/capsule context.
+  - Recompute
+    `SHA256("evidenceos:trial_assignment:v1" || trial_nonce || stratum_bytes)[0..2] mod arm_count`.
+  - Compare the recomputed `arm_id` to recorded `trial_arm_id`.
+
+- **Blocked mode (stateful allocator):**
+  - `trial_arm_id` is recorded in claim/capsule metadata at assignment time.
+  - Daemon state persists allocator internals in `state.json` so restart does not reset block position.
+  - Each blocked assignment records `allocator_snapshot_hash` (SHA-256 of canonical allocator snapshot) so auditors can confirm assignment traces against persisted allocator state history.
+
+This gives reproducible assignment in hashed mode and replayable/auditable state transitions in blocked mode.

@@ -89,6 +89,8 @@ pub struct TrialAssignment {
     pub arm_parameters_hash: [u8; 32],
     pub descriptors: InterventionDescriptors,
     pub schema_version: u32,
+    #[serde(default)]
+    pub allocator_snapshot_hash: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,12 +263,26 @@ impl EpistemicIntervention for ConfigurableIntervention {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StratumKey {
     lane: String,
     holdout_family: String,
     oracle_id: String,
     nullspec_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedTrialAllocatorState {
+    pub stratified_allocators: Vec<(StratumKey, PersistedBlockedAllocator)>,
+    pub global_allocator: Option<PersistedBlockedAllocator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedBlockedAllocator {
+    pub block_size: usize,
+    pub cursor: usize,
+    pub bag: Vec<ArmId>,
+    pub arm_counts: Vec<u64>,
 }
 
 impl StratumKey {
@@ -410,6 +426,53 @@ struct BlockedAllocator {
     cursor: usize,
     bag: Vec<ArmId>,
     arm_counts: Vec<u64>,
+}
+
+impl From<&BlockedAllocator> for PersistedBlockedAllocator {
+    fn from(value: &BlockedAllocator) -> Self {
+        Self {
+            block_size: value.block_size,
+            cursor: value.cursor,
+            bag: value.bag.clone(),
+            arm_counts: value.arm_counts.clone(),
+        }
+    }
+}
+
+impl PersistedBlockedAllocator {
+    fn into_runtime(self, arm_count: ArmId) -> Result<BlockedAllocator, Status> {
+        let arm_count_usize = usize::from(arm_count);
+        if self.block_size == 0 || self.block_size % arm_count_usize != 0 {
+            return Err(Status::invalid_argument(
+                "persisted block_size must be > 0 and divisible by arm_count",
+            ));
+        }
+        if self.cursor > self.bag.len() {
+            return Err(Status::invalid_argument(
+                "persisted blocked allocator cursor out of bounds",
+            ));
+        }
+        if self.arm_counts.len() != arm_count_usize {
+            return Err(Status::invalid_argument(
+                "persisted blocked allocator arm_counts length mismatch",
+            ));
+        }
+        if self
+            .bag
+            .iter()
+            .any(|arm| usize::from(*arm) >= arm_count_usize)
+        {
+            return Err(Status::invalid_argument(
+                "persisted blocked allocator bag contains out-of-range arm",
+            ));
+        }
+        Ok(BlockedAllocator {
+            block_size: self.block_size,
+            cursor: self.cursor,
+            bag: self.bag,
+            arm_counts: self.arm_counts,
+        })
+    }
 }
 
 impl BlockedAllocator {
@@ -578,10 +641,10 @@ impl TrialRouter {
         trial_nonce: [u8; 16],
         stratum: &StratumKey,
     ) -> Result<TrialAssignment, Status> {
-        let arm_id = if self.blocked {
+        let (arm_id, allocator_snapshot_hash) = if self.blocked {
             self.assign_blocked(trial_nonce, stratum)?
         } else {
-            self.assign_hashed(trial_nonce, stratum)
+            (self.assign_hashed(trial_nonce, stratum), None)
         };
         let (intervention_id, intervention_version, arm_parameters_hash, descriptors) = self
             .interventions
@@ -635,7 +698,51 @@ impl TrialRouter {
             arm_parameters_hash,
             descriptors,
             schema_version: DEFAULT_SCHEMA_VERSION,
+            allocator_snapshot_hash,
         })
+    }
+
+    pub fn export_blocked_state(&self) -> Option<PersistedTrialAllocatorState> {
+        if !self.blocked {
+            return None;
+        }
+        let guard = self.allocator.lock();
+        let mut stratified_allocators = guard
+            .stratified_allocators
+            .iter()
+            .map(|(k, v)| (k.clone(), PersistedBlockedAllocator::from(v)))
+            .collect::<Vec<_>>();
+        stratified_allocators.sort_by(|a, b| a.0.as_bytes().cmp(&b.0.as_bytes()));
+        Some(PersistedTrialAllocatorState {
+            stratified_allocators,
+            global_allocator: guard
+                .global_allocator
+                .as_ref()
+                .map(PersistedBlockedAllocator::from),
+        })
+    }
+
+    pub fn restore_blocked_state(
+        &self,
+        state: &PersistedTrialAllocatorState,
+    ) -> Result<(), Status> {
+        if !self.blocked {
+            return Ok(());
+        }
+        let mut guard = self.allocator.lock();
+        let mut stratified_allocators = HashMap::new();
+        for (stratum, allocator) in &state.stratified_allocators {
+            stratified_allocators.insert(
+                stratum.clone(),
+                allocator.clone().into_runtime(self.arm_count)?,
+            );
+        }
+        guard.stratified_allocators = stratified_allocators;
+        guard.global_allocator = match &state.global_allocator {
+            Some(allocator) => Some(allocator.clone().into_runtime(self.arm_count)?),
+            None => None,
+        };
+        Ok(())
     }
 
     pub fn intervention_actions(
@@ -663,7 +770,7 @@ impl TrialRouter {
         &self,
         _trial_nonce: [u8; 16],
         stratum: &StratumKey,
-    ) -> Result<ArmId, Status> {
+    ) -> Result<(ArmId, Option<[u8; 32]>), Status> {
         let mut guard = self.allocator.lock();
         if self.stratified {
             if !guard.stratified_allocators.contains_key(stratum) {
@@ -680,7 +787,7 @@ impl TrialRouter {
             guard
                 .stratified_allocators
                 .insert(stratum.clone(), allocator);
-            Ok(arm)
+            Ok((arm, Some(hash_blocked_snapshot(&guard)?)))
         } else {
             let mut allocator = guard
                 .global_allocator
@@ -688,9 +795,33 @@ impl TrialRouter {
                 .ok_or_else(|| Status::internal("missing global allocator"))?;
             let arm = allocator.next(self.arm_count, guard.rng.as_mut())?;
             guard.global_allocator = Some(allocator);
-            Ok(arm)
+            Ok((arm, Some(hash_blocked_snapshot(&guard)?)))
         }
     }
+}
+
+fn hash_blocked_snapshot(state: &AllocationState) -> Result<[u8; 32], Status> {
+    let mut stratified_allocators = state
+        .stratified_allocators
+        .iter()
+        .map(|(k, v)| (k.clone(), PersistedBlockedAllocator::from(v)))
+        .collect::<Vec<_>>();
+    stratified_allocators.sort_by(|a, b| a.0.as_bytes().cmp(&b.0.as_bytes()));
+    let snapshot = PersistedTrialAllocatorState {
+        stratified_allocators,
+        global_allocator: state
+            .global_allocator
+            .as_ref()
+            .map(PersistedBlockedAllocator::from),
+    };
+    let bytes = evidenceos_core::capsule::canonical_json(&snapshot)
+        .map_err(|_| Status::internal("trial allocator snapshot canonicalization failed"))?;
+    let mut h = Sha256::new();
+    h.update(bytes);
+    let digest = h.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Ok(out)
 }
 
 pub fn default_trial_arms_config() -> TrialArmsConfig {
@@ -755,7 +886,7 @@ pub fn default_trial_arms_config() -> TrialArmsConfig {
                 arm_parameters: serde_json::json!({"alpha_scale_ppm":1_000_000,"access_credit_scale_ppm":1_000_000,"k_bits_scale_ppm":750_000}),
             },
         ],
-        assignment_mode: AssignmentMode::Blocked,
+        assignment_mode: AssignmentMode::Hashed,
         stratify: true,
         block_size: Some(2),
     }
