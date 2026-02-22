@@ -159,6 +159,8 @@ pub struct TrialMetadata {
     pub trial_nonce_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_config_hash_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocator_snapshot_hash_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

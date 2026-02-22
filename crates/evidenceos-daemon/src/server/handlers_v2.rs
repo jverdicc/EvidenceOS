@@ -88,6 +88,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 nullspec_id: String::new(),
             }),
         )?;
+        let created_at_unix_ms = current_time_unix_ms()?;
         let claim = Claim {
             claim_id,
             topic_id,
@@ -134,7 +135,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             freeze_preimage: None,
             operation_id,
             owner_principal_id: caller.principal_id.clone(),
-            created_at_unix_ms: current_time_unix_ms()?,
+            created_at_unix_ms,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
             holdout_pool_scope: self.holdout_pool_scope,
@@ -165,7 +166,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     )?);
             }
         }
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         Ok(Response::new(pb::CreateClaimResponse {
             claim_id: claim_id.to_vec(),
             state: claim.state.to_proto(),
@@ -261,7 +262,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let reason = report.reasons.join("; ");
                 claim.aspec_rejection = Some(reason.clone());
                 self.record_incident(claim, &format!("aspec_reject:{reason}"))?;
-                persist_all(&self.state)?;
+                persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
                 return Err(Status::failed_precondition("ASPEC rejected wasm module"));
             }
             claim.lane = if report.heavy_lane_flag || matches!(report.lane, AspecLane::LowAssurance)
@@ -273,7 +274,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             claim.heavy_lane_diversion_recorded = claim.lane == Lane::Heavy;
             claim.wasm_module = req.wasm_module;
         }
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         let state = self
             .state
             .claims
@@ -322,7 +323,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             })?;
             claim.state
         };
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         Ok(Response::new(pb::FreezeGatesResponse {
             state: state.to_proto(),
         }))
@@ -370,7 +371,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 claim.state
             }
         };
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         Ok(Response::new(pb::SealClaimResponse {
             state: state.to_proto(),
         }))
@@ -636,6 +637,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
                     trial_config_hash_hex,
+                    allocator_snapshot_hash_hex: assignment
+                        .allocator_snapshot_hash
+                        .map(hex::encode),
                 });
             }
             capsule.state = if claim.state == ClaimState::Certified {
@@ -724,7 +728,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_execute_claim");
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         clear_pending_mutation(&self.state)?;
 
         Ok(Response::new(pb::ExecuteClaimResponse {
@@ -959,6 +963,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             hex::encode(topic.topic_id),
             hex::encode(semantic_hash),
         )?;
+        let created_at_unix_ms = current_time_unix_ms()?;
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
@@ -1005,12 +1010,22 @@ impl EvidenceOsV2 for EvidenceOsService {
             freeze_preimage: None,
             operation_id,
             owner_principal_id: caller.principal_id.clone(),
-            created_at_unix_ms: current_time_unix_ms()?,
+            created_at_unix_ms,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
             holdout_pool_scope: self.holdout_scope_for(&holdout_descriptor),
         };
-        self.state.claims.lock().insert(claim_id, claim.clone());
+        {
+            let mut claims = self.state.claims.lock();
+            if let Some(existing) = claims.get(&claim_id).cloned() {
+                return Ok(Response::new(pb::CreateClaimV2Response {
+                    claim_id: claim_id.to_vec(),
+                    topic_id: existing.topic_id.to_vec(),
+                    state: existing.state.to_proto(),
+                }));
+            }
+            claims.insert(claim_id, claim.clone());
+        }
         self.state
             .topic_pools
             .lock()
@@ -1038,7 +1053,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     )?);
             }
         }
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         Ok(Response::new(pb::CreateClaimV2Response {
             claim_id: claim_id.to_vec(),
             topic_id: claim.topic_id.to_vec(),
@@ -1584,6 +1599,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     arm_id: Some(u32::from(assignment.arm_id)),
                     trial_nonce_hex: Some(hex::encode(assignment.trial_nonce)),
                     trial_config_hash_hex,
+                    allocator_snapshot_hash_hex: assignment
+                        .allocator_snapshot_hash
+                        .map(hex::encode),
                 });
             }
             capsule.state = if claim.state == ClaimState::Certified {
@@ -1659,7 +1677,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_execute_claim_v2");
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         clear_pending_mutation(&self.state)?;
 
         let response = pb::ExecuteClaimV2Response {
@@ -1953,7 +1971,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         };
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_revoke_claim");
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         clear_pending_mutation(&self.state)?;
 
         let message = {
@@ -2067,7 +2085,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         if touched == 0 {
             return Err(Status::not_found("holdout budget pool not found"));
         }
-        persist_all(&self.state)?;
+        persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         Ok(Response::new(pb::SetHoldoutPoolBudgetsResponse {
             budgets: Some(pb::HoldoutPoolBudgets {
                 holdout_id: req.holdout_id,
