@@ -54,7 +54,7 @@ async fn invalid_tool_name_rejected() {
     let err = preflight_tool_call_impl(&st, &request_headers("req-1"), body.as_bytes())
         .await
         .expect_err("must reject");
-    assert_eq!(err.response.reasonCode, "InvalidArgument");
+    assert_eq!(err.response.reason_code, "InvalidArgument");
 }
 
 #[tokio::test]
@@ -65,7 +65,7 @@ async fn params_not_object_rejected() {
     let err = preflight_tool_call_impl(&st, &request_headers("req-2"), body.as_bytes())
         .await
         .expect_err("must reject");
-    assert_eq!(err.response.reasonCode, "InvalidArgument");
+    assert_eq!(err.response.reason_code, "InvalidArgument");
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn body_too_large_rejected() {
     let err = preflight_tool_call_impl(&st, &request_headers("req-3"), body.as_bytes())
         .await
         .expect_err("must reject");
-    assert_eq!(err.response.reasonCode, "InvalidArgument");
+    assert_eq!(err.response.reason_code, "InvalidArgument");
 }
 
 #[tokio::test]
@@ -93,7 +93,7 @@ async fn requires_bearer_token_when_configured() {
     let err = preflight_tool_call_impl(&st, &request_headers("req-4"), body.as_bytes())
         .await
         .expect_err("must reject");
-    assert_eq!(err.response.reasonCode, "Unauthorized");
+    assert_eq!(err.response.reason_code, "Unauthorized");
 }
 
 #[tokio::test]
@@ -121,11 +121,8 @@ async fn requires_request_id_header() {
     let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
         .await
         .expect_err("must reject");
-    assert_eq!(err.response.reasonCode, "InvalidArgument");
-    assert_eq!(
-        err.response.reasonDetail.as_deref(),
-        Some("missing x-request-id header")
-    );
+    assert_eq!(err.response.reason_code, "InvalidArgument");
+    assert_eq!(err.response.detail, None);
 }
 
 #[tokio::test]
@@ -172,4 +169,25 @@ proptest! {
         let h2 = stable_params_hash(&map).expect("hash");
         prop_assert_eq!(h1, h2);
     }
+}
+
+#[tokio::test]
+async fn invalid_inputs_use_constant_public_error_shape() {
+    let st = state(DaemonConfig::default());
+    let cases = [
+        b"{".as_slice(),
+        br#"{"toolName":"","params":{}}"#.as_slice(),
+        br#"{"toolName":"exec","params":[]}"#.as_slice(),
+    ];
+    let mut lengths = std::collections::BTreeSet::new();
+    for (idx, body) in cases.iter().enumerate() {
+        let err = preflight_tool_call_impl(&st, &request_headers(&format!("req-{idx}")), body)
+            .await
+            .expect_err("must reject");
+        let encoded = serde_json::to_vec(&err.response).expect("encode");
+        lengths.insert(encoded.len());
+        assert_eq!(err.response.reason_code, "INVALID_INPUT");
+        assert!(err.response.detail.is_none());
+    }
+    assert_eq!(lengths.len(), 1);
 }

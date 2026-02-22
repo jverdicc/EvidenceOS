@@ -44,6 +44,7 @@ use crate::config::OracleTtlPolicy;
 use crate::key_management::{load_signing_key_from_kms, SigningKeySource};
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
+use crate::public_error::{public_status, PublicErrorCode};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::trial::{
@@ -52,7 +53,7 @@ use crate::trial::{
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 use evidenceos_core::aspec::{verify_aspec, AspecLane, AspecPolicy, FloatPolicy};
 use evidenceos_core::canary::{CanaryConfig, CanaryState};
@@ -926,6 +927,40 @@ pub struct EvidenceOsService {
     default_holdout_k_bits_budget: f64,
     default_holdout_access_credit_budget: f64,
     holdout_pool_scope: HoldoutPoolScope,
+    strict_pln: StrictPlnConfig,
+}
+
+#[derive(Debug, Clone)]
+struct StrictPlnConfig {
+    enabled: bool,
+    fast_execute_floor_ms: u64,
+    heavy_execute_floor_ms: u64,
+}
+
+impl StrictPlnConfig {
+    fn from_env() -> Self {
+        Self {
+            enabled: env_flag("EVIDENCEOS_STRICT_PLN", false),
+            fast_execute_floor_ms: std::env::var("EVIDENCEOS_STRICT_PLN_FAST_EXECUTE_FLOOR_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            heavy_execute_floor_ms: std::env::var("EVIDENCEOS_STRICT_PLN_HEAVY_EXECUTE_FLOOR_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+        }
+    }
+
+    fn execute_floor_ms(&self, lane: Lane) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
+        match lane {
+            Lane::Fast => self.fast_execute_floor_ms,
+            Lane::Heavy => self.heavy_execute_floor_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1004,6 +1039,14 @@ fn env_domain_set(name: &str, default: &str) -> HashSet<String> {
         .filter(|v| !v.is_empty())
         .map(|v| v.to_ascii_uppercase())
         .collect()
+}
+
+fn strict_pln_padding_duration(elapsed: Duration, floor_ms: u64) -> Option<Duration> {
+    if floor_ms == 0 {
+        return None;
+    }
+    let floor = Duration::from_millis(floor_ms);
+    (elapsed < floor).then_some(floor - elapsed)
 }
 
 impl EvidenceOsService {
@@ -1205,7 +1248,8 @@ impl EvidenceOsService {
 
         let tee_attestor = attestor_from_env()
             .map_err(|e| {
-                Status::invalid_argument(format!("tee backend configuration error: {e:?}"))
+                tracing::error!(error=?e, "tee backend configuration error");
+                public_status(Code::InvalidArgument, PublicErrorCode::InvalidInput)
             })?
             .map(Arc::<dyn TeeAttestor>::from);
         if tee_attestor
@@ -1280,6 +1324,7 @@ impl EvidenceOsService {
             default_holdout_k_bits_budget,
             default_holdout_access_credit_budget,
             holdout_pool_scope,
+            strict_pln: StrictPlnConfig::from_env(),
         })
     }
 
@@ -2190,11 +2235,12 @@ fn recover_pending_mutation(state: &KernelState) -> Result<(), Status> {
     Ok(())
 }
 
-fn parse_hash32(bytes: &[u8], field: &str) -> Result<[u8; 32], Status> {
+fn parse_hash32(bytes: &[u8], _field: &str) -> Result<[u8; 32], Status> {
     if bytes.len() != 32 {
-        return Err(Status::invalid_argument(format!(
-            "{field} must be 32 bytes"
-        )));
+        return Err(public_status(
+            Code::InvalidArgument,
+            PublicErrorCode::InvalidInput,
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(bytes);
@@ -3247,7 +3293,11 @@ fn map_vault_error(err: VaultError) -> Status {
         VaultError::InvalidOracleInput => Status::invalid_argument("invalid oracle input"),
         VaultError::MissingRunExport => Status::failed_precondition("missing run export"),
         VaultError::InvalidStructuredClaim(reason) => {
-            Status::failed_precondition(format!("invalid structured claim: {reason}"))
+            let _ = reason;
+            public_status(
+                Code::FailedPrecondition,
+                PublicErrorCode::FailedPrecondition,
+            )
         }
     }
 }
@@ -4319,6 +4369,14 @@ mod tests {
         .await
         .expect("insecure synthetic holdout should be accepted");
         std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
+    }
+
+    #[test]
+    fn strict_pln_padding_applies_minimum_floor() {
+        let elapsed = Duration::from_millis(3);
+        let pad = strict_pln_padding_duration(elapsed, 10).expect("pad");
+        assert!(pad >= Duration::from_millis(7));
+        assert!(strict_pln_padding_duration(Duration::from_millis(12), 10).is_none());
     }
 
     #[tokio::test]

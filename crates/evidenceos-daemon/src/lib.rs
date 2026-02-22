@@ -24,6 +24,7 @@ pub mod key_management;
 pub mod pln_profile;
 pub mod policy_oracle;
 pub mod probe;
+pub mod public_error;
 pub mod server;
 pub mod settlement;
 pub mod telemetry;

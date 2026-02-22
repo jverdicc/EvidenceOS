@@ -40,3 +40,17 @@ Paper-facing language should treat PLN as:
 - **Not implemented today:** compile-time CFG equalization rewrite.
 
 Do not claim full static+runtime PLN until compile-time rewriting is added with validation tests.
+
+## Strict PLN response-timing mode
+
+A production hardening flag is available for externally observable timing normalization:
+
+- `EVIDENCEOS_STRICT_PLN=true` enables response-time floor padding for execution APIs.
+- `EVIDENCEOS_STRICT_PLN_FAST_EXECUTE_FLOOR_MS=<ms>` sets the fast-lane minimum response floor.
+- `EVIDENCEOS_STRICT_PLN_HEAVY_EXECUTE_FLOOR_MS=<ms>` sets the heavy-lane minimum response floor.
+
+Padding policy is selected from declared method class + lane only; it does not depend on holdout outputs.
+
+Tradeoffs:
+- Increases tail latency and can reduce throughput under burst load.
+- Improves resistance to latency-based transcript side channels at external surfaces.
