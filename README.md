@@ -235,6 +235,16 @@ For domain-specific integration guides showing how UVP maps onto electronic trad
 
 A commonly reported class of incidents is high-volume prompting campaigns intended to clone model behavior and coerce internal reasoning traces. EvidenceOS treats this as an operation-level security event at the verifier boundary: it detects high-volume/high-diversity probing patterns in real time, applies graded response (THROTTLE, then ESCALATE, then FROZEN/REJECT), and records auditable ETL evidence that the response occurred.
 
+### Threat Horizon: Post-Quantum Considerations
+
+EvidenceOS's core guarantee (Theorem 1) is information-theoretic and invariant to quantum speedup—a quantum computer cannot extract more than k bits from a k-bit budget. However, the system faces two specific shifts in a post-quantum environment:
+
+1. **Cryptographic Exposure:** The current cryptographic layer (ETL signatures, TopicHash) carries standard quantum exposure. Shor's algorithm threatens Ed25519 signing keys, and Grover's algorithm reduces effective hash security by half. Migration to CRYSTALS-Dilithium for signatures and SHA-3/512 for topic hashing is a roadmap item that requires zero changes to the underlying conservation ledger logic.
+  
+2. **Quantum Optimization Risk:** The more acute risk is adversarial efficiency. A quantum agent using QAOA (Quantum Approximate Optimization Algorithm) could find the maximally efficient extraction path within a fixed budget, making the adversarial model significantly tighter. While the information-theoretic wall remains, the agent's ability to "perfectly pack" its extraction backpack increases. Operators in post-quantum threat environments should configure conservative k-budgets accordingly.
+
+*Status: Roadmap. Core theorem is quantum-resistant by construction. Cryptographic migration is architecture-specified.*
+
 ## Assurance status
 
 - **Proven (paper-level model):** UVP conservation framing, transcript accounting, and theorem-backed risk bounds under stated kernel assumptions.
