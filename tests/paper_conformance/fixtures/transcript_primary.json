@@ -1,0 +1,58 @@
+{
+  "alpha": 0.05,
+  "k_bits_budget": 6.0,
+  "access_credit_budget": 6.0,
+  "transcript": [
+    {
+      "oracle_call": "baseline_prob",
+      "oracle_output": "0.2",
+      "op": {
+        "kind": "charge_all",
+        "k_bits": 1.25,
+        "epsilon": 0.01,
+        "delta": 0.001,
+        "access_credit": 1.0,
+        "event_kind": "oracle_eval",
+        "meta": { "oracle": "baseline_prob" }
+      }
+    },
+    {
+      "oracle_call": "followup_signal",
+      "oracle_output": "0.9",
+      "op": {
+        "kind": "settle_e_value",
+        "e_value": 1.5,
+        "event_kind": "wealth_update",
+        "meta": { "source": "followup_signal" }
+      }
+    },
+    {
+      "oracle_call": "bounded_disclosure",
+      "oracle_output": "tokenized",
+      "op": {
+        "kind": "charge_kout_bits",
+        "kout_bits": 2.25
+      }
+    },
+    {
+      "oracle_call": "drift_guard",
+      "oracle_output": "ok",
+      "op": {
+        "kind": "charge_all",
+        "k_bits": 2.5,
+        "epsilon": 0.02,
+        "delta": 0.0,
+        "access_credit": 2.5,
+        "event_kind": "oracle_eval",
+        "meta": { "oracle": "drift_guard" }
+      }
+    }
+  ],
+  "expected": {
+    "k_bits_total": 6.0,
+    "alpha_prime": 0.00078125,
+    "certification_barrier": 1280.0,
+    "frozen_transitions": [false, false, false, false],
+    "final_frozen": false
+  }
+}
