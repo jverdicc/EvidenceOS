@@ -149,3 +149,41 @@ In quantitative finance, the line between a highly optimized strategy and market
 ---
 
 *Reference: Universal Verification Protocol: Bounding AI Adaptivity Leakage via Conservation Ledgers (DOI: [10.5281/zenodo.18685556](https://zenodo.org/records/18685556)).*
+
+## Section 6: Failure Mode Scenarios (The Physics of the Shutoff)
+
+To understand EvidenceOS, one must understand that the "shutoff" is not a heuristic guess; it is a deterministic result of resource exhaustion. Here are four common adversarial scenarios and how the kernel enforces a hard stop.
+
+### 6.1 The "Low and Slow" Extraction (Time-Shifted Attack)
+**Adversary:** A sophisticated actor wants to map out a proprietary chemical process. To avoid "burst" detection, they ask one highly specific technical question every Tuesday at 3:00 AM for an entire year.
+**The Trigger:** The **Conservation Ledger**. 
+Unlike a standard API, EvidenceOS has no "daily reset." Each query adds a permanent leakage (k) charge to the specific TopicHash for that process.
+**The Outcome:** On Week 51, the cumulative leakage hits the safety limit. The kernel returns `FROZEN`. The attacker’s year of work is dead-ended because the kernel sees the *total information leaked* over time, not just the frequency of requests.
+
+
+
+### 6.2 The "Salami Slice" Swarm (Multi-Identity Attack)
+**Adversary:** A developer uses 500 different "plugin" identities to probe a private database. Each identity asks for a different aggregate statistic, trying to "salami slice" enough data to reconstruct a single restricted record.
+**The Trigger:** **Joint-Entropy Topic Budgeting**.
+As queries arrive, the kernel recognizes that Identity A and Identity B are charging the same pre-committed TopicHash — the semantic grouping was defined by the operator at deployment time, not inferred by the kernel.
+**The Outcome:** The kernel doesn't wait for any single user to exceed a limit. It sees the *collective* entropy budget for that TopicHash being exhausted and issues a **Joint Revocation**. Every identity associated with that topic is simultaneously transitioned to `REJECT`.
+
+
+
+### 6.3 The "Feedback Loop" Optimizer (Adaptive Probing)
+**Adversary:** A trader builds an AI to "reverse-engineer" a competitor’s signal. The AI makes tiny, iterative changes to its strategy and looks for high-precision changes in the Oracle score to find a "gradient" to optimize.
+**The Trigger:** **Metric Stall (Hysteresis)**.
+EvidenceOS quantizes oracle outputs into coarse buckets and applies hysteresis: if a mutation is smaller than the configured threshold Δσ, the kernel returns the previous bucket unchanged. The agent receives no gradient signal from small moves. To obtain new information it must make a large non-local jump, consuming a full k charge for a single new symbol.
+**The Outcome:** The AI cannot "feel" the gradient. It either receives zero new information or is forced to burn its budget on noisy, non-local jumps. The certification barrier outpaces the agent, and the kernel enters `HEAVY` lane lock-down.
+
+
+
+### 6.4 The "Bypass" Pivot (Cross-Channel Attack)
+**Adversary:** An agent trying to find a zero-day exploit gets throttled on the "Security Oracle." It pivots to the "Performance" and "Documentation" Oracles, asking seemingly innocent questions that would reveal the target's memory layout.
+**The Trigger:** **Joint-Interface Ledger**.
+EvidenceOS sees that all three oracles touch the same "holdout" (the software binary). The Joint-Interface Ledger is shared across all endpoints for that data.
+**The Outcome:** The agent finds it has already "spent" its information budget for that binary on its earlier failed security probes. The Documentation Oracle—usually an unrestricted channel—returns `FROZEN` because the *Topic* is exhausted, regardless of the channel used to access it.
+
+
+
+**Status:** Scenarios 6.1 and 6.4 are sim-tested (Experiments 2, 11). Scenario 6.3 is Live (Experiments 1, 8, 9). Scenario 6.2 joint revocation is Architecture specified. See `TEST_COVERAGE_MATRIX.md`.
