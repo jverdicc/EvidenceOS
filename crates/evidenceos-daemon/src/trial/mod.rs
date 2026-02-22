@@ -745,6 +745,10 @@ impl TrialRouter {
         Ok(())
     }
 
+    pub fn arm_count(&self) -> u16 {
+        self.arm_count
+    }
+
     pub fn intervention_actions(
         &self,
         assignment: &TrialAssignment,

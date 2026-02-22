@@ -46,9 +46,9 @@ use crate::public_error::{public_status, PublicErrorCode};
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::trial::{
-    default_trial_arms_config, interventions_from_trial_config, load_trial_arms_config,
-    validate_and_build_delta, AssignmentMode, BaselineCovariates, PersistedTrialAllocatorState,
-    StratumKey, TrialAssignment, TrialRouter,
+    default_trial_arms_config, hash_arm_parameters, interventions_from_trial_config,
+    load_trial_arms_config, validate_and_build_delta, AssignmentMode, BaselineCovariates,
+    PersistedTrialAllocatorState, StratumKey, TrialAssignment, TrialRouter,
 };
 use crate::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 use tokio::sync::mpsc;
@@ -1046,6 +1046,29 @@ fn strict_pln_padding_duration(elapsed: Duration, floor_ms: u64) -> Option<Durat
     (elapsed < floor).then_some(floor - elapsed)
 }
 
+fn validate_trial_harness_variation(
+    enabled: bool,
+    arm_count: u16,
+    interventions: &HashMap<u16, Arc<dyn crate::trial::EpistemicIntervention>>,
+) -> Result<(), Status> {
+    if !enabled || arm_count <= 1 {
+        return Ok(());
+    }
+
+    let unique_hashes = interventions
+        .values()
+        .map(|intervention| hash_arm_parameters(&intervention.arm_parameters()))
+        .collect::<Result<HashSet<[u8; 32]>, Status>>()?;
+
+    if unique_hashes.len() < 2 {
+        return Err(Status::failed_precondition(
+            "trial harness enabled with multiple arms requires at least 2 distinct arm_parameters_hash values",
+        ));
+    }
+
+    Ok(())
+}
+
 impl EvidenceOsService {
     pub fn build(data_dir: &str) -> Result<Self, Status> {
         let telemetry =
@@ -1296,6 +1319,10 @@ impl EvidenceOsService {
             .transpose()?
             .unwrap_or(HoldoutPoolScope::Global);
 
+        let trial_harness_enabled = std::env::var("EVIDENCEOS_TRIAL_HARNESS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let trial_config_path = std::env::var("EVIDENCEOS_TRIAL_ARMS_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("config/trial_arms.json"));
@@ -1322,6 +1349,7 @@ impl EvidenceOsService {
             let blocked = matches!(loaded.config.assignment_mode, AssignmentMode::Blocked);
             let block_size = loaded.config.block_size.unwrap_or(usize::from(arm_count));
             let interventions = interventions_from_trial_config(&loaded.config);
+            validate_trial_harness_variation(trial_harness_enabled, arm_count, &interventions)?;
             tracing::info!(
                 event = "trial_config_loaded",
                 trial_config_path = %trial_config_path.display(),
@@ -1349,6 +1377,12 @@ impl EvidenceOsService {
         if let Some(allocator_state) = persisted_trial_allocator_state.as_ref() {
             trial_router.restore_blocked_state(allocator_state)?;
         }
+
+        telemetry.set_trial_harness_state(
+            trial_harness_enabled,
+            trial_config_hash.map(hex::encode),
+            trial_router.arm_count(),
+        );
 
         Ok(Self {
             state,
@@ -3058,6 +3092,27 @@ mod tests {
         assert!(matches!(fast.aspec_policy.lane, AspecLane::HighAssurance));
         assert!(matches!(heavy.aspec_policy.lane, AspecLane::LowAssurance));
         assert!(heavy.aspec_policy.max_loop_bound >= fast.aspec_policy.max_loop_bound);
+    }
+
+    #[test]
+    fn trial_harness_validation_rejects_identical_multi_arm_parameters() {
+        let mut cfg = default_trial_arms_config();
+        cfg.arms[1].arm_parameters = cfg.arms[0].arm_parameters.clone();
+        let interventions = interventions_from_trial_config(&cfg);
+
+        let err = validate_trial_harness_variation(true, cfg.arms.len() as u16, &interventions)
+            .expect_err("identical arm parameters must be rejected");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("distinct arm_parameters_hash"));
+    }
+
+    #[test]
+    fn trial_harness_validation_allows_distinct_multi_arm_parameters() {
+        let cfg = default_trial_arms_config();
+        let interventions = interventions_from_trial_config(&cfg);
+
+        validate_trial_harness_variation(true, cfg.arms.len() as u16, &interventions)
+            .expect("distinct arm parameters should be accepted");
     }
 
     #[test]

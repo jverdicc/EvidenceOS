@@ -49,6 +49,9 @@ struct TelemetryState {
     preflight_failures_total: HashMap<String, u64>,
     credit_burned_total: HashMap<String, u64>,
     credit_denied_total: HashMap<String, u64>,
+    trial_harness_enabled: i64,
+    trial_arm_count: u16,
+    trial_config_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -195,6 +198,18 @@ impl Telemetry {
         *entry = entry.saturating_add(1);
     }
 
+    pub fn set_trial_harness_state(
+        &self,
+        enabled: bool,
+        trial_config_hash: Option<String>,
+        arm_count: u16,
+    ) {
+        let mut guard = self.state.lock();
+        guard.trial_harness_enabled = if enabled { 1 } else { 0 };
+        guard.trial_arm_count = arm_count;
+        guard.trial_config_hash = trial_config_hash;
+    }
+
     pub fn render(&self) -> String {
         let guard = self.state.lock();
         let mut out = String::new();
@@ -320,6 +335,19 @@ impl Telemetry {
                 principal_id, value
             );
         }
+        let trial_config_hash = guard.trial_config_hash.as_deref().unwrap_or("none");
+        out.push_str("# TYPE trial_harness_enabled gauge\n");
+        let _ = writeln!(
+            out,
+            "trial_harness_enabled{{trial_config_hash=\"{}\"}} {}",
+            trial_config_hash, guard.trial_harness_enabled
+        );
+        out.push_str("# TYPE arm_count gauge\n");
+        let _ = writeln!(
+            out,
+            "arm_count{{trial_config_hash=\"{}\"}} {}",
+            trial_config_hash, guard.trial_arm_count
+        );
         out
     }
 
@@ -392,7 +420,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::derive_operation_id;
+    use super::{derive_operation_id, Telemetry};
 
     #[test]
     fn operation_id_deterministic_across_input_order() {
@@ -426,5 +454,15 @@ mod tests {
             ("phys_signature_hash", "cc"),
         ]);
         assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn trial_harness_metrics_include_hash_label_and_arm_count() {
+        let telemetry = Telemetry::new().expect("telemetry");
+        telemetry.set_trial_harness_state(true, Some("abc123".to_string()), 2);
+
+        let rendered = telemetry.render();
+        assert!(rendered.contains("trial_harness_enabled{trial_config_hash=\"abc123\"} 1"));
+        assert!(rendered.contains("arm_count{trial_config_hash=\"abc123\"} 2"));
     }
 }
