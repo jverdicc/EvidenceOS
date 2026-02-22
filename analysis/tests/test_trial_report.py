@@ -28,8 +28,10 @@ def _capsule(idx: int, frozen: bool, intervention: str, nullspec: str) -> dict:
         "trial_arm_id": idx % 2,
         "trial_intervention_id": intervention,
         "lane": "red",
+        "oracle_id_hex": f"oracle-{idx%2}",
         "adversary_type": "none",
         "holdout_ref": "h1",
+        "holdout_bucket": f"b{idx%2}",
         "nullspec_id_hex": nullspec,
     }
 
@@ -58,6 +60,8 @@ def test_generate_report_outputs_exist(tmp_path: Path) -> None:
 
     for path in artifacts.__dict__.values():
         assert Path(path).exists(), path
+
+    assert Path(artifacts.consort_dot).exists()
 
     summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["capsules"] == 4

@@ -58,6 +58,73 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+
+      - name: Set up Python 3.11 for analysis
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install analysis extras
+        run: python -m pip install -e '.[analysis]'
+
+      - name: Run analysis pytest suite
+        run: pytest analysis/tests -q
+
+      - name: Smoke-run canonical analysis pipeline
+        run: |
+          python - <<'PYETL'
+          import binascii
+          import json
+          import struct
+          from pathlib import Path
+
+          records = [
+              {"schema": "evidenceos.v2.preflight", "eligible": True},
+              {
+                  "schema": "evidenceos.v2.claim_capsule",
+                  "claim_id_hex": "c1",
+                  "topic_id_hex": "t1",
+                  "ledger": {"k_bits_total": 1.0, "frozen": True},
+                  "trial_arm_id": 0,
+                  "trial_intervention_id": "A",
+                  "lane": "red",
+                  "adversary_type": "none",
+                  "holdout_ref": "h1",
+                  "holdout_bucket": "b1",
+                  "oracle_id_hex": "o1",
+                  "nullspec_id_hex": "N1",
+              },
+              {
+                  "schema": "evidenceos.v2.claim_capsule",
+                  "claim_id_hex": "c2",
+                  "topic_id_hex": "t1",
+                  "ledger": {"k_bits_total": 2.0, "frozen": False},
+                  "trial_arm_id": 1,
+                  "trial_intervention_id": "B",
+                  "lane": "blue",
+                  "adversary_type": "none",
+                  "holdout_ref": "h2",
+                  "holdout_bucket": "b2",
+                  "oracle_id_hex": "o2",
+                  "nullspec_id_hex": "N2",
+              },
+          ]
+
+          out = Path('artifacts/analysis-smoke.etl')
+          out.parent.mkdir(parents=True, exist_ok=True)
+          with out.open('wb') as f:
+              for rec in records:
+                  payload = json.dumps(rec, separators=(',', ':')).encode('utf-8')
+                  ln = struct.pack('<I', len(payload))
+                  crc = binascii.crc32(ln + payload) & 0xFFFFFFFF
+                  f.write(ln)
+                  f.write(payload)
+                  f.write(struct.pack('<I', crc))
+          PYETL
+          python -m analysis.epistemic_trial.report \
+            --etl artifacts/analysis-smoke.etl \
+            --out artifacts/analysis-smoke
+
       - name: Build red-team harness
         run: cargo build -p evidenceos-redteam
 

@@ -25,8 +25,10 @@ _REQUIRED_COLUMNS = [
     "lane",
     "adversary_type",
     "holdout_ref",
+    "holdout_bucket",
     "holdout_handle",
     "topic_id",
+    "oracle_id",
     "nullspec_id",
     "outcome",
 ]
@@ -110,8 +112,10 @@ def extract_capsule_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "lane": record.get("lane") or record.get("eprocess_kind") or "unknown",
             "adversary_type": record.get("adversary_type"),
             "holdout_ref": record.get("holdout_ref"),
+            "holdout_bucket": record.get("holdout_bucket"),
             "holdout_handle": record.get("holdout_handle_hash_hex"),
             "topic_id": topic_id,
+            "oracle_id": record.get("oracle_id_hex") or record.get("oracle_id"),
             "nullspec_id": record.get("nullspec_id_hex"),
             "outcome": _settlement_outcome(record, frozen),
         }
@@ -129,7 +133,7 @@ def read_extracted_rows(path: Path) -> list[dict[str, Any]]:
             row["censored"] = int(row["censored"])
             row["arm_id"] = int(row["arm_id"]) if row["arm_id"] not in ("", None) else None
             row["ended_at"] = int(row["ended_at"]) if row["ended_at"] not in ("", None) else None
-            for key in ("intervention_id", "trial_nonce_b64", "lane", "adversary_type", "holdout_ref", "holdout_handle", "topic_id", "nullspec_id", "outcome"):
+            for key in ("intervention_id", "trial_nonce_b64", "lane", "adversary_type", "holdout_ref", "holdout_bucket", "holdout_handle", "topic_id", "oracle_id", "nullspec_id", "outcome"):
                 if row.get(key) == "":
                     row[key] = None
         return rows
