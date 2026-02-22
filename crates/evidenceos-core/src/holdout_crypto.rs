@@ -1,3 +1,4 @@
+use base64::Engine as _;
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +14,7 @@ const HOLDOUT_ALG_AES_256_GCM: u8 = 2;
 const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = 4 + 1 + 1 + NONCE_LEN;
 const TAG_LEN: usize = 16;
+const MAX_KMS_KEY_REF_LEN: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum HoldoutCryptoError {
@@ -34,8 +36,10 @@ pub enum HoldoutKeyProviderError {
     KeyNotFound,
     #[error("invalid holdout key material")]
     InvalidKeyMaterial,
-    #[error("kms provider not implemented: {0}")]
-    Unimplemented(&'static str),
+    #[error("kms decrypt failed")]
+    KmsDecryptFailed,
+    #[error("kms provider unavailable: {0}")]
+    KmsProviderUnavailable(&'static str),
 }
 
 pub trait HoldoutKeyProvider: Send + Sync {
@@ -66,34 +70,302 @@ impl HoldoutKeyProvider for EnvKeyProvider {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct AwsKmsKeyProvider;
-#[derive(Debug, Default)]
-pub struct GcpKmsKeyProvider;
-#[derive(Debug, Default)]
-pub struct AzureKmsKeyProvider;
+pub trait KmsDecryptClient: Send + Sync {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError>;
+}
+
+struct MissingFeatureClient {
+    feature_name: &'static str,
+}
+
+impl KmsDecryptClient for MissingFeatureClient {
+    fn decrypt(
+        &self,
+        _key_resource: &str,
+        _ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        Err(HoldoutKeyProviderError::KmsProviderUnavailable(
+            self.feature_name,
+        ))
+    }
+}
+
+pub struct AwsKmsKeyProvider {
+    client: Box<dyn KmsDecryptClient>,
+}
+
+pub struct GcpKmsKeyProvider {
+    client: Box<dyn KmsDecryptClient>,
+}
+
+pub struct AzureKmsKeyProvider {
+    client: Box<dyn KmsDecryptClient>,
+}
+
+impl AwsKmsKeyProvider {
+    pub fn new() -> Self {
+        Self {
+            client: Box::new(AwsSdkClient::new()),
+        }
+    }
+
+    pub fn with_client(client: Box<dyn KmsDecryptClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl Default for AwsKmsKeyProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GcpKmsKeyProvider {
+    pub fn new() -> Self {
+        Self {
+            client: Box::new(GcpSdkClient::new()),
+        }
+    }
+
+    pub fn with_client(client: Box<dyn KmsDecryptClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl Default for GcpKmsKeyProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AzureKmsKeyProvider {
+    pub fn new() -> Self {
+        Self {
+            client: Box::new(AzureSdkClient::new()),
+        }
+    }
+
+    pub fn with_client(client: Box<dyn KmsDecryptClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl Default for AzureKmsKeyProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl HoldoutKeyProvider for AwsKmsKeyProvider {
-    fn key_for_id(&self, _key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
-        Err(HoldoutKeyProviderError::Unimplemented(
-            "aws kms holdout provider (TODO: envelope decrypt data key by key_id)",
-        ))
+    fn key_for_id(&self, key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
+        decrypt_kms_material(&*self.client, key_id)
     }
 }
 
 impl HoldoutKeyProvider for GcpKmsKeyProvider {
-    fn key_for_id(&self, _key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
-        Err(HoldoutKeyProviderError::Unimplemented(
-            "gcp kms holdout provider (TODO: cloud kms decrypt data key by key_id)",
-        ))
+    fn key_for_id(&self, key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
+        decrypt_kms_material(&*self.client, key_id)
     }
 }
 
 impl HoldoutKeyProvider for AzureKmsKeyProvider {
-    fn key_for_id(&self, _key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
-        Err(HoldoutKeyProviderError::Unimplemented(
-            "azure key vault holdout provider (TODO: key vault unwrap data key by key_id)",
-        ))
+    fn key_for_id(&self, key_id: &str) -> Result<[u8; 32], HoldoutKeyProviderError> {
+        decrypt_kms_material(&*self.client, key_id)
+    }
+}
+
+fn decrypt_kms_material(
+    client: &dyn KmsDecryptClient,
+    key_id: &str,
+) -> Result<[u8; 32], HoldoutKeyProviderError> {
+    let (key_resource, ciphertext) = parse_kms_key_ref(key_id)?;
+    let plaintext = client.decrypt(key_resource, &ciphertext)?;
+    plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| HoldoutKeyProviderError::InvalidKeyMaterial)
+}
+
+fn parse_kms_key_ref(key_id: &str) -> Result<(&str, Vec<u8>), HoldoutKeyProviderError> {
+    if key_id.is_empty() || key_id.len() > MAX_KMS_KEY_REF_LEN {
+        return Err(HoldoutKeyProviderError::InvalidKeyId);
+    }
+    let (key_resource, ciphertext_b64) = key_id
+        .split_once('|')
+        .ok_or(HoldoutKeyProviderError::InvalidKeyId)?;
+    if key_resource.is_empty() || ciphertext_b64.is_empty() {
+        return Err(HoldoutKeyProviderError::InvalidKeyId);
+    }
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(ciphertext_b64)
+        .map_err(|_| HoldoutKeyProviderError::InvalidKeyMaterial)?;
+    if ciphertext.is_empty() {
+        return Err(HoldoutKeyProviderError::InvalidKeyMaterial);
+    }
+    Ok((key_resource, ciphertext))
+}
+
+#[cfg(feature = "kms-aws")]
+struct AwsSdkClient;
+
+#[cfg(feature = "kms-aws")]
+impl AwsSdkClient {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "kms-aws")]
+impl KmsDecryptClient for AwsSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+        runtime.block_on(async {
+            let config = aws_config::load_from_env().await;
+            let client = aws_sdk_kms::Client::new(&config);
+            let out = client
+                .decrypt()
+                .key_id(key_resource)
+                .ciphertext_blob(aws_sdk_kms::primitives::Blob::new(ciphertext.to_vec()))
+                .send()
+                .await
+                .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            out.plaintext()
+                .map(|blob| blob.as_ref().to_vec())
+                .ok_or(HoldoutKeyProviderError::KmsDecryptFailed)
+        })
+    }
+}
+
+#[cfg(not(feature = "kms-aws"))]
+struct AwsSdkClient;
+
+#[cfg(not(feature = "kms-aws"))]
+impl AwsSdkClient {
+    fn new() -> MissingFeatureClient {
+        MissingFeatureClient {
+            feature_name: "kms-aws",
+        }
+    }
+}
+
+#[cfg(feature = "kms-gcp")]
+struct GcpSdkClient;
+
+#[cfg(feature = "kms-gcp")]
+impl GcpSdkClient {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "kms-gcp")]
+impl KmsDecryptClient for GcpSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+        runtime.block_on(async {
+            let config = google_cloud_kms::client::ClientConfig::default()
+                .with_auth()
+                .await
+                .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let client = google_cloud_kms::client::Client::new(config)
+                .await
+                .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let req = google_cloud_googleapis::cloud::kms::v1::DecryptRequest {
+                name: key_resource.to_string(),
+                ciphertext: ciphertext.to_vec(),
+                ..Default::default()
+            };
+            let out = client
+                .decrypt(req)
+                .await
+                .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            if out.plaintext.is_empty() {
+                return Err(HoldoutKeyProviderError::KmsDecryptFailed);
+            }
+            Ok(out.plaintext)
+        })
+    }
+}
+
+#[cfg(not(feature = "kms-gcp"))]
+struct GcpSdkClient;
+
+#[cfg(not(feature = "kms-gcp"))]
+impl GcpSdkClient {
+    fn new() -> MissingFeatureClient {
+        MissingFeatureClient {
+            feature_name: "kms-gcp",
+        }
+    }
+}
+
+#[cfg(feature = "kms-azure")]
+struct AzureSdkClient;
+
+#[cfg(feature = "kms-azure")]
+impl AzureSdkClient {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "kms-azure")]
+impl KmsDecryptClient for AzureSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+        runtime.block_on(async {
+            let credential = azure_identity::DefaultAzureCredential::default();
+            let client = azure_security_keyvault_keys::CryptographyClient::new(
+                key_resource,
+                credential,
+                None,
+            )
+            .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let out = client
+                .unwrap_key(
+                    azure_security_keyvault_keys::models::KeyEncryptionAlgorithm::RsaOaep256,
+                    ciphertext.to_vec(),
+                    None,
+                )
+                .await
+                .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let value = out
+                .result
+                .value
+                .ok_or(HoldoutKeyProviderError::KmsDecryptFailed)?;
+            Ok(value)
+        })
+    }
+}
+
+#[cfg(not(feature = "kms-azure"))]
+struct AzureSdkClient;
+
+#[cfg(not(feature = "kms-azure"))]
+impl AzureSdkClient {
+    fn new() -> MissingFeatureClient {
+        MissingFeatureClient {
+            feature_name: "kms-azure",
+        }
     }
 }
 
@@ -186,6 +458,20 @@ fn sanitize_key_id(key_id: &str) -> Result<String, HoldoutKeyProviderError> {
 mod tests {
     use super::*;
 
+    struct MockClient {
+        plaintext: Vec<u8>,
+    }
+
+    impl KmsDecryptClient for MockClient {
+        fn decrypt(
+            &self,
+            _key_resource: &str,
+            _ciphertext: &[u8],
+        ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+            Ok(self.plaintext.clone())
+        }
+    }
+
     #[test]
     fn holdout_encrypt_decrypt_roundtrip() {
         let key = [42u8; 32];
@@ -193,5 +479,31 @@ mod tests {
         let encrypted = encrypt_holdout_labels(&labels, &key).expect("encrypt");
         let decrypted = decrypt_holdout_labels(&encrypted, &key).expect("decrypt");
         assert_eq!(decrypted, labels);
+    }
+
+    #[test]
+    fn aws_provider_decrypts_key_material_with_mock_client() {
+        let expected = [7u8; 32];
+        let ref_value = format!(
+            "arn:aws:kms:us-east-1:123456789012:key/x|{}",
+            base64::engine::general_purpose::STANDARD.encode([1, 2, 3])
+        );
+        let provider = AwsKmsKeyProvider::with_client(Box::new(MockClient {
+            plaintext: expected.to_vec(),
+        }));
+
+        let actual = provider.key_for_id(&ref_value).expect("kms key");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn kms_provider_rejects_invalid_key_ref() {
+        let provider = GcpKmsKeyProvider::with_client(Box::new(MockClient {
+            plaintext: vec![9; 32],
+        }));
+        let err = provider
+            .key_for_id("missing-separator")
+            .expect_err("invalid");
+        assert!(matches!(err, HoldoutKeyProviderError::InvalidKeyId));
     }
 }

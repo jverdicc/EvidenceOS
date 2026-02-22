@@ -36,6 +36,12 @@ base64 = "0.22"
 axum = "0.7"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 http = "1"
+aws-config = { version = "1", optional = true }
+aws-sdk-kms = { version = "1", optional = true }
+google-cloud-kms = { version = "0.6", optional = true }
+google-cloud-googleapis = { version = "0.15", optional = true }
+azure_identity = { version = "0.21", optional = true }
+azure_security_keyvault_keys = { version = "0.21", optional = true }
 
 
 [dev-dependencies]
@@ -58,3 +64,6 @@ harness = false
 
 [features]
 crash-test-failpoints = []
+kms-aws = ["dep:aws-config", "dep:aws-sdk-kms"]
+kms-gcp = ["dep:google-cloud-kms", "dep:google-cloud-googleapis"]
+kms-azure = ["dep:azure_identity", "dep:azure_security_keyvault_keys"]
