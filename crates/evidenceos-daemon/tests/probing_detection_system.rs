@@ -49,6 +49,8 @@ async fn probing_detection_grades_response_and_emits_evidence() {
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         };
         let mut request = Request::new(req);
         request.metadata_mut().insert(

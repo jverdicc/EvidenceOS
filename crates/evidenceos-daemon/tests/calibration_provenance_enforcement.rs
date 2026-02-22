@@ -140,6 +140,8 @@ async fn create_sealed_claim(data_dir: &str) -> Vec<u8> {
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         }))
         .await
         .expect("create")

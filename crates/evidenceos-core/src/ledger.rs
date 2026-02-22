@@ -306,6 +306,8 @@ pub struct ConservationLedger {
     events: Vec<LedgerEvent>,
     k_bits_budget: Option<f64>,
     access_credit_budget: Option<f64>,
+    epsilon_budget: Option<f64>,
+    delta_budget: Option<f64>,
     frozen: bool,
 }
 
@@ -325,6 +327,8 @@ pub struct LedgerSnapshot {
     pub access_credit_spent: f64,
     pub k_bits_budget: Option<f64>,
     pub access_credit_budget: Option<f64>,
+    pub epsilon_budget: Option<f64>,
+    pub delta_budget: Option<f64>,
     pub frozen: bool,
 }
 
@@ -344,6 +348,8 @@ impl ConservationLedger {
             events: Vec::new(),
             k_bits_budget: None,
             access_credit_budget: None,
+            epsilon_budget: None,
+            delta_budget: None,
             frozen: false,
         })
     }
@@ -362,6 +368,16 @@ impl ConservationLedger {
     ) -> Self {
         self.k_bits_budget = k_bits_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self.access_credit_budget = access_credit_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self
+    }
+
+    pub fn with_dp_budgets(
+        mut self,
+        epsilon_budget: Option<f64>,
+        delta_budget: Option<f64>,
+    ) -> Self {
+        self.epsilon_budget = epsilon_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        self.delta_budget = delta_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self
     }
     pub fn alpha_prime(&self) -> f64 {
@@ -406,6 +422,12 @@ impl ConservationLedger {
     pub fn is_frozen(&self) -> bool {
         self.frozen
     }
+    pub fn epsilon_budget(&self) -> Option<f64> {
+        self.epsilon_budget
+    }
+    pub fn delta_budget(&self) -> Option<f64> {
+        self.delta_budget
+    }
     pub fn events(&self) -> &[LedgerEvent] {
         &self.events
     }
@@ -425,6 +447,8 @@ impl ConservationLedger {
             access_credit_spent: self.access_credit_spent,
             k_bits_budget: self.k_bits_budget,
             access_credit_budget: self.access_credit_budget,
+            epsilon_budget: self.epsilon_budget,
+            delta_budget: self.delta_budget,
             frozen: self.frozen,
         }
     }
@@ -524,6 +548,30 @@ impl ConservationLedger {
             }
         }
 
+        if let Some(b) = self.epsilon_budget {
+            if epsilon_next > b + f64::EPSILON {
+                self.frozen = true;
+                self.events.push(LedgerEvent::leak(
+                    "freeze_epsilon_budget_exhausted",
+                    0.0,
+                    json!({"overrun_epsilon": epsilon_next - b}),
+                ));
+                return Err(EvidenceOSError::Frozen);
+            }
+        }
+
+        if let Some(b) = self.delta_budget {
+            if delta_next > b + f64::EPSILON {
+                self.frozen = true;
+                self.events.push(LedgerEvent::leak(
+                    "freeze_delta_budget_exhausted",
+                    0.0,
+                    json!({"overrun_delta": delta_next - b}),
+                ));
+                return Err(EvidenceOSError::Frozen);
+            }
+        }
+
         self.k_bits_total = new_total;
         self.epsilon_total = epsilon_next;
         self.delta_total = delta_next;
@@ -531,6 +579,16 @@ impl ConservationLedger {
         self.events
             .push(LedgerEvent::leak(kind.to_string(), k_bits, meta));
         Ok(())
+    }
+
+    pub fn charge_dp(
+        &mut self,
+        epsilon: f64,
+        delta: f64,
+        kind: &str,
+        meta: Value,
+    ) -> EvidenceOSResult<()> {
+        self.charge_all(0.0, epsilon, delta, 0.0, kind, meta)
     }
 
     pub fn charge_kout_bits(&mut self, kout_bits: f64) -> EvidenceOSResult<()> {
@@ -901,6 +959,30 @@ mod matrix_tests {
         .expect("second epsilon/delta charge");
         assert!((l.epsilon_total - 0.3).abs() < 1e-12);
         assert!((l.delta_total - 1e-6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dp_charge_freezes_when_budget_exceeded() {
+        let mut l = ConservationLedger::new(0.1)
+            .expect("l")
+            .with_dp_budgets(Some(0.5), Some(1e-6));
+        l.charge_dp(0.2, 4e-7, "dp", Value::Null)
+            .expect("within budget");
+        assert!(matches!(
+            l.charge_dp(0.31, 0.0, "dp", Value::Null),
+            Err(EvidenceOSError::Frozen)
+        ));
+        assert!(l.is_frozen());
+    }
+
+    #[test]
+    fn alpha_soundness_depends_on_k_bits_not_dp_totals() {
+        let mut l = ConservationLedger::new(0.05).expect("l");
+        l.charge(3.0, "k", Value::Null).expect("k charge");
+        let before = l.alpha_prime();
+        l.charge_dp(0.4, 1e-6, "dp", Value::Null)
+            .expect("dp charge");
+        assert!((l.alpha_prime() - before).abs() < 1e-12);
     }
     #[test]
     fn freeze_after_budget_exhaustion() {

@@ -102,6 +102,8 @@ async fn owner_can_execute_non_owner_cannot_fetch_and_operator_can_revoke() {
                 access_credit: 64,
                 oracle_id: "builtin.accuracy".to_string(),
                 nullspec_id: String::new(),
+                dp_epsilon_budget: None,
+                dp_delta_budget: None,
             },
             "owner-token",
         ))

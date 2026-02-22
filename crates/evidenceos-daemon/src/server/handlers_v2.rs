@@ -766,6 +766,12 @@ impl EvidenceOsV2 for EvidenceOsService {
         if req.epoch_size == 0 {
             return Err(Status::invalid_argument("epoch_size must be > 0"));
         }
+        if let Some(dp_epsilon_budget) = req.dp_epsilon_budget {
+            Self::validate_budget_value(dp_epsilon_budget, "dp_epsilon_budget")?;
+        }
+        if let Some(dp_delta_budget) = req.dp_delta_budget {
+            Self::validate_budget_value(dp_delta_budget, "dp_delta_budget")?;
+        }
         let holdout_descriptor = self.holdout_provider.resolve(&req.holdout_ref)?;
         let metadata = req
             .metadata
@@ -948,6 +954,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     Some(lane_cfg.k_bits_budget),
                     Some(lane_cfg.access_credit_budget),
                 )
+                .with_dp_budgets(req.dp_epsilon_budget, req.dp_delta_budget)
             })?;
 
         let operation_id = build_operation_id(

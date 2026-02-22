@@ -113,6 +113,8 @@ async fn run_claim(
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         })
         .await
         .expect("create")
@@ -222,6 +224,8 @@ async fn execute_fails_closed_without_active_nullspec() {
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         })
         .await
         .expect("create")

@@ -91,6 +91,8 @@ fn ledger_snapshot_strategy() -> impl Strategy<Value = LedgerSnapshot> {
             finite_f64(),
             finite_f64(),
             finite_f64(),
+            prop::option::of(finite_f64()),
+            prop::option::of(finite_f64()),
             finite_f64(),
         ),
         (
@@ -98,6 +100,8 @@ fn ledger_snapshot_strategy() -> impl Strategy<Value = LedgerSnapshot> {
             finite_f64(),
             finite_f64(),
             finite_f64(),
+            prop::option::of(finite_f64()),
+            prop::option::of(finite_f64()),
             finite_f64(),
         ),
     )
@@ -113,7 +117,15 @@ fn ledger_snapshot_strategy() -> impl Strategy<Value = LedgerSnapshot> {
                     barrier,
                     wealth,
                 ),
-                (w_max, epsilon_total, delta_total, access_credit_spent, compute_fuel_spent),
+                (
+                    w_max,
+                    epsilon_total,
+                    delta_total,
+                    access_credit_spent,
+                    epsilon_budget,
+                    delta_budget,
+                    compute_fuel_spent,
+                ),
             )| LedgerSnapshot {
                 alpha,
                 log_alpha_target,
@@ -127,6 +139,8 @@ fn ledger_snapshot_strategy() -> impl Strategy<Value = LedgerSnapshot> {
                 epsilon_total,
                 delta_total,
                 access_credit_spent,
+                epsilon_budget,
+                delta_budget,
                 compute_fuel_spent,
             },
         )

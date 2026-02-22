@@ -79,6 +79,8 @@ async fn create_and_seal_with_signals(
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
         })
         .await
         .expect("create")
@@ -217,6 +219,8 @@ async fn lineage_root_changes_topic_id_by_design() {
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
     };
     let req_b = pb::CreateClaimV2Request {
         signals: Some(pb::TopicSignalsV2 {
@@ -227,6 +231,8 @@ async fn lineage_root_changes_topic_id_by_design() {
         claim_name: "lineage-b".into(),
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
         ..req_a.clone()
     };
     let a = client

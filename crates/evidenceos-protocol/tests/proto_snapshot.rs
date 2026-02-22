@@ -22,7 +22,7 @@ fn canonical_proto_checksum_matches_snapshot() {
     let proto = include_bytes!("../proto/evidenceos.proto");
     let digest = Sha256::digest(proto);
     let actual = hex::encode(digest);
-    let expected = "40cec7d978c1f5abfac670ef5e061a8f6507dd3d5a8de5da4a51551c3a0e88e8";
+    let expected = "9d53726935aa537ab68849be060bc20cef2fe675b57a1ec8fc974aab928a4099";
     assert_eq!(
         actual, expected,
         "canonical proto changed; update snapshot intentionally"
@@ -49,7 +49,7 @@ fn descriptor_set_checksum_matches_snapshot() {
 
     let bytes = std::fs::read(&descriptor).expect("read descriptor set");
     let actual = hex::encode(Sha256::digest(&bytes));
-    let expected = "e02bfa9c42e906a5f07dbe22d281da24221a87103a7f1aebd74a789c24501021";
+    let expected = "a251fa8df995d3fc13f0f1295f509e47efa306ec26a0630aca3d0d831fa55765";
     assert_eq!(
         actual, expected,
         "descriptor set changed; update snapshot intentionally"
