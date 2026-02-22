@@ -1,0 +1,40 @@
+{
+  "alpha": 0.05,
+  "k_bits_budget": 3.0,
+  "access_credit_budget": 3.0,
+  "transcript": [
+    {
+      "oracle_call": "bounded_probe",
+      "oracle_output": "small",
+      "op": {
+        "kind": "charge_all",
+        "k_bits": 2.0,
+        "epsilon": 0.005,
+        "delta": 0.0,
+        "access_credit": 2.0,
+        "event_kind": "probe",
+        "meta": { "round": 1 }
+      }
+    },
+    {
+      "oracle_call": "bounded_probe",
+      "oracle_output": "small+",
+      "op": {
+        "kind": "charge_all",
+        "k_bits": 1.2,
+        "epsilon": 0.005,
+        "delta": 0.0,
+        "access_credit": 1.2,
+        "event_kind": "probe",
+        "meta": { "round": 2 }
+      }
+    }
+  ],
+  "expected": {
+    "k_bits_total": 2.0,
+    "alpha_prime": 0.0125,
+    "certification_barrier": 80.0,
+    "frozen_transitions": [false, true],
+    "final_frozen": true
+  }
+}
