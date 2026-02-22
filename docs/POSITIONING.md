@@ -21,6 +21,10 @@ Through its "Bring Your Own Oracle" (BYOO) architecture, EvidenceOS separates sa
 
 **Note on BYOO Enforcement:** For risks like Toxicity and Hallucinations, EvidenceOS does not natively *detect* the violation; the quality of detection is strictly bounded by the external policy oracle provided by the operator. However, EvidenceOS guarantees that the *enforcement* of that oracle is non-bypassable. An agent cannot adaptively brute-force a hallucination detector without exhausting its k-budget and facing deterministic termination (`FROZEN`).
 
+**The Canonical Realization Map.** The mechanism that makes Theorem 1 mechanically enforceable (rather than conventionally assumed) is the Canonical Realization Map R: Y → {0,1}^ℓ. The kernel enforces four checkable conditions at the wire boundary: (i) alphabet closure — every oracle response maps to exactly one element; (ii) no padding leakage — the kernel rejects byte sequences encoding metadata beyond the canonical bits; (iii) non-canonical rejection — ambiguous encodings are rejected before the leakage charge is assessed; (iv) charge on canonical output only — leakage k_i = log2|Y_i| is assessed against the post-canonicalization alphabet, not internal state. Together, these ensure the transcript support size is exactly 2^k_tot, making Theorem 1 tight with respect to the kernel-visible interface.
+
+Status: Canonical realization is Live in the Rust kernel. See UVP paper Section 5.1.
+
 ---
 
 ## Section 2: Industry Applications
@@ -55,6 +59,8 @@ While this creates a perfectly optimized environment for bounded extraction, it 
 
 The authors acknowledge this reality. We note that deployment in high-risk domains requires strict governance controls outside the protocol itself—specifically NullSpec pre-commitment, operator key management, and cryptographic audit transparency—to close the dual-use gap. This open-source release is intended to advance foundational defensive systems research, not to provide a blueprint for offensive use.
 
+**ETL and recursive revocation.** All certified claims are nodes in an append-only dependency DAG stored in the Evidence Transparency Log. If a root claim is revoked — because its holdout was compromised, its NullSpec was manipulated, or a governance violation is detected — all descendant claims are automatically tainted and certification is denied for any lineage that depends on the revoked root. This makes retroactive governance meaningful: a bad actor cannot use a fraudulent root certification as permanent cover for downstream claims.
+
 ---
 
 ## Section 4: Connection to Active Research (Capability Spillover)
@@ -88,6 +94,8 @@ Here is how EvidenceOS physically enforces the budget across distributed boundar
   
 * **Across Sessions and Variable Time (The Persistent Ledger):**
   Standard API rate limits reset at midnight or when a session token expires. EvidenceOS budgets do not reset with time. Every query's budget consumption is written to the **Conservation Ledger** and permanently anchored in the append-only Evidence Transparency Log (ETL). If an adversary asks one question today, disconnects, and comes back three months later with a new session ID to ask the second question, the ledger simply resumes the math from where it left off. 
+
+**Across Protocol Time (DLC Epoch Settlement).** Standard evaluation APIs expose wall-clock timing as an implicit output channel. EvidenceOS uses a Deterministic Logical Clock (DLC): kernel responses are released only on deterministic logical epoch boundaries, decoupling output timing from data-dependent runtime. An adversary observing latency learns nothing about holdout-dependent computation. For high-assurance deployments, Path-Length Normalization (PLN) additionally pads execution to a fixed cycle budget, driving timing mutual information to near zero (Experiment 3: DLC+PLN reduces attacker accuracy from 0.994 to 0.504).
 
 
 
@@ -186,7 +194,27 @@ EvidenceOS sees that all three oracles touch the same "holdout" (the software bi
 
 
 
-**Status:** Scenarios 6.1 and 6.4 are sim-tested (Experiments 2, 11). Scenario 6.3 is Live (Experiments 1, 8, 9). Scenario 6.2 joint revocation is Architecture specified. See `TEST_COVERAGE_MATRIX.md`.
+### 6.5 The "Stale Model" Drift Attack (Non-Stationarity Laundering)
+
+**Adversary:** A researcher runs a long-term evaluation campaign. Over time, the underlying data distribution shifts (concept drift), but the agent continues submitting claims calibrated to the old distribution. The agent exploits the stale calibration to generate misleadingly high e-values, inflating evidence wealth W without genuine predictive power.
+
+**The Trigger:** The **Canary Pulse** drift circuit breaker. EvidenceOS maintains a separate drift e-process E_drift that evaluates a reserved canary signal. If E_drift exceeds the drift threshold alpha_drift, the kernel enters FROZEN regardless of the agent's accumulated W.
+
+**The Outcome:** Certification halts and an incident capsule is appended to the ETL. No new certifications are issued until the epoch is recalibrated with fresh holdout data. The agent cannot "ride out" a distribution shift by accumulating W during the stale period.
+
+*Status: Canary Pulse is Sim-tested. See UVP paper Section 13 and the experimental artifacts.*
+
+### 6.6 The "Correlation Hole" (Cross-Vault Composition Attack)
+
+**Adversary:** A multi-vault agent obtains e-values from two different evaluation modules that share a holdout. It combines them using a naive product rule, hoping the compounded statistic crosses the certification barrier faster than either vault alone.
+
+**The Trigger:** **Conservative E-merging.** Under near-independence, the product rule holds. Under strong correlation (Experiment 7b: rho ≈ 0.88), the product rule violates alpha = 0.05, producing a false-pass rate of 0.188 — nearly 4x the target. EvidenceOS uses a weighted arithmetic mean (E-merge) rather than the product rule when vault dependence cannot be certified low.
+
+**The Outcome:** The combined e-value respects the alpha bound regardless of correlation. The agent cannot exploit shared holdout structure to inflate a joint certification.
+
+*Status: Sim-tested. Experiment 7b shows e-merge FPR ≤ alpha at all correlation levels tested. See UVP paper Section 18.4 and Figure 12.*
+
+**Status:** Scenarios 6.1 and 6.4 are sim-tested (Experiments 2, 11). Scenario 6.3 is Live (Experiments 1, 8, 9). Scenario 6.2 topic budgeting is Sim-tested (Experiment 11); joint revocation propagation across all identities is Architecture specified. Scenarios 6.5 and 6.6 are Sim-tested (Canary Pulse experiments; Experiment 7b). See TEST_COVERAGE_MATRIX.md.
 
 ## Section 7: Enabling Healthy Discovery (The Safety Paradox)
 
@@ -214,4 +242,5 @@ Unlike a "ban," which is often permanent and opaque, EvidenceOS provides a clear
 *Status: HEAVY lane routing is Live. Broad TopicHash configuration is operator-controlled today. Research manifold NullSpecs for distinguishing systematic investigation from brute-force probing are a Roadmap item.*
 
 ---
-*Last updated: February 2026. Assurance status reflects submission state at FORC 2026.*
+*Last updated: February 2026. Assurance status reflects
+submission state at FORC 2026.*
