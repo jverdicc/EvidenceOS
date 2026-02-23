@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use evidenceos_auth_protocol::verify_signature;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tonic::metadata::MetadataMap;
@@ -133,10 +134,6 @@ impl RequestGuard {
                 if production_mode() && timestamp.is_none() {
                     return Err(Status::unauthenticated("missing x-evidenceos-timestamp"));
                 }
-                if let Some(ts) = timestamp {
-                    validate_timestamp_skew(ts, DEFAULT_REPLAY_TTL)?;
-                }
-
                 let Some(secret) = keys.get(key_id) else {
                     return Err(Status::unauthenticated("unknown x-evidenceos-key-id"));
                 };
@@ -147,16 +144,8 @@ impl RequestGuard {
                 let Ok(sig_header) = sig_header.to_str() else {
                     return Err(Status::unauthenticated("invalid x-evidenceos-signature"));
                 };
-                let Some(sig_hex) = sig_header.strip_prefix("sha256=") else {
-                    return Err(Status::unauthenticated("invalid signature format"));
-                };
-                let Ok(provided_sig) = hex::decode(sig_hex) else {
-                    return Err(Status::unauthenticated("invalid signature"));
-                };
 
-                let payload = signing_material(req_id, path, timestamp);
-                let expected = hmac_sha256(secret, payload.as_bytes());
-                if !constant_time_eq(expected.as_slice(), provided_sig.as_slice()) {
+                if !verify_signature(secret, req_id, path, timestamp.as_deref(), sig_header) {
                     return Err(Status::unauthenticated("invalid signature"));
                 }
 
@@ -226,13 +215,6 @@ fn production_mode() -> bool {
         .unwrap_or(false)
 }
 
-fn signing_material(request_id: &str, path: &str, timestamp: Option<u64>) -> String {
-    match timestamp {
-        Some(timestamp) => format!("{request_id}:{path}:{timestamp}"),
-        None => format!("{request_id}:{path}"),
-    }
-}
-
 #[allow(clippy::result_large_err)]
 fn validate_request_id(metadata: &MetadataMap) -> Result<&str, Status> {
     let Some(req_id) = read_request_id(metadata) else {
@@ -251,17 +233,21 @@ fn validate_request_id(metadata: &MetadataMap) -> Result<&str, Status> {
 }
 
 #[allow(clippy::result_large_err)]
-fn read_timestamp(metadata: &MetadataMap) -> Result<Option<u64>, Status> {
+fn read_timestamp(metadata: &MetadataMap) -> Result<Option<String>, Status> {
     let Some(timestamp) = metadata.get("x-evidenceos-timestamp") else {
         return Ok(None);
     };
     let Ok(timestamp) = timestamp.to_str() else {
         return Err(Status::unauthenticated("invalid x-evidenceos-timestamp"));
     };
-    let Ok(timestamp) = timestamp.parse::<u64>() else {
+    if timestamp.is_empty() {
+        return Err(Status::unauthenticated("invalid x-evidenceos-timestamp"));
+    }
+    let Ok(parsed) = timestamp.parse::<u64>() else {
         return Err(Status::unauthenticated("invalid x-evidenceos-timestamp"));
     };
-    Ok(Some(timestamp))
+    validate_timestamp_skew(parsed, DEFAULT_REPLAY_TTL)?;
+    Ok(Some(timestamp.to_string()))
 }
 
 #[allow(clippy::result_large_err)]
@@ -280,45 +266,6 @@ fn validate_timestamp_skew(timestamp: u64, max_skew: Duration) -> Result<(), Sta
 fn read_request_id(metadata: &MetadataMap) -> Option<&str> {
     let value = metadata.get("x-request-id")?;
     value.to_str().ok()
-}
-
-fn hmac_sha256(secret: &[u8], message: &[u8]) -> [u8; 32] {
-    const BLOCK_SIZE: usize = 64;
-    let mut key_block = [0u8; BLOCK_SIZE];
-    if secret.len() > BLOCK_SIZE {
-        let digest = Sha256::digest(secret);
-        key_block[..digest.len()].copy_from_slice(&digest);
-    } else {
-        key_block[..secret.len()].copy_from_slice(secret);
-    }
-
-    let mut o_key_pad = [0u8; BLOCK_SIZE];
-    let mut i_key_pad = [0u8; BLOCK_SIZE];
-    for i in 0..BLOCK_SIZE {
-        o_key_pad[i] = key_block[i] ^ 0x5c;
-        i_key_pad[i] = key_block[i] ^ 0x36;
-    }
-
-    let mut inner = Sha256::new();
-    inner.update(i_key_pad);
-    inner.update(message);
-    let inner_hash = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(o_key_pad);
-    outer.update(inner_hash);
-    outer.finalize().into()
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 pub fn derive_caller_identity(metadata: &MetadataMap) -> CallerIdentity {
@@ -448,7 +395,8 @@ pub fn decode_with_max_size<T: Message + Default>(
 mod tests {
     use std::collections::HashMap;
 
-    use super::{hmac_sha256, signing_material, AuthConfig, RequestGuard};
+    use super::{AuthConfig, RequestGuard};
+    use evidenceos_auth_protocol::{sign_hex, signing_material};
     use tonic::metadata::MetadataValue;
     use tonic::service::Interceptor;
     use tonic::{Code, GrpcMethod, Request};
@@ -479,10 +427,10 @@ mod tests {
                 MetadataValue::try_from(key_id).expect("key id"),
             );
         }
-        let sig = hex::encode(hmac_sha256(
+        let sig = sign_hex(
             secret,
-            signing_material(req_id, &format!("/{}/{}", path.0, path.1), None).as_bytes(),
-        ));
+            &signing_material(req_id, &format!("/{}/{}", path.0, path.1), None),
+        );
         req.metadata_mut().insert(
             "x-evidenceos-signature",
             MetadataValue::try_from(format!("sha256={sig}")).expect("signature"),
@@ -562,10 +510,10 @@ mod tests {
             .insert(GrpcMethod::new("evidenceos.v1.EvidenceOS", "CreateClaimV2"));
         req.metadata_mut()
             .insert("x-request-id", MetadataValue::from_static("req-2"));
-        let sig = hex::encode(hmac_sha256(
+        let sig = sign_hex(
             &key,
-            signing_material("req-2", "/evidenceos.v1.EvidenceOS/Health", None).as_bytes(),
-        ));
+            &signing_material("req-2", "/evidenceos.v1.EvidenceOS/Health", None),
+        );
         req.metadata_mut().insert(
             "x-evidenceos-signature",
             MetadataValue::try_from(format!("sha256={sig}")).expect("signature"),
@@ -660,10 +608,10 @@ mod tests {
             .insert("x-request-id", MetadataValue::from_static("req-ts"));
         req.metadata_mut()
             .insert("x-evidenceos-timestamp", MetadataValue::from_static("1"));
-        let sig = hex::encode(hmac_sha256(
+        let sig = sign_hex(
             &key,
-            signing_material("req-ts", "/evidenceos.v1.EvidenceOS/Health", Some(1)).as_bytes(),
-        ));
+            &signing_material("req-ts", "/evidenceos.v1.EvidenceOS/Health", Some("1")),
+        );
         req.metadata_mut().insert(
             "x-evidenceos-signature",
             MetadataValue::try_from(format!("sha256={sig}")).expect("signature"),

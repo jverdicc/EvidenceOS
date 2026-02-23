@@ -12,6 +12,7 @@ evidenceos-core = { path = "../evidenceos-core" }
 evidenceos-protocol = { path = "../evidenceos-protocol" }
 evidenceos-guest-abi = { path = "../evidenceos-guest-abi" }
 evidenceos-attest = { path = "../evidenceos-attest" }
+evidenceos-auth-protocol = { path = "../evidenceos-auth-protocol" }
 
 anyhow = "1"
 thiserror = "1"

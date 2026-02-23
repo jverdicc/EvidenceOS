@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "evidenceos-auth-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
