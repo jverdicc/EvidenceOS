@@ -59,10 +59,10 @@ def test_generate_report_outputs_exist(tmp_path: Path) -> None:
         tmp_path / "trial.etl",
         [
             {"schema": "evidenceos.v2.preflight", "eligible": True},
-            _capsule(1, "A", decision=1, certified=False),  # adversary success
+            _capsule(1, "A", decision=1, certified=True),  # adversary success (certified)
             _capsule(2, "A", frozen=True),  # frozen
             _capsule(3, "B", state="REVOKED"),  # incident
-            _capsule(4, "B", decision=1, certified=True),  # censored
+            _capsule(4, "B", decision=1, certified=False, state="ACTIVE"),  # censored
         ],
     )
 
@@ -89,10 +89,10 @@ def test_synthetic_fixture_cif_monotone_and_consort_counts(tmp_path: Path) -> No
 
     records = [
         {"schema": "evidenceos.v2.preflight", "eligible": True},
-        _capsule(1, "A", decision=1, certified=False),
+        _capsule(1, "A", decision=1, certified=True),
         _capsule(2, "A", frozen=True),
         _capsule(3, "B", state="REVOKED"),
-        _capsule(4, "B", decision=1, certified=True),
+        _capsule(4, "B", decision=1, certified=False, state="ACTIVE"),
     ]
     etl_path = _write_etl(tmp_path / "trial_synth.etl", records)
 

@@ -10,6 +10,7 @@ from analysis.epistemic_trial.extract_from_capsules import (
     EVENT_ADVERSARY_SUCCESS,
     EVENT_CENSORED,
     EVENT_FROZEN_CONTAINMENT,
+    extract_capsule_rows,
     run_extraction,
 )
 
@@ -61,9 +62,9 @@ def test_extractor_emits_kbits_time_and_event_type(tmp_path: Path) -> None:
     etl = _write_etl(
         tmp_path / "capsules.etl",
         [
-            _capsule("c1", 12.5, decision=1, frozen=False, certified=False),
+            _capsule("c1", 12.5, decision=1, frozen=False, certified=True),
             _capsule("c2", 3.0, decision=3, frozen=True),
-            _capsule("c3", 6.0, decision=1, frozen=False, certified=True),
+            _capsule("c3", 6.0, decision=1, frozen=False, certified=False),
         ],
     )
     out = tmp_path / "capsules.csv"
@@ -92,6 +93,18 @@ def test_extractor_treats_frozen_state_as_event_when_ledger_flag_missing(tmp_pat
     assert rows[0]["outcome"] == "FROZEN"
 
 
+
+
+def test_extractor_optionally_treats_settled_as_success() -> None:
+    settled = _capsule("c5", 4.0, state="SETTLED", certified=False)
+
+    rows_default = extract_capsule_rows([settled])
+    assert rows_default[0]["event_type"] == EVENT_CENSORED
+
+    rows_opt_in = extract_capsule_rows([settled], include_settled_success=True)
+    assert rows_opt_in[0]["event_type"] == EVENT_ADVERSARY_SUCCESS
+
+
 def test_missing_required_field_fails_closed(tmp_path: Path) -> None:
     broken = _capsule("c3", 1.0)
     del broken["ledger"]["k_bits_total"]
@@ -99,3 +112,15 @@ def test_missing_required_field_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(CapsuleExtractionError, match="missing required field: ledger.k_bits_total"):
         run_extraction(etl, tmp_path / "broken.csv")
+
+
+def test_extractor_treats_ledger_snapshot_frozen_as_event(tmp_path: Path) -> None:
+    rec = _capsule("c6", 2.0, frozen=False, state="ACTIVE")
+    rec["ledger_snapshot"] = {"frozen": True}
+    etl = _write_etl(tmp_path / "capsules-frozen-snapshot.etl", [rec])
+
+    out = tmp_path / "capsules-frozen-snapshot.csv"
+    rows = run_extraction(etl, out)
+
+    assert rows[0]["event_type"] == EVENT_FROZEN_CONTAINMENT
+    assert rows[0]["frozen_event"] == 1
