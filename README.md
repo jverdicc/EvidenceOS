@@ -315,7 +315,8 @@ cargo test --workspace
 EvidenceOS keeps test evidence and coverage mapping in-repo:
 
 - Test evidence procedures/results: [`docs/TEST_EVIDENCE.md`](docs/TEST_EVIDENCE.md)
-- Coverage matrix by mechanism and parameter class: [`docs/TEST_COVERAGE_MATRIX.md`](docs/TEST_COVERAGE_MATRIX.md)
+- Coverage matrix (mechanism-level): [`docs/TEST_COVERAGE_MATRIX.md`](docs/TEST_COVERAGE_MATRIX.md)
+- Coverage matrix (parameter-level appendix): [`docs/TEST_COVERAGE_PARAMETERS.md`](docs/TEST_COVERAGE_PARAMETERS.md)
 
 Baseline reproducibility commands:
 

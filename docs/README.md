@@ -14,7 +14,8 @@ Key starting points:
 - [Clinical trials framework quickstart (workflow + examples)](integrations/fda_clinical_trials.md)
 - [Oracle design and controls](ORACLES.md)
 - [Testing evidence](TEST_EVIDENCE.md)
-- [Coverage matrix](TEST_COVERAGE_MATRIX.md)
+- [Coverage matrix (mechanism-level)](TEST_COVERAGE_MATRIX.md)
+- [Coverage matrix (parameter-level appendix)](TEST_COVERAGE_PARAMETERS.md)
 - [LangChain preflight wrapper configuration](LANGCHAIN_WRAPPER.md)
 
 ## Integration Guides
