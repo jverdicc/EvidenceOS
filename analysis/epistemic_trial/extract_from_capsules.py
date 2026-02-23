@@ -20,6 +20,9 @@ _REQUIRED_COLUMNS = [
     "intervention_id",
     "trial_nonce_b64",
     "k_bits_total",
+    "duration_kbits",
+    "time",
+    "event_type",
     "frozen_event",
     "censored",
     "lane",
@@ -32,6 +35,11 @@ _REQUIRED_COLUMNS = [
     "nullspec_id",
     "outcome",
 ]
+
+EVENT_CENSORED = 0
+EVENT_ADVERSARY_SUCCESS = 1
+EVENT_FROZEN_CONTAINMENT = 2
+EVENT_INCIDENT = 3
 
 
 def _require(payload: dict[str, Any], path: str, etl_index: int) -> Any:
@@ -100,15 +108,36 @@ def extract_capsule_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 f"capsule at ETL index {etl_index} has non-boolean ledger.frozen"
             )
 
+        state = str(record.get("state", "")).upper()
+        canary_incident = bool(record.get("canary_incident"))
+        revoked_incident = state in {"REVOKED", "TAINTED", "STALE"}
+        certified = bool(record.get("certified"))
+        adversary_success = bool(record.get("adversary_success")) or (
+            record.get("decision") == 1 and not certified
+        )
+
+        if frozen:
+            event_type = EVENT_FROZEN_CONTAINMENT
+        elif revoked_incident or canary_incident:
+            event_type = EVENT_INCIDENT
+        elif adversary_success:
+            event_type = EVENT_ADVERSARY_SUCCESS
+        else:
+            event_type = EVENT_CENSORED
+
+        kbits = float(k_bits_total)
         row = {
             "claim_id": claim_id,
             "ended_at": int(record.get("ended_at", etl_index)),
             "arm_id": record.get("trial_arm_id"),
             "intervention_id": record.get("trial_intervention_id"),
             "trial_nonce_b64": _normalize_trial_nonce_b64(record.get("trial_nonce_hex"), etl_index),
-            "k_bits_total": float(k_bits_total),
+            "k_bits_total": kbits,
+            "duration_kbits": kbits,
+            "time": kbits,
+            "event_type": event_type,
             "frozen_event": 1 if frozen else 0,
-            "censored": 0 if frozen else 1,
+            "censored": 1 if event_type == EVENT_CENSORED else 0,
             "lane": record.get("lane") or record.get("eprocess_kind") or "unknown",
             "adversary_type": record.get("adversary_type"),
             "holdout_ref": record.get("holdout_ref"),
@@ -129,6 +158,9 @@ def read_extracted_rows(path: Path) -> list[dict[str, Any]]:
             rows = list(csv.DictReader(f))
         for row in rows:
             row["k_bits_total"] = float(row["k_bits_total"])
+            row["duration_kbits"] = float(row["duration_kbits"])
+            row["time"] = float(row["time"])
+            row["event_type"] = int(row["event_type"])
             row["frozen_event"] = int(row["frozen_event"])
             row["censored"] = int(row["censored"])
             row["arm_id"] = int(row["arm_id"]) if row["arm_id"] not in ("", None) else None
