@@ -30,6 +30,8 @@ const DEFAULT_REPLAY_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_REPLAY_IDS: usize = 10_000;
 const MAX_REQUEST_ID_LEN: usize = 128;
 const MAX_SCOPES_HEADER_LEN: usize = 1024;
+const DEFAULT_HMAC_KEY_ID: &str = "default";
+const MAX_KEY_ID_LEN: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalRole {
@@ -61,7 +63,7 @@ pub enum AuthConfig {
         agent_tokens: HashSet<String>,
         auditor_tokens: HashSet<String>,
     },
-    HmacKey(Vec<u8>),
+    HmacKeyring(HashMap<String, Vec<u8>>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,15 +131,20 @@ impl RequestGuard {
                 }
                 Err(Status::unauthenticated("invalid bearer token"))
             }
-            Some(AuthConfig::HmacKey(secret)) => {
+            Some(AuthConfig::HmacKeyring(keys)) => {
                 if path == "unknown" {
                     return Err(Status::unauthenticated("missing grpc method"));
                 }
                 let req_id = validate_request_id(metadata)?;
+                let key_id = read_key_id(metadata)?;
                 let timestamp = read_timestamp(metadata)?;
                 if let Some(ts) = timestamp {
                     validate_timestamp_skew(ts, DEFAULT_REPLAY_TTL)?;
                 }
+
+                let Some(secret) = keys.get(key_id) else {
+                    return Err(Status::unauthenticated("unknown x-evidenceos-key-id"));
+                };
 
                 let Some(sig_header) = metadata.get("x-evidenceos-signature") else {
                     return Err(Status::unauthenticated("missing x-evidenceos-signature"));
@@ -172,6 +179,24 @@ impl RequestGuard {
             request.set_timeout(timeout);
         }
     }
+}
+
+#[allow(clippy::result_large_err)]
+fn read_key_id(metadata: &MetadataMap) -> Result<&str, Status> {
+    let key_id = metadata
+        .get("x-evidenceos-key-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(DEFAULT_HMAC_KEY_ID);
+    if key_id.is_empty() || key_id.len() > MAX_KEY_ID_LEN {
+        return Err(Status::unauthenticated("invalid x-evidenceos-key-id"));
+    }
+    if key_id
+        .bytes()
+        .any(|b| !(0x21..=0x7e).contains(&b) || b == b':')
+    {
+        return Err(Status::unauthenticated("invalid x-evidenceos-key-id"));
+    }
+    Ok(key_id)
 }
 
 impl Interceptor for RequestGuard {
@@ -485,6 +510,8 @@ pub fn decode_with_max_size<T: Message + Default>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{hmac_sha256, signing_material, AuthConfig, RequestGuard};
     use tonic::metadata::MetadataValue;
     use tonic::service::Interceptor;
@@ -495,12 +522,27 @@ mod tests {
         req_id: &str,
         secret: &[u8],
     ) -> Request<()> {
+        hmac_request_with_key_id(path, req_id, secret, None)
+    }
+
+    fn hmac_request_with_key_id(
+        path: (&'static str, &'static str),
+        req_id: &str,
+        secret: &[u8],
+        key_id: Option<&str>,
+    ) -> Request<()> {
         let mut req = Request::new(());
         req.extensions_mut().insert(GrpcMethod::new(path.0, path.1));
         req.metadata_mut().insert(
             "x-request-id",
             MetadataValue::try_from(req_id).expect("request id"),
         );
+        if let Some(key_id) = key_id {
+            req.metadata_mut().insert(
+                "x-evidenceos-key-id",
+                MetadataValue::try_from(key_id).expect("key id"),
+            );
+        }
         let sig = hex::encode(hmac_sha256(
             secret,
             signing_material(req_id, &format!("/{}/{}", path.0, path.1), None).as_bytes(),
@@ -556,7 +598,13 @@ mod tests {
     #[test]
     fn correct_hmac_accepted() {
         let key = b"hmac-secret".to_vec();
-        let mut guard = RequestGuard::new(Some(AuthConfig::HmacKey(key.clone())), None);
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                key.clone(),
+            )]))),
+            None,
+        );
 
         let req = hmac_request(("evidenceos.v1.EvidenceOS", "Health"), "req-1", &key);
         guard.call(req).expect("hmac should pass");
@@ -565,7 +613,13 @@ mod tests {
     #[test]
     fn path_bound_signature_rejected_on_different_path() {
         let key = b"hmac-secret".to_vec();
-        let mut guard = RequestGuard::new(Some(AuthConfig::HmacKey(key.clone())), None);
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                key.clone(),
+            )]))),
+            None,
+        );
 
         let mut req = Request::new(());
         req.extensions_mut()
@@ -588,7 +642,13 @@ mod tests {
     #[test]
     fn replayed_request_id_rejected() {
         let key = b"hmac-secret".to_vec();
-        let mut guard = RequestGuard::new(Some(AuthConfig::HmacKey(key.clone())), None);
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                key.clone(),
+            )]))),
+            None,
+        );
 
         let req = hmac_request(("evidenceos.v1.EvidenceOS", "Health"), "req-replay", &key);
         guard.call(req).expect("first use accepted");
@@ -633,7 +693,13 @@ mod tests {
     #[test]
     fn timestamp_skew_rejected() {
         let key = b"hmac-secret".to_vec();
-        let mut guard = RequestGuard::new(Some(AuthConfig::HmacKey(key.clone())), None);
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                key.clone(),
+            )]))),
+            None,
+        );
         let mut req = Request::new(());
         req.extensions_mut()
             .insert(GrpcMethod::new("evidenceos.v1.EvidenceOS", "Health"));
@@ -651,6 +717,48 @@ mod tests {
         );
 
         let err = guard.call(req).expect_err("stale timestamp must fail");
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[test]
+    fn non_default_hmac_key_id_accepted() {
+        let default_key = b"default-secret".to_vec();
+        let rotating_key = b"rotating-secret".to_vec();
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([
+                ("default".to_string(), default_key),
+                ("kid-2026-01".to_string(), rotating_key.clone()),
+            ]))),
+            None,
+        );
+
+        let req = hmac_request_with_key_id(
+            ("evidenceos.v1.EvidenceOS", "Health"),
+            "req-kid",
+            &rotating_key,
+            Some("kid-2026-01"),
+        );
+        guard.call(req).expect("non-default key-id should pass");
+    }
+
+    #[test]
+    fn unknown_hmac_key_id_rejected() {
+        let default_key = b"default-secret".to_vec();
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                default_key.clone(),
+            )]))),
+            None,
+        );
+
+        let req = hmac_request_with_key_id(
+            ("evidenceos.v1.EvidenceOS", "Health"),
+            "req-unknown-kid",
+            &default_key,
+            Some("kid-does-not-exist"),
+        );
+        let err = guard.call(req).expect_err("unknown key-id must fail");
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 }

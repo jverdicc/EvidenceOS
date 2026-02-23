@@ -40,6 +40,7 @@ use evidenceos_daemon::server::{EvidenceOsService, NullSpecRegistryConfig};
 use evidenceos_daemon::telemetry::Telemetry;
 use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV2Server;
 use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as EvidenceOsV1Server;
+use std::collections::HashMap;
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-daemon")]
@@ -149,6 +150,30 @@ fn env_flag(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(default)
+}
+
+fn parse_hmac_keyring(raw: &str) -> Result<HashMap<String, Vec<u8>>, String> {
+    let mut keys = HashMap::new();
+    for entry in raw.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let Some((key_id, secret_hex)) = entry.split_once(':') else {
+            return Err("EVIDENCEOS_HMAC_KEYS entries must use kid:hexsecret format".to_string());
+        };
+        if key_id.trim().is_empty() {
+            return Err("EVIDENCEOS_HMAC_KEYS key-id must not be empty".to_string());
+        }
+        let secret = hex::decode(secret_hex.trim())
+            .map_err(|_| "EVIDENCEOS_HMAC_KEYS secrets must be valid hex".to_string())?;
+        if secret.is_empty() {
+            return Err("EVIDENCEOS_HMAC_KEYS secret must not be empty".to_string());
+        }
+        if keys.insert(key_id.trim().to_string(), secret).is_some() {
+            return Err("EVIDENCEOS_HMAC_KEYS contains duplicate key-id".to_string());
+        }
+    }
+    if keys.is_empty() {
+        return Err("EVIDENCEOS_HMAC_KEYS must define at least one key".to_string());
+    }
+    Ok(keys)
 }
 
 fn enforce_startup_safety(inputs: StartupSafetyInputs) -> Result<(), String> {
@@ -348,8 +373,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(count=%applied, "applied signed settlements");
     }
 
+    let hmac_keys_env = std::env::var("EVIDENCEOS_HMAC_KEYS").ok();
+    let hmac_shared_secret_env = std::env::var("EVIDENCEOS_HMAC_SHARED_SECRET").ok();
     if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
         return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());
+    }
+    if args.auth_token.is_some() && (hmac_keys_env.is_some() || hmac_shared_secret_env.is_some()) {
+        return Err(
+            "--auth-token is mutually exclusive with EVIDENCEOS_HMAC_KEYS/EVIDENCEOS_HMAC_SHARED_SECRET"
+                .into(),
+        );
     }
     if args.auth_token.is_some()
         && (!args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty())
@@ -361,8 +394,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.agent_tokens.is_empty() && args.auth_hmac_key.is_some() {
         return Err("--agent-tokens and --auth-hmac-key are mutually exclusive".into());
     }
+    if !args.agent_tokens.is_empty()
+        && (hmac_keys_env.is_some() || hmac_shared_secret_env.is_some())
+    {
+        return Err(
+            "--agent-tokens and EVIDENCEOS_HMAC_KEYS/EVIDENCEOS_HMAC_SHARED_SECRET are mutually exclusive"
+                .into(),
+        );
+    }
     if !args.auditor_tokens.is_empty() && args.auth_hmac_key.is_some() {
         return Err("--auditor-tokens and --auth-hmac-key are mutually exclusive".into());
+    }
+    if !args.auditor_tokens.is_empty()
+        && (hmac_keys_env.is_some() || hmac_shared_secret_env.is_some())
+    {
+        return Err(
+            "--auditor-tokens and EVIDENCEOS_HMAC_KEYS/EVIDENCEOS_HMAC_SHARED_SECRET are mutually exclusive"
+                .into(),
+        );
     }
     if !args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty() {
         if args.agent_tokens.iter().any(|t| t.trim().is_empty())
@@ -392,11 +441,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect(),
         })
     } else {
-        match (args.auth_token.clone(), args.auth_hmac_key.clone()) {
+        let keyring_env = if let Some(raw) = hmac_keys_env.as_deref() {
+            Some(parse_hmac_keyring(raw).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?)
+        } else {
+            None
+        };
+        let env_default_key = hmac_shared_secret_env
+            .as_ref()
+            .map(|v| v.as_bytes().to_vec())
+            .filter(|v| !v.is_empty());
+        if hmac_shared_secret_env.is_some() && env_default_key.is_none() {
+            return Err("EVIDENCEOS_HMAC_SHARED_SECRET must not be empty".into());
+        }
+
+        match (
+            args.auth_token.clone(),
+            args.auth_hmac_key.clone(),
+            keyring_env,
+        ) {
             (Some(token), None) => Some(AuthConfig::BearerToken(token)),
-            (None, Some(hmac)) => Some(AuthConfig::HmacKey(hmac.into_bytes())),
-            (None, None) => None,
-            (Some(_), Some(_)) => return Err("mutually exclusive auth already validated".into()),
+            (None, Some(hmac), None) => Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                hmac.into_bytes(),
+            )]))),
+            (None, Some(_), Some(_)) => {
+                return Err(
+                    "--auth-hmac-key and EVIDENCEOS_HMAC_KEYS are mutually exclusive".into(),
+                )
+            }
+            (None, None, Some(mut keys)) => {
+                if let Some(default_secret) = env_default_key {
+                    if keys.contains_key("default") {
+                        return Err(
+                            "EVIDENCEOS_HMAC_SHARED_SECRET cannot override default key in EVIDENCEOS_HMAC_KEYS"
+                                .into(),
+                        );
+                    }
+                    keys.insert("default".to_string(), default_secret);
+                }
+                Some(AuthConfig::HmacKeyring(keys))
+            }
+            (None, None, None) => env_default_key.map(|secret| {
+                AuthConfig::HmacKeyring(HashMap::from([("default".to_string(), secret)]))
+            }),
+            (Some(_), Some(_), _) => return Err("mutually exclusive auth already validated".into()),
         }
     };
 
