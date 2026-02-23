@@ -540,6 +540,12 @@ struct Claim {
     execution_nonce: u64,
     #[serde(default)]
     holdout_pool_scope: HoldoutPoolScope,
+    #[serde(default)]
+    reserved_k_bits: f64,
+    #[serde(default)]
+    reserved_access_credit: f64,
+    #[serde(default)]
+    reserved_expires_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1124,6 +1130,8 @@ pub struct EvidenceOsService {
     default_holdout_access_credit_budget: f64,
     holdout_pool_scope: HoldoutPoolScope,
     strict_pln: StrictPlnConfig,
+    reservation_ttl_ms: u64,
+    reservation_sweep_interval: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -1527,6 +1535,24 @@ impl EvidenceOsService {
             .map(HoldoutPoolScope::parse)
             .transpose()?
             .unwrap_or(HoldoutPoolScope::Global);
+        let reservation_ttl_ms = std::env::var("EVIDENCEOS_RESERVATION_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600_000);
+        if reservation_ttl_ms == 0 {
+            return Err(Status::invalid_argument("reservation_ttl_ms must be > 0"));
+        }
+        let reservation_sweep_interval_secs =
+            std::env::var("EVIDENCEOS_RESERVATION_SWEEP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5);
+        if reservation_sweep_interval_secs == 0 {
+            return Err(Status::invalid_argument(
+                "reservation_sweep_interval_secs must be > 0",
+            ));
+        }
+        let reservation_sweep_interval = Duration::from_secs(reservation_sweep_interval_secs);
 
         let trial_harness_enabled = std::env::var("EVIDENCEOS_TRIAL_HARNESS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1621,6 +1647,8 @@ impl EvidenceOsService {
             default_holdout_access_credit_budget,
             holdout_pool_scope,
             strict_pln: StrictPlnConfig::from_env(),
+            reservation_ttl_ms,
+            reservation_sweep_interval,
         })
     }
 
@@ -1812,6 +1840,93 @@ impl EvidenceOsService {
 
     pub fn policy_oracles(&self) -> Arc<Vec<PolicyOracleEngine>> {
         self.policy_oracles.clone()
+    }
+
+    pub fn reservation_sweep_interval(&self) -> Duration {
+        self.reservation_sweep_interval
+    }
+
+    pub fn sweep_expired_reservations(&self) -> Result<usize, Status> {
+        let now_ms = current_time_unix_ms()?;
+        let mut expired_claims: Vec<[u8; 32]> = Vec::new();
+        {
+            let claims = self.state.claims.lock();
+            for (claim_id, claim) in claims.iter() {
+                if claim.reserved_k_bits <= 0.0 && claim.reserved_access_credit <= 0.0 {
+                    continue;
+                }
+                if claim.reserved_expires_at_unix_ms == 0
+                    || now_ms <= claim.reserved_expires_at_unix_ms
+                {
+                    continue;
+                }
+                if claim.state != ClaimState::Uncommitted && claim.state != ClaimState::Frozen {
+                    continue;
+                }
+                expired_claims.push(*claim_id);
+            }
+        }
+
+        if expired_claims.is_empty() {
+            return Ok(0);
+        }
+
+        let mut topic_pools = self.state.topic_pools.lock();
+        let mut holdout_pools = self.state.holdout_pools.lock();
+        let mut claims = self.state.claims.lock();
+        let mut expired_count = 0usize;
+
+        for claim_id in expired_claims {
+            let Some(claim) = claims.get_mut(&claim_id) else {
+                continue;
+            };
+            if claim.reserved_k_bits <= 0.0 && claim.reserved_access_credit <= 0.0 {
+                continue;
+            }
+            if claim.reserved_expires_at_unix_ms == 0 || now_ms <= claim.reserved_expires_at_unix_ms
+            {
+                continue;
+            }
+            if claim.state != ClaimState::Uncommitted && claim.state != ClaimState::Frozen {
+                continue;
+            }
+
+            let released_k_bits = claim.reserved_k_bits;
+            let released_access_credit = claim.reserved_access_credit;
+
+            let topic_pool = topic_pools
+                .get_mut(&claim.topic_id)
+                .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+            topic_pool.release_reserved(released_k_bits, released_access_credit)?;
+
+            let holdout_keys = self.holdout_pool_keys(
+                claim.holdout_handle_id,
+                &claim.owner_principal_id,
+                claim.holdout_pool_scope,
+            );
+            for holdout_key in holdout_keys {
+                let holdout_pool = holdout_pools
+                    .get_mut(&holdout_key)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                holdout_pool.release_reserved(released_k_bits, released_access_credit)?;
+            }
+
+            claim.reserved_k_bits = 0.0;
+            claim.reserved_access_credit = 0.0;
+            claim.reserved_expires_at_unix_ms = 0;
+            self.transition_claim(claim, ClaimState::Stale, 0.0, 0.0, None)?;
+            self.append_reservation_expired_incident(
+                claim,
+                released_k_bits,
+                released_access_credit,
+            )?;
+            expired_count = expired_count.saturating_add(1);
+        }
+
+        if expired_count > 0 {
+            persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
+        }
+        Ok(expired_count)
     }
 
     fn active_signing_key(&self) -> Result<&SigningKey, Status> {
@@ -4217,6 +4332,9 @@ mod tests {
             trial_commitment_hash: [0u8; 32],
             execution_nonce: 0,
             holdout_pool_scope: HoldoutPoolScope::Global,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
+            reserved_expires_at_unix_ms: 0,
         };
         let err = vault_context(
             &claim,
@@ -4282,7 +4400,100 @@ mod tests {
             trial_commitment_hash: [0u8; 32],
             execution_nonce: 0,
             holdout_pool_scope: HoldoutPoolScope::Global,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
+            reserved_expires_at_unix_ms: 0,
         }
+    }
+
+    #[test]
+    fn reservation_sweeper_releases_expired_claim_reservations() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            true,
+            telemetry,
+        )
+        .expect("service");
+
+        let claim_id = [11u8; 32];
+        let topic_id = [12u8; 32];
+        let holdout_handle_id = [13u8; 32];
+        let reserved = 7.0;
+
+        {
+            let mut claim = dummy_claim(claim_id, None);
+            claim.topic_id = topic_id;
+            claim.holdout_handle_id = holdout_handle_id;
+            claim.reserved_k_bits = reserved;
+            claim.reserved_access_credit = reserved;
+            claim.reserved_expires_at_unix_ms = 1;
+            svc.state.claims.lock().insert(claim_id, claim);
+        }
+
+        {
+            let mut topic_pools = svc.state.topic_pools.lock();
+            let mut pool = TopicBudgetPool::new("topic".to_string(), 100.0, 100.0).expect("pool");
+            pool.reserve(reserved, reserved).expect("reserve");
+            topic_pools.insert(topic_id, pool);
+        }
+
+        {
+            let holdout_keys =
+                svc.holdout_pool_keys(holdout_handle_id, "test-owner", HoldoutPoolScope::Global);
+            let mut holdout_pools = svc.state.holdout_pools.lock();
+            for key in holdout_keys {
+                let mut pool = HoldoutBudgetPool::new(key.clone(), 100.0, 100.0).expect("pool");
+                pool.reserve(reserved, reserved).expect("reserve");
+                holdout_pools.insert(key, pool);
+            }
+        }
+
+        let swept = svc.sweep_expired_reservations().expect("sweep");
+        assert_eq!(swept, 1);
+
+        let claim = svc
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .cloned()
+            .expect("claim");
+        assert_eq!(claim.state, ClaimState::Stale);
+        assert_eq!(claim.reserved_k_bits, 0.0);
+        assert_eq!(claim.reserved_access_credit, 0.0);
+        assert_eq!(claim.reserved_expires_at_unix_ms, 0);
+    }
+
+    #[test]
+    fn reservation_sweeper_skips_unexpired_claims() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            true,
+            telemetry,
+        )
+        .expect("service");
+
+        let claim_id = [21u8; 32];
+        let mut claim = dummy_claim(claim_id, None);
+        claim.reserved_k_bits = 5.0;
+        claim.reserved_access_credit = 5.0;
+        claim.reserved_expires_at_unix_ms = u64::MAX;
+        svc.state.claims.lock().insert(claim_id, claim);
+
+        let swept = svc.sweep_expired_reservations().expect("sweep");
+        assert_eq!(swept, 0);
+        let state = svc
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .map(|c| c.state)
+            .expect("claim");
+        assert_eq!(state, ClaimState::Uncommitted);
     }
 
     #[test]

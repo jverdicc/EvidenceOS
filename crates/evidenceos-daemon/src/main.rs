@@ -545,6 +545,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         grpc.await.map_err(|e| e.to_string())
     })];
 
+    {
+        let sweeper_svc = svc.clone();
+        let mut reservation_shutdown_rx = shutdown_tx.subscribe();
+        let sweep_interval = sweeper_svc.reservation_sweep_interval();
+        tasks.push(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(sweep_interval);
+            loop {
+                tokio::select! {
+                    _ = reservation_shutdown_rx.recv() => {
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        if let Err(err) = sweeper_svc.sweep_expired_reservations() {
+                            tracing::error!(error = %err, "reservation sweeper failed");
+                        }
+                    }
+                }
+            }
+            Ok::<(), String>(())
+        }));
+    }
+
     #[cfg(unix)]
     {
         let envelope_packs_dir = envelope_packs_dir.clone();
