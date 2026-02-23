@@ -39,6 +39,13 @@ EvidenceOS includes an **Epistemic Trial Harness** for clinical-trial-style eval
 - **Analysis pipeline:** [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md)
 - **FDA integration guidance:** [`docs/integrations/fda_clinical_trials.md`](docs/integrations/fda_clinical_trials.md)
 
+### Research Extensibility
+- docs/RESEARCH_EXTENSIBILITY.md — 
+  Extending EvidenceOS with new NullSpecs, cost 
+  models, e-processes, and oracles
+- docs/EPISTEMIC_TRIAL_HARNESS.md — 
+  Statistical design for comparing strategies
+
 ### Enable the framework
 
 - Define intervention/arm structure in `config/trial_arms.json`.

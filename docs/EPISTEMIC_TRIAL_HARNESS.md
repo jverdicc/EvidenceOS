@@ -2,6 +2,11 @@
 
 This document specifies how to run and analyze "trial-like" experiments against the DiscOS + EvidenceOS blackbox interface **without relying on implementation internals**. It aligns statistical claims with what ETL currently records.
 
+For extending EvidenceOS with new NullSpecs, cost
+models, and e-process constructions, see
+docs/RESEARCH_EXTENSIBILITY.md. This document covers
+the statistical design and analysis pipeline only.
+
 ## 1) Trial unit definition
 
 The harness supports three analysis units. Pick one before analysis and keep it fixed in the protocol.
