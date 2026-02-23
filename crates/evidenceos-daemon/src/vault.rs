@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
-use evidenceos_core::nullspec_contract::DraftNullSpecContractV1;
-use evidenceos_core::oracle::{AccuracyOracleState, HoldoutLabels, NullSpec, OracleResolution};
+use evidenceos_core::nullspec::SignedNullSpecContractV1;
+use evidenceos_core::oracle::{HoldoutLabels, OracleResolution};
 use evidenceos_core::structured_claims;
 use evidenceos_guest_abi::{
     IMPORT_EMIT_STRUCTURED_CLAIM, IMPORT_ORACLE_BUCKET_ALIAS, IMPORT_ORACLE_QUERY, MODULE_ENV,
@@ -46,7 +46,7 @@ pub struct VaultExecutionContext {
     pub holdout_labels: Vec<u8>,
     pub oracle_num_buckets: u32,
     pub oracle_delta_sigma: f64,
-    pub null_spec: DraftNullSpecContractV1,
+    pub null_spec: SignedNullSpecContractV1,
     pub output_schema_id: String,
 }
 
@@ -57,7 +57,6 @@ pub struct VaultExecutionResult {
     pub fuel_used: u64,
     pub oracle_calls: u32,
     pub output_bytes: u32,
-    pub e_value_total: f64,
     pub leakage_bits_total: f64,
     pub kout_bits_total: f64,
     pub oracle_buckets: Vec<u32>,
@@ -108,14 +107,16 @@ enum HostCallRecord {
 struct VaultHostState {
     config: VaultConfig,
     store_limits: StoreLimits,
-    oracle_state: AccuracyOracleState,
+    resolution: OracleResolution,
+    holdout: HoldoutLabels,
     holdout_len: usize,
+    last_preds: Option<Vec<u8>>,
+    last_raw: Option<f64>,
+    last_bucket: Option<u32>,
     oracle_calls: u32,
     output: Option<Vec<u8>>,
     host_error: Option<VaultError>,
     leakage_bits: f64,
-    accumulated_log_e_value: f64,
-    has_zero_e_value: bool,
     output_schema_id: String,
     kout_bits: f64,
     call_trace: Vec<HostCallRecord>,
@@ -159,27 +160,22 @@ impl VaultEngine {
         let resolution =
             OracleResolution::new(context.oracle_num_buckets, context.oracle_delta_sigma)
                 .map_err(|_| VaultError::InvalidConfig("invalid oracle resolution".to_string()))?;
-        let null_spec = NullSpec {
-            domain: context.null_spec.domain.clone(),
-            null_accuracy: context.null_spec.null_accuracy,
-            e_value_fn: context.null_spec.as_oracle_evalue(),
-        };
-        let oracle_state = AccuracyOracleState::new(holdout.clone(), resolution, null_spec)
-            .map_err(|_| VaultError::InvalidConfig("invalid oracle state".to_string()))?;
-
+        let holdout_len = holdout.len();
         let mut store = Store::new(
             &self.engine,
             VaultHostState {
                 config,
                 store_limits,
-                oracle_state,
-                holdout_len: holdout.len(),
+                resolution,
+                holdout,
+                holdout_len,
+                last_preds: None,
+                last_raw: None,
+                last_bucket: None,
                 oracle_calls: 0,
                 output: None,
                 host_error: None,
                 leakage_bits: 0.0,
-                accumulated_log_e_value: 0.0,
-                has_zero_e_value: false,
                 output_schema_id: context.output_schema_id.clone(),
                 kout_bits: 0.0,
                 call_trace: Vec::new(),
@@ -223,12 +219,6 @@ impl VaultEngine {
             host.oracle_calls,
         );
 
-        let e_value_total = if host.has_zero_e_value {
-            0.0
-        } else {
-            host.accumulated_log_e_value.exp()
-        };
-
         let oracle_buckets: Vec<u32> = host
             .call_trace
             .iter()
@@ -248,7 +238,6 @@ impl VaultEngine {
             fuel_used,
             oracle_calls: host.oracle_calls,
             output_bytes,
-            e_value_total,
             leakage_bits_total: host.leakage_bits,
             kout_bits_total: host.kout_bits,
             oracle_buckets,
@@ -278,29 +267,43 @@ impl VaultEngine {
                             return Err(anyhow::anyhow!("invalid oracle input"));
                         }
 
-                        let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
+                        let raw = host.holdout.accuracy(&preds).map_err(|_| {
                             host.host_error = Some(VaultError::InvalidOracleInput);
                             anyhow::anyhow!("oracle query failed")
                         })?;
-                        host.leakage_bits += oracle_result.k_bits;
-                        if oracle_result.e_value == 0.0 {
-                            host.has_zero_e_value = true;
-                            host.accumulated_log_e_value = f64::NEG_INFINITY;
-                        } else if oracle_result.e_value.is_finite() && oracle_result.e_value > 0.0 {
-                            if !host.has_zero_e_value {
-                                host.accumulated_log_e_value += oracle_result.e_value.ln();
-                            }
-                        } else {
+                        let bucket = host.resolution.quantize_unit_interval(raw).map_err(|_| {
                             host.host_error = Some(VaultError::InvalidOracleInput);
-                            return Err(anyhow::anyhow!("invalid oracle e-value"));
-                        }
+                            anyhow::anyhow!("oracle query failed")
+                        })?;
+                        let local = host
+                            .last_preds
+                            .as_ref()
+                            .map(|last| host.resolution.is_local(last, &preds))
+                            .transpose()
+                            .map_err(|_| {
+                                host.host_error = Some(VaultError::InvalidOracleInput);
+                                anyhow::anyhow!("oracle query failed")
+                            })?
+                            .unwrap_or(false);
+                        let output_bucket = match (local, host.last_raw, host.last_bucket) {
+                            (true, Some(prev_raw), Some(prev_bucket))
+                                if (raw - prev_raw).abs() < host.resolution.delta_sigma =>
+                            {
+                                prev_bucket
+                            }
+                            _ => bucket,
+                        };
+                        host.last_preds = Some(preds.clone());
+                        host.last_raw = Some(raw);
+                        host.last_bucket = Some(output_bucket);
+                        host.leakage_bits += host.resolution.bits_per_call();
                         let mut input_digest = [0_u8; 32];
                         input_digest.copy_from_slice(&Sha256::digest(&preds));
                         host.call_trace.push(HostCallRecord::OracleBucket {
                             input_digest,
-                            bucket: oracle_result.bucket,
+                            bucket: output_bucket,
                         });
-                        Ok(oracle_result.bucket as i32)
+                        Ok(output_bucket as i32)
                     },
                 )
                 .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
@@ -325,29 +328,43 @@ impl VaultEngine {
                             return Err(anyhow::anyhow!("invalid oracle input"));
                         }
 
-                        let oracle_result = host.oracle_state.query(&preds).map_err(|_| {
+                        let raw = host.holdout.accuracy(&preds).map_err(|_| {
                             host.host_error = Some(VaultError::InvalidOracleInput);
                             anyhow::anyhow!("oracle query failed")
                         })?;
-                        host.leakage_bits += oracle_result.k_bits;
-                        if oracle_result.e_value == 0.0 {
-                            host.has_zero_e_value = true;
-                            host.accumulated_log_e_value = f64::NEG_INFINITY;
-                        } else if oracle_result.e_value.is_finite() && oracle_result.e_value > 0.0 {
-                            if !host.has_zero_e_value {
-                                host.accumulated_log_e_value += oracle_result.e_value.ln();
-                            }
-                        } else {
+                        let bucket = host.resolution.quantize_unit_interval(raw).map_err(|_| {
                             host.host_error = Some(VaultError::InvalidOracleInput);
-                            return Err(anyhow::anyhow!("invalid oracle e-value"));
-                        }
+                            anyhow::anyhow!("oracle query failed")
+                        })?;
+                        let local = host
+                            .last_preds
+                            .as_ref()
+                            .map(|last| host.resolution.is_local(last, &preds))
+                            .transpose()
+                            .map_err(|_| {
+                                host.host_error = Some(VaultError::InvalidOracleInput);
+                                anyhow::anyhow!("oracle query failed")
+                            })?
+                            .unwrap_or(false);
+                        let output_bucket = match (local, host.last_raw, host.last_bucket) {
+                            (true, Some(prev_raw), Some(prev_bucket))
+                                if (raw - prev_raw).abs() < host.resolution.delta_sigma =>
+                            {
+                                prev_bucket
+                            }
+                            _ => bucket,
+                        };
+                        host.last_preds = Some(preds.clone());
+                        host.last_raw = Some(raw);
+                        host.last_bucket = Some(output_bucket);
+                        host.leakage_bits += host.resolution.bits_per_call();
                         let mut input_digest = [0_u8; 32];
                         input_digest.copy_from_slice(&Sha256::digest(&preds));
                         host.call_trace.push(HostCallRecord::OracleBucket {
                             input_digest,
-                            bucket: oracle_result.bucket,
+                            bucket: output_bucket,
                         });
-                        Ok(oracle_result.bucket as i32)
+                        Ok(output_bucket as i32)
                     },
                 )
                 .map_err(|err| VaultError::InvalidModule(err.to_string()))?;
@@ -527,20 +544,30 @@ fn compute_judge_trace_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
+    use evidenceos_core::nullspec::{
+        EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
+    };
 
     fn test_context() -> VaultExecutionContext {
         VaultExecutionContext {
             holdout_labels: vec![0, 1, 0, 1],
             oracle_num_buckets: 2,
             oracle_delta_sigma: 0.0,
-            null_spec: DraftNullSpecContractV1 {
-                id: "".to_string(),
-                domain: "test".to_string(),
-                null_accuracy: 0.5,
-                e_value: EValueSpecV1::Fixed(1.0),
-                created_at_unix: 0,
-                version: 1,
+            null_spec: SignedNullSpecContractV1 {
+                schema: NULLSPEC_SCHEMA_V1.to_string(),
+                nullspec_id: [0; 32],
+                oracle_id: "test".to_string(),
+                oracle_resolution_hash: [0; 32],
+                holdout_handle: "h1".to_string(),
+                epoch_created: 0,
+                ttl_epochs: 1,
+                kind: NullSpecKind::ParametricBernoulli { p: 0.5 },
+                eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+                    alt: vec![0.5, 0.5],
+                },
+                calibration_manifest_hash: None,
+                created_by: "k1".to_string(),
+                signature_ed25519: vec![0; 64],
             },
             output_schema_id: "legacy/v1".to_string(),
         }
