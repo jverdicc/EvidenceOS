@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -716,6 +716,9 @@ impl HoldoutBudgetPool {
             return Err(Status::invalid_argument("invalid holdout pool charge"));
         }
         let next_k = self.k_bits_spent + k_bits;
+        // CREDIT-EXTERNAL: enforcement point.
+        // Caller must have been pre-authorized by operator
+        // credit service. See docs/CREDIT_AND_ADMISSION.md
         let next_access = self.access_credit_spent + access_credit;
         if !next_k.is_finite() || !next_access.is_finite() {
             return Err(Status::invalid_argument("invalid holdout pool charge"));
@@ -727,6 +730,9 @@ impl HoldoutBudgetPool {
             return Err(Status::failed_precondition("holdout pool exhausted"));
         }
         self.k_bits_spent = next_k;
+        // CREDIT-EXTERNAL: enforcement point.
+        // Caller must have been pre-authorized by operator
+        // credit service. See docs/CREDIT_AND_ADMISSION.md
         self.access_credit_spent = next_access;
         Ok(())
     }
@@ -873,6 +879,97 @@ struct IdempotencyContext {
     request_hash: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreditError {
+    InvalidAmount,
+    UnknownPrincipal(String),
+    Insufficient {
+        principal_id: String,
+        requested: f64,
+        available: f64,
+    },
+    Io(String),
+    Parse(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreditBackend {
+    None,
+    ConfigFile(PathBuf),
+    // Grpc variant: roadmap
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CreditBalancesFile {
+    principals: HashMap<String, CreditBalanceEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CreditBalanceEntry {
+    balance: f64,
+    epoch_id: String,
+}
+
+impl CreditBackend {
+    pub fn from_env(state_dir: &Path) -> Self {
+        match std::env::var("EVIDENCEOS_CREDIT_BACKEND")
+            .unwrap_or_else(|_| "none".to_string())
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "config_file" => Self::ConfigFile(state_dir.join("credit_balances.json")),
+            _ => Self::None,
+        }
+    }
+
+    pub fn check_and_deduct(
+        &self,
+        principal_id: &str,
+        _claim_id: &str,
+        amount: f64,
+    ) -> Result<f64, CreditError> {
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(CreditError::InvalidAmount);
+        }
+        match self {
+            Self::None => Ok(f64::MAX),
+            Self::ConfigFile(path) => {
+                let mut raw = Vec::new();
+                File::open(path)
+                    .and_then(|mut f| f.read_to_end(&mut raw))
+                    .map_err(|e| CreditError::Io(e.to_string()))?;
+                let mut balances: CreditBalancesFile =
+                    serde_json::from_slice(&raw).map_err(|e| CreditError::Parse(e.to_string()))?;
+                let entry = balances
+                    .principals
+                    .get_mut(principal_id)
+                    .ok_or_else(|| CreditError::UnknownPrincipal(principal_id.to_string()))?;
+                if !entry.balance.is_finite() || entry.balance < amount {
+                    return Err(CreditError::Insufficient {
+                        principal_id: principal_id.to_string(),
+                        requested: amount,
+                        available: entry.balance,
+                    });
+                }
+                entry.balance -= amount;
+                let encoded = serde_json::to_vec_pretty(&balances)
+                    .map_err(|e| CreditError::Parse(e.to_string()))?;
+                let tmp_path = path.with_extension("tmp");
+                let mut tmp =
+                    File::create(&tmp_path).map_err(|e| CreditError::Io(e.to_string()))?;
+                tmp.write_all(&encoded)
+                    .and_then(|_| tmp.sync_all())
+                    .map_err(|e| CreditError::Io(e.to_string()))?;
+                std::fs::rename(&tmp_path, path).map_err(|e| CreditError::Io(e.to_string()))?;
+                if let Some(parent) = path.parent() {
+                    sync_directory(parent).map_err(|e| CreditError::Io(e.message().to_string()))?;
+                }
+                Ok(entry.balance)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ServerState {
     claims: Mutex<HashMap<[u8; 32], Claim>>,
@@ -937,6 +1034,7 @@ pub struct EvidenceOsService {
     trial_router: Arc<TrialRouter>,
     trial_config_hash: Option<[u8; 32]>,
     admission_provider: Arc<dyn AdmissionProvider>,
+    credit_backend: CreditBackend,
     access_credit_pricing: AccessCreditPricing,
     operator_principals: Vec<String>,
     default_holdout_k_bits_budget: f64,
@@ -1206,7 +1304,16 @@ impl EvidenceOsService {
 
         let holdouts_root = root.join("holdouts");
         let admission_provider: Arc<dyn AdmissionProvider> =
+            // CREDIT-EXTERNAL: enforcement point.
+            // Caller must have been pre-authorized by operator
+            // credit service. See docs/CREDIT_AND_ADMISSION.md
             Arc::new(StaticAdmissionProvider::from_env());
+        let credit_backend = CreditBackend::from_env(&root);
+        if production_mode && matches!(credit_backend, CreditBackend::None) {
+            tracing::warn!(
+                "CREDIT_BACKEND=none in production mode. Credit enforcement is disabled."
+            );
+        }
         let default_credit_limit = admission_provider.max_credit("anonymous");
         let account_store = AccountStore::open(&root, default_credit_limit)?;
 
@@ -1424,6 +1531,7 @@ impl EvidenceOsService {
             trial_router,
             trial_config_hash,
             admission_provider,
+            credit_backend,
             access_credit_pricing: AccessCreditPricing::from_env(),
             operator_principals,
             default_holdout_k_bits_budget,
@@ -1753,6 +1861,9 @@ impl EvidenceOsService {
     }
 
     fn default_credit_limit_for(&self, principal_id: &str) -> u64 {
+        // CREDIT-EXTERNAL: enforcement point.
+        // Caller must have been pre-authorized by operator
+        // credit service. See docs/CREDIT_AND_ADMISSION.md
         self.admission_provider.max_credit(principal_id)
     }
 
@@ -1766,7 +1877,17 @@ impl EvidenceOsService {
         let charge = self
             .access_credit_pricing
             .charge(k_bits, fuel, max_memory_pages);
+        // CREDIT-EXTERNAL: enforcement point.
+        // Caller must have been pre-authorized by operator
+        // credit service. See docs/CREDIT_AND_ADMISSION.md
+        let _ = self
+            .credit_backend
+            .check_and_deduct(principal_id, "", charge as f64)
+            .map_err(|_| Status::resource_exhausted("principal credit exhausted"))?;
         let default_limit = self.default_credit_limit_for(principal_id);
+        // CREDIT-EXTERNAL: enforcement point.
+        // Caller must have been pre-authorized by operator
+        // credit service. See docs/CREDIT_AND_ADMISSION.md
         self.admission_provider.admit(principal_id, charge)?;
         let mut store = self.state.account_store.lock();
         let _ = store.ensure_account(principal_id, default_limit)?;
