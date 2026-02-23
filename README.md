@@ -425,6 +425,13 @@ For HMAC-authenticated agents, production deployments should configure key rotat
 - `EVIDENCEOS_HMAC_SHARED_SECRET` remains supported and maps to key id `default` for backward compatibility.
 - Do not define the `default` key in both places simultaneously.
 
+### Credit and Admission
+
+EvidenceOS enforces credit spending at claim execution.
+Credit minting and stake management are operator-provided.
+See [docs/CREDIT_AND_ADMISSION.md](docs/CREDIT_AND_ADMISSION.md)
+for the external service contract and configuration.
+
 ## Migration notes (V2 claim execution)
 
 - New secure RPCs are available: `CreateClaimV2` and `ExecuteClaimV2`.
