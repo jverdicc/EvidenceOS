@@ -17,6 +17,7 @@ members = [
   "crates/evidenceos-envelope",
   "crates/evidenceos-etl-indexer",
   "crates/evidenceos-redteam",
+  "crates/evidenceos-auth-protocol",
 ]
 
 [workspace.package]
