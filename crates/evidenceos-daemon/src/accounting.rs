@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -238,8 +240,38 @@ impl AccountStore {
             accounts: self.accounts.clone(),
         })
         .map_err(|_| Status::internal("encode accounts failed"))?;
-        std::fs::write(&self.path, payload).map_err(|_| Status::internal("write accounts failed"))
+        write_file_atomic_durable(&self.path, &payload, "write accounts failed")
     }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), Status> {
+    let dir = File::open(path).map_err(|_| Status::internal("open directory failed"))?;
+    dir.sync_all()
+        .map_err(|_| Status::internal("sync directory failed"))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), Status> {
+    Ok(())
+}
+
+fn write_file_atomic_durable(
+    path: &Path,
+    bytes: &[u8],
+    write_err: &'static str,
+) -> Result<(), Status> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Status::internal("path parent missing"))?;
+    let tmp = path.with_extension("tmp");
+    let mut f = File::create(&tmp).map_err(|_| Status::internal(write_err))?;
+    f.write_all(bytes)
+        .map_err(|_| Status::internal(write_err))?;
+    f.sync_all().map_err(|_| Status::internal(write_err))?;
+    std::fs::rename(&tmp, path).map_err(|_| Status::internal(write_err))?;
+    sync_directory(parent)?;
+    Ok(())
 }
 
 fn unix_day_now() -> Result<u64, Status> {
@@ -253,6 +285,7 @@ fn unix_day_now() -> Result<u64, Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -277,5 +310,77 @@ mod tests {
         assert!(store.burn("alice", 61, 100).is_err());
         let remaining = store.grant_credit("alice", 10, 100).expect("grant");
         assert_eq!(remaining, 70);
+    }
+
+    #[test]
+    fn persist_is_atomic_when_write_fails() {
+        let tmp = TempDir::new().expect("tmp");
+        let accounts_path = tmp.path().join("accounts.json");
+        fs::write(
+            &accounts_path,
+            b"{\"accounts\":{\"alice\":{\"credit_balance\":1}}}",
+        )
+        .expect("seed");
+
+        let mut store = AccountStore {
+            path: accounts_path.clone(),
+            accounts: HashMap::new(),
+        };
+        store.accounts.insert(
+            "bob".to_string(),
+            AccountRecord {
+                credit_balance: 2,
+                daily_mint_remaining: 2,
+                last_mint_day: 0,
+                limits: AccountLimits {
+                    credit_limit: 2,
+                    daily_mint_limit: 2,
+                },
+                burned_total: 0,
+                denied_total: 0,
+            },
+        );
+
+        fs::create_dir(accounts_path.with_extension("tmp")).expect("block temp file creation");
+
+        let err = store.persist().expect_err("persist should fail");
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(
+            fs::read(&accounts_path).expect("original still present"),
+            b"{\"accounts\":{\"alice\":{\"credit_balance\":1}}}".to_vec()
+        );
+    }
+
+    #[test]
+    fn persist_is_atomic_when_rename_fails() {
+        let tmp = TempDir::new().expect("tmp");
+        let accounts_path = tmp.path().join("accounts.json");
+        fs::create_dir(&accounts_path).expect("destination is directory");
+
+        let mut store = AccountStore {
+            path: accounts_path.clone(),
+            accounts: HashMap::new(),
+        };
+        store.accounts.insert(
+            "bob".to_string(),
+            AccountRecord {
+                credit_balance: 2,
+                daily_mint_remaining: 2,
+                last_mint_day: 0,
+                limits: AccountLimits {
+                    credit_limit: 2,
+                    daily_mint_limit: 2,
+                },
+                burned_total: 0,
+                denied_total: 0,
+            },
+        );
+
+        let err = store.persist().expect_err("persist should fail");
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(
+            accounts_path.is_dir(),
+            "destination directory remains intact"
+        );
     }
 }
