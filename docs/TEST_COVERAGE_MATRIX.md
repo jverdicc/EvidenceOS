@@ -2,6 +2,8 @@
 
 This matrix links key kernel/daemon behaviors to unit tests, property/fuzz tests, and system/integration tests.
 
+For parameter-level API coverage detail (ASPEC/Ledger/Oracle/ETL), see [`TEST_COVERAGE_PARAMETERS.md`](TEST_COVERAGE_PARAMETERS.md).
+
 ## Protocol compatibility
 
 | Behavior | Unit tests | Property/Fuzz | System/Integration |
@@ -53,3 +55,8 @@ This matrix links key kernel/daemon behaviors to unit tests, property/fuzz tests
 | NullSpec p0 vector length K | `crates/evidenceos-core/src/eprocess.rs::tests::rejects_bad_inputs` | `crates/evidenceos-core/src/eprocess.rs::tests::eprocess_is_finite_nonnegative` | `crates/evidenceos-daemon/tests/execute_claim_v2_settlement_system.rs::oracle_e_value_drives_settlement_and_capsule_wealth` |
 | Activation mapping required | `crates/evidenceos-core/src/nullspec_store.rs` | N/A | `crates/evidenceos-daemon/tests/execute_claim_v2_settlement_system.rs::execute_fails_closed_without_active_nullspec` |
 | Resolution hash mismatch fail-closed | N/A | N/A | `crates/evidenceos-daemon/tests/execute_claim_v2_settlement_system.rs` |
+
+
+## Parameter-level appendix
+
+Detailed parameter/API coverage is maintained in [`TEST_COVERAGE_PARAMETERS.md`](TEST_COVERAGE_PARAMETERS.md) to keep this top-level matrix focused on mechanism-level behavior.
