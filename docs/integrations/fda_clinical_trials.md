@@ -1,6 +1,11 @@
 # FDA Clinical Trials Integration Guide
 
 ## Overview
+Note: This guide covers FDA regulatory deployment.
+For using EvidenceOS as a research testbed to compare
+verification strategies empirically, see
+docs/RESEARCH_EXTENSIBILITY.md.
+
 Clinical trials are high-stakes, adaptive decision systems: teams can be tempted to re-slice cohorts, swap endpoints, or repeatedly test variants until significance appears. EvidenceOS's clinical-trials framework uses the UVP lifecycle to make those adaptive moves explicit, budgeted, and auditable before submission.
 
 This guide shows:
