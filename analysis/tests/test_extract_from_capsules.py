@@ -7,6 +7,9 @@ import pytest
 
 from analysis.epistemic_trial.extract_from_capsules import (
     CapsuleExtractionError,
+    EVENT_ADVERSARY_SUCCESS,
+    EVENT_CENSORED,
+    EVENT_FROZEN_CONTAINMENT,
     run_extraction,
 )
 
@@ -30,6 +33,7 @@ def _capsule(
     decision: int = 1,
     frozen: bool | None = None,
     state: str | None = None,
+    certified: bool = True,
 ):
     ledger = {"k_bits_total": k_bits_total}
     if frozen is not None:
@@ -40,6 +44,7 @@ def _capsule(
         "topic_id_hex": "topic-1",
         "ledger": ledger,
         "decision": decision,
+        "certified": certified,
         "trial_arm_id": 2,
         "trial_intervention_id": "arm-A",
         "trial_nonce_hex": "0a0b",
@@ -52,22 +57,25 @@ def _capsule(
     return record
 
 
-def test_extractor_emits_kbits_and_frozen(tmp_path: Path) -> None:
+def test_extractor_emits_kbits_time_and_event_type(tmp_path: Path) -> None:
     etl = _write_etl(
         tmp_path / "capsules.etl",
         [
-            _capsule("c1", 12.5, decision=1, frozen=False),
+            _capsule("c1", 12.5, decision=1, frozen=False, certified=False),
             _capsule("c2", 3.0, decision=3, frozen=True),
+            _capsule("c3", 6.0, decision=1, frozen=False, certified=True),
         ],
     )
     out = tmp_path / "capsules.csv"
     rows = run_extraction(etl, out)
 
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0]["k_bits_total"] == 12.5
-    assert rows[0]["frozen_event"] == 0
-    assert rows[1]["k_bits_total"] == 3.0
-    assert rows[1]["frozen_event"] == 1
+    assert rows[0]["duration_kbits"] == 12.5
+    assert rows[0]["time"] == 12.5
+    assert rows[0]["event_type"] == EVENT_ADVERSARY_SUCCESS
+    assert rows[1]["event_type"] == EVENT_FROZEN_CONTAINMENT
+    assert rows[2]["event_type"] == EVENT_CENSORED
     assert out.exists()
 
 
