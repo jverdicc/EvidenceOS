@@ -267,6 +267,109 @@ async fn execute_fails_closed_without_active_nullspec() {
 }
 
 #[tokio::test]
+async fn execute_rejects_when_worst_case_budget_cannot_be_reserved() {
+    let temp = TempDir::new().expect("temp");
+    let data_dir = temp.path().to_str().expect("path");
+    let resolution = OracleResolution::new(4, 0.0).expect("resolution");
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(&resolution).expect("res bytes"));
+    let resolution_hash: [u8; 32] = h.finalize().into();
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs()
+        / 4;
+    install_active_nullspec(data_dir, now_epoch, 10_000, resolution_hash);
+    let mut client = start_server(data_dir).await;
+
+    let claim_id = client
+        .create_claim_v2(pb::CreateClaimV2Request {
+            claim_name: "settle".into(),
+            metadata: Some(pb::ClaimMetadataV2 {
+                lane: "fast".into(),
+                alpha_micros: 50_000,
+                epoch_config_ref: "e".into(),
+                output_schema_id: "legacy/v1".into(),
+            }),
+            signals: Some(pb::TopicSignalsV2 {
+                semantic_hash: vec![1; 32],
+                phys_hir_signature_hash: vec![2; 32],
+                dependency_merkle_root: vec![3; 32],
+            }),
+            holdout_ref: "h".into(),
+            epoch_size: 4,
+            oracle_num_symbols: 4,
+            access_credit: 127,
+            oracle_id: "builtin.accuracy".to_string(),
+            nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
+        })
+        .await
+        .expect("create")
+        .into_inner()
+        .claim_id;
+
+    let wasm = wasm_emit_with_oracle(&[1, 1, 1, 1]);
+    client
+        .commit_artifacts(pb::CommitArtifactsRequest {
+            claim_id: claim_id.clone(),
+            artifacts: vec![pb::Artifact {
+                kind: "wasm".into(),
+                artifact_hash: {
+                    let mut h = Sha256::new();
+                    h.update(&wasm);
+                    h.finalize().to_vec()
+                },
+            }],
+            wasm_module: wasm,
+        })
+        .await
+        .expect("commit");
+    client
+        .freeze_gates(pb::FreezeGatesRequest {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect("freeze");
+    client
+        .seal_claim(pb::SealClaimRequest {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect("seal");
+
+    let err = client
+        .execute_claim_v2(pb::ExecuteClaimV2Request {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect_err("should fail closed on reservation");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(err.message(), "topic budget exhausted");
+
+    let fetch_err = client
+        .fetch_capsule(pb::FetchCapsuleRequest {
+            claim_id: claim_id.clone(),
+        })
+        .await
+        .expect_err("no capsule should be emitted when reservation fails");
+    assert_eq!(fetch_err.code(), tonic::Code::FailedPrecondition);
+
+    let state_path = temp.path().join("state.json");
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read")).expect("state");
+    let claim_hex = hex::encode(claim_id);
+    let persisted_claim = state["claims"]
+        .as_array()
+        .expect("claims array")
+        .iter()
+        .find(|c| c["claim_id"] == claim_hex)
+        .expect("claim exists");
+    assert_eq!(persisted_claim["state"], "Sealed");
+}
+
+#[tokio::test]
 async fn canary_drift_freezes_subsequent_certifications_and_writes_incident() {
     std::env::set_var("EVIDENCEOS_PROBE_THROTTLE_TOTAL", "1000");
     std::env::set_var("EVIDENCEOS_PROBE_ESCALATE_TOTAL", "2000");

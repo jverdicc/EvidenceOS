@@ -1,5 +1,37 @@
 use super::*;
 
+struct BudgetReservationGuard {
+    state: Arc<ServerState>,
+    topic_id: [u8; 32],
+    holdout_keys: Vec<HoldoutPoolKey>,
+    reserved_k_bits: f64,
+    reserved_access_credit: f64,
+    active: bool,
+}
+
+impl Drop for BudgetReservationGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        {
+            let mut topic_pools = self.state.topic_pools.lock();
+            if let Some(pool) = topic_pools.get_mut(&self.topic_id) {
+                let _ = pool.release_reserved(self.reserved_k_bits, self.reserved_access_credit);
+            }
+        }
+        {
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            for key in &self.holdout_keys {
+                if let Some(pool) = holdout_pools.get_mut(key) {
+                    let _ =
+                        pool.release_reserved(self.reserved_k_bits, self.reserved_access_credit);
+                }
+            }
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl EvidenceOsV2 for EvidenceOsService {
     type WatchRevocationsStream = Pin<
@@ -1252,6 +1284,60 @@ impl EvidenceOsV2 for EvidenceOsService {
                 false
             };
 
+            let vault_cfg = vault_config(claim)?;
+            let dependence_multiplier = if oracle_ttl_escalated {
+                self.dependence_tax_multiplier * self.oracle_ttl_escalation_tax_multiplier
+            } else {
+                self.dependence_tax_multiplier
+            };
+            let k_oracle_max =
+                claim.oracle_resolution.bits_per_call() * f64::from(vault_cfg.max_oracle_calls);
+            let k_out_max = structured_claims::schema_kout_bits_upper_bound(&claim.output_schema_id)
+                .map_err(|_| Status::failed_precondition("invalid output schema"))?
+                as f64;
+            let worst_case_taxed = (k_oracle_max * dependence_multiplier).ceil() + k_out_max;
+
+            let holdout_keys = self.holdout_pool_keys(
+                claim.holdout_handle_id,
+                &claim.owner_principal_id,
+                claim.holdout_pool_scope,
+            );
+            {
+                let mut topic_pools = self.state.topic_pools.lock();
+                let mut holdout_pools = self.state.holdout_pools.lock();
+                let topic_pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                if topic_pool
+                    .reserve(worst_case_taxed, worst_case_taxed)
+                    .is_err()
+                {
+                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    return Err(Status::failed_precondition("topic budget exhausted"));
+                }
+                for holdout_key in &holdout_keys {
+                    let holdout_pool = holdout_pools.get_mut(holdout_key).ok_or_else(|| {
+                        Status::failed_precondition("missing holdout budget pool")
+                    })?;
+                    if holdout_pool
+                        .reserve(worst_case_taxed, worst_case_taxed)
+                        .is_err()
+                    {
+                        let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                        let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                        return Err(Status::failed_precondition("holdout budget exhausted"));
+                    }
+                }
+            }
+            let mut reservation_guard = BudgetReservationGuard {
+                state: Arc::clone(&self.state),
+                topic_id: claim.topic_id,
+                holdout_keys,
+                reserved_k_bits: worst_case_taxed,
+                reserved_access_credit: worst_case_taxed,
+                active: true,
+            };
+
             self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let registry = self.ensure_nullspec_registry_fresh()?;
@@ -1260,14 +1346,13 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .cloned()
                 .ok_or_else(|| Status::failed_precondition("active nullspec id not in registry"))?;
             let context = vault_context(claim, reg_nullspec, self.holdout_provider.as_ref())?;
-            let vault_result =
-                match vault.execute(&claim.wasm_module, &context, vault_config(claim)?) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        self.record_incident(claim, "execution_failure")?;
-                        return Err(map_vault_error(err));
-                    }
-                };
+            let vault_result = match vault.execute(&claim.wasm_module, &context, vault_cfg) {
+                Ok(v) => v,
+                Err(err) => {
+                    self.record_incident(claim, "execution_failure")?;
+                    return Err(map_vault_error(err));
+                }
+            };
             self.telemetry.record_oracle_calls(
                 Self::lane_name(claim.lane),
                 "vault_oracle_bucket",
@@ -1320,11 +1405,6 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             let charge_bits = claim.oracle_resolution.bits_per_call()
                 * f64::from(vault_result.oracle_calls.max(1));
-            let dependence_multiplier = if oracle_ttl_escalated {
-                self.dependence_tax_multiplier * self.oracle_ttl_escalation_tax_multiplier
-            } else {
-                self.dependence_tax_multiplier
-            };
             let taxed_bits = charge_bits * dependence_multiplier;
             let covariance_charge = taxed_bits - charge_bits;
             claim
@@ -1352,7 +1432,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     .get_mut(&claim.topic_id)
                     .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
                 if pool
-                    .charge(
+                    .settle_reserved(
+                        worst_case_taxed,
+                        worst_case_taxed,
                         taxed_bits + vault_result.kout_bits_total,
                         taxed_bits + vault_result.kout_bits_total,
                         covariance_charge,
@@ -1365,17 +1447,14 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
             {
                 let mut holdout_pools = self.state.holdout_pools.lock();
-                let holdout_keys = self.holdout_pool_keys(
-                    claim.holdout_handle_id,
-                    &claim.owner_principal_id,
-                    claim.holdout_pool_scope,
-                );
-                for holdout_key in holdout_keys {
+                for holdout_key in &reservation_guard.holdout_keys {
                     let pool = holdout_pools.get_mut(&holdout_key).ok_or_else(|| {
                         Status::failed_precondition("missing holdout budget pool")
                     })?;
                     if pool
-                        .charge(
+                        .settle_reserved(
+                            worst_case_taxed,
+                            worst_case_taxed,
                             taxed_bits + vault_result.kout_bits_total,
                             taxed_bits + vault_result.kout_bits_total,
                         )
@@ -1386,6 +1465,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     }
                 }
             }
+            reservation_guard.active = false;
             let principal_k_bits =
                 if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
                     Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
