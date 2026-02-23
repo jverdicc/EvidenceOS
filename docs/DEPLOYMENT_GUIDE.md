@@ -79,3 +79,38 @@ KMS hook env vars:
 
 On Unix-like systems, daemon startup enforces file-key permissions to be `0600` or stricter (no group/world bits).
 If key files are broader than `0600`, startup fails closed.
+
+## 6) Accounting store on-disk schema and crash recovery
+
+The daemon persists account balances at `<data-dir>/accounts.json` as a JSON object:
+
+```json
+{
+  "accounts": {
+    "<principal-id>": {
+      "credit_balance": 100,
+      "daily_mint_remaining": 100,
+      "last_mint_day": 20000,
+      "limits": {
+        "credit_limit": 100,
+        "daily_mint_limit": 100
+      },
+      "burned_total": 0,
+      "denied_total": 0
+    }
+  }
+}
+```
+
+Writes use an atomic + durable sequence:
+
+1. write full JSON payload to `<data-dir>/accounts.tmp`
+2. `fsync` the temp file
+3. `rename` temp file over `accounts.json`
+4. `fsync` the containing directory (Unix)
+
+Recovery behavior:
+
+- A crash before rename keeps the previous `accounts.json` intact.
+- A crash after rename but before process completion still leaves a complete JSON file at `accounts.json`.
+- Partial JSON at `accounts.json` is not expected from daemon-managed writes with this flow.
