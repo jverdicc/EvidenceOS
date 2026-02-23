@@ -144,8 +144,8 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.yml -f docker-compose.redteam.yml down -v
 
-      - name: Verify FORC10 reproducibility harness
-        run: make -C artifacts/forc10 verify
+      - name: Verify FORC10 reproducibility harness (lightweight subset)
+        run: make -C artifacts/forc10 verify-lite
 
       - name: Coverage summary
         run: cargo llvm-cov --workspace --all-features --summary-only

@@ -1,0 +1,6 @@
+metric,value
+probe_saw_freeze,True
+probe_saw_throttle,True
+scenario_failed,0
+scenario_passed,2
+scenario_total,2

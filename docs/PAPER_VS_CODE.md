@@ -24,6 +24,8 @@ This document is the fastest way to answer: **what the FORC paper claims, what i
 
 ## FORC artifact reproduction path
 
+Paper reproduction is authoritative via `artifacts/forc10/original_python/run_all.py` in this repository; synthetic placeholder generators are out of scope and must not be used for paper-fidelity claims.
+
 Paper artifact reproduction should always pin **exact immutable refs** for both repos.
 
 ### EvidenceOS ref used for this parity baseline
@@ -44,7 +46,7 @@ When preparing/reviewing a FORC artifact bundle, replace the placeholders above 
 2. Full 40-char commit SHA
 3. Branch name only as additional context (never as sole artifact locator)
 
-Until those refs are filled, treat this section as an explicit TODO and do not claim exact paper artifact reproducibility from `main`/`work` alone.
+Until those refs are filled, treat this section as an explicit TODO and do not claim exact paper artifact reproducibility from `main`/`work` alone. The only supported reproduction command in this repository is `make -C artifacts/forc10 verify` (or `verify-lite` in CI).
 
 ## Reviewer quick answers (sub-60 seconds)
 

@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "experiments": [
+      "experiments/experiment01_scenarios.py",
+      "experiments/experiment02_probing.py"
+    ],
+    "fixed_seed": 20250311,
+    "inputs": {
+      "probing": "artifacts/probing/probing_detection_system.json",
+      "scenarios": "artifacts/scenarios/summary.json"
+    },
+    "quick_mode": true,
+    "runner": "artifacts/forc10/original_python/run_all.py",
+    "rustc_version": "rustc 1.93.1 (01f6ddf75 2026-02-11)"
+  },
+  "metrics": {
+    "probe_saw_freeze": true,
+    "probe_saw_throttle": true,
+    "scenario_failed": 0,
+    "scenario_passed": 2,
+    "scenario_total": 2
+  },
+  "schema_version": "forc10.v1"
+}
