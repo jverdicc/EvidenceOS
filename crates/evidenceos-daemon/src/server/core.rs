@@ -832,6 +832,14 @@ enum PendingMutation {
     },
 }
 
+impl PendingMutation {
+    fn claim_id(&self) -> [u8; 32] {
+        match self {
+            Self::Execute { claim_id, .. } | Self::Revoke { claim_id, .. } => *claim_id,
+        }
+    }
+}
+
 type RevocationSubscriber = mpsc::Sender<pb::WatchRevocationsResponse>;
 
 const ORACLE_EXPIRED_REASON_CODE: u32 = 9202;
@@ -1223,7 +1231,7 @@ impl EvidenceOsService {
             }),
             execute_claim_v2_idempotency: Mutex::new(HashMap::new()),
         });
-        recover_pending_mutation(&state)?;
+        recover_pending_mutations(&state)?;
         persist_all(&state)?;
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1770,6 +1778,7 @@ impl EvidenceOsService {
 
 const STATE_FILE_NAME: &str = "state.json";
 const PENDING_MUTATION_FILE_NAME: &str = "pending_mutation.json";
+const PENDING_MUTATIONS_DIR_NAME: &str = "pending_mutations";
 
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), Status> {
@@ -1854,29 +1863,63 @@ fn persist_all_with_trial_router(
 }
 
 fn persist_pending_mutation(state: &ServerState, pending: &PendingMutation) -> Result<(), Status> {
+    let claim_id = pending.claim_id();
+    let pending_dir = pending_mutations_dir(&state.data_path);
+    ensure_directory_durable(&pending_dir)?;
     let bytes = serde_json::to_vec_pretty(pending)
         .map_err(|_| Status::internal("serialize pending mutation failed"))?;
     write_file_atomic_durable(
-        &state.data_path.join(PENDING_MUTATION_FILE_NAME),
+        &pending_mutation_path_for_claim(&state.data_path, claim_id),
         &bytes,
         "write pending mutation failed",
     )
 }
 
-fn clear_pending_mutation(state: &ServerState) -> Result<(), Status> {
-    remove_file_durable(&state.data_path.join(PENDING_MUTATION_FILE_NAME))
+fn clear_pending_mutation(state: &ServerState, claim_id: [u8; 32]) -> Result<(), Status> {
+    remove_file_durable(&pending_mutation_path_for_claim(&state.data_path, claim_id))
 }
 
-fn recover_pending_mutation(state: &ServerState) -> Result<(), Status> {
-    let path = state.data_path.join(PENDING_MUTATION_FILE_NAME);
-    if !path.exists() {
+fn recover_pending_mutations(state: &ServerState) -> Result<(), Status> {
+    let legacy_path = state.data_path.join(PENDING_MUTATION_FILE_NAME);
+    if legacy_path.exists() {
+        let bytes = std::fs::read(&legacy_path)
+            .map_err(|_| Status::internal("read pending mutation failed"))?;
+        let pending: PendingMutation = serde_json::from_slice(&bytes)
+            .map_err(|_| Status::internal("decode pending mutation failed"))?;
+        apply_pending_mutation(state, pending)?;
+        remove_file_durable(&legacy_path)?;
+    }
+
+    let pending_dir = pending_mutations_dir(&state.data_path);
+    if !pending_dir.exists() {
         return Ok(());
     }
-    let bytes =
-        std::fs::read(&path).map_err(|_| Status::internal("read pending mutation failed"))?;
-    let pending: PendingMutation = serde_json::from_slice(&bytes)
-        .map_err(|_| Status::internal("decode pending mutation failed"))?;
+    let mut paths = std::fs::read_dir(&pending_dir)
+        .map_err(|_| Status::internal("read pending mutations directory failed"))?
+        .map(|entry| {
+            entry
+                .map(|e| e.path())
+                .map_err(|_| Status::internal("read pending mutation directory entry failed"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let bytes =
+            std::fs::read(&path).map_err(|_| Status::internal("read pending mutation failed"))?;
+        let pending: PendingMutation = serde_json::from_slice(&bytes)
+            .map_err(|_| Status::internal("decode pending mutation failed"))?;
+        let claim_id = pending.claim_id();
+        apply_pending_mutation(state, pending)?;
+        clear_pending_mutation(state, claim_id)?;
+    }
 
+    Ok(())
+}
+
+fn apply_pending_mutation(state: &ServerState, pending: PendingMutation) -> Result<(), Status> {
     match pending {
         PendingMutation::Execute {
             claim_id,
@@ -1929,8 +1972,24 @@ fn recover_pending_mutation(state: &ServerState) -> Result<(), Status> {
     }
 
     persist_all(state)?;
-    clear_pending_mutation(state)?;
     Ok(())
+}
+
+fn ensure_directory_durable(path: &Path) -> Result<(), Status> {
+    std::fs::create_dir_all(path).map_err(|_| Status::internal("create directory failed"))?;
+    sync_directory(path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn pending_mutations_dir(data_path: &Path) -> PathBuf {
+    data_path.join(PENDING_MUTATIONS_DIR_NAME)
+}
+
+fn pending_mutation_path_for_claim(data_path: &Path, claim_id: [u8; 32]) -> PathBuf {
+    pending_mutations_dir(data_path).join(format!("{}.json", hex::encode(claim_id)))
 }
 
 fn parse_hash32(bytes: &[u8], _field: &str) -> Result<[u8; 32], Status> {
@@ -3970,7 +4029,7 @@ mod tests {
         };
         persist_pending_mutation(&svc.state, &pending).expect("persist pending");
 
-        recover_pending_mutation(&svc.state).expect("recover pending");
+        recover_pending_mutations(&svc.state).expect("recover pending");
 
         let claims = svc.state.claims.lock();
         let claim = claims.get(&claim_id).expect("claim present");
@@ -3981,7 +4040,8 @@ mod tests {
         assert!(!svc
             .state
             .data_path
-            .join(PENDING_MUTATION_FILE_NAME)
+            .join(PENDING_MUTATIONS_DIR_NAME)
+            .join(format!("{}.json", hex::encode(claim_id)))
             .exists());
     }
 
@@ -4018,7 +4078,7 @@ mod tests {
         };
         persist_pending_mutation(&svc.state, &pending).expect("persist pending");
 
-        recover_pending_mutation(&svc.state).expect("recover pending");
+        recover_pending_mutations(&svc.state).expect("recover pending");
 
         let claims = svc.state.claims.lock();
         assert_eq!(
@@ -4038,10 +4098,103 @@ mod tests {
         assert!(!svc
             .state
             .data_path
-            .join(PENDING_MUTATION_FILE_NAME)
+            .join(PENDING_MUTATIONS_DIR_NAME)
+            .join(format!("{}.json", hex::encode(claim_id)))
             .exists());
     }
 
+    #[test]
+    fn persist_pending_mutation_uses_per_claim_wal_files_under_concurrency() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = Arc::new(
+            EvidenceOsService::build_with_options(
+                dir.path().to_str().expect("utf8"),
+                true,
+                telemetry,
+            )
+            .expect("service"),
+        );
+
+        let pending_a = PendingMutation::Execute {
+            claim_id: [11u8; 32],
+            state: ClaimState::Certified,
+            decision: pb::Decision::Approve as i32,
+            capsule_hash: [21u8; 32],
+            capsule_bytes: b"capsule-a".to_vec(),
+            etl_index: Some(1),
+        };
+        let pending_b = PendingMutation::Execute {
+            claim_id: [12u8; 32],
+            state: ClaimState::Rejected,
+            decision: pb::Decision::Reject as i32,
+            capsule_hash: [22u8; 32],
+            capsule_bytes: b"capsule-b".to_vec(),
+            etl_index: Some(2),
+        };
+
+        let svc_a = Arc::clone(&svc);
+        let t1 = std::thread::spawn(move || persist_pending_mutation(&svc_a.state, &pending_a));
+        let svc_b = Arc::clone(&svc);
+        let t2 = std::thread::spawn(move || persist_pending_mutation(&svc_b.state, &pending_b));
+
+        t1.join().expect("join a").expect("persist a");
+        t2.join().expect("join b").expect("persist b");
+
+        let wal_dir = svc.state.data_path.join(PENDING_MUTATIONS_DIR_NAME);
+        let mut files = std::fs::read_dir(&wal_dir)
+            .expect("read wal dir")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn recover_pending_execute_after_commit_before_cleanup_is_idempotent_and_cleans_wal() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            true,
+            telemetry,
+        )
+        .expect("service");
+
+        let claim_id = [13u8; 32];
+        let capsule_hash = [31u8; 32];
+        let mut claim = dummy_claim(claim_id, Some(capsule_hash));
+        claim.state = ClaimState::Certified;
+        claim.last_decision = Some(pb::Decision::Approve as i32);
+        claim.etl_index = Some(5);
+        claim.capsule_bytes = Some(b"capsule".to_vec());
+        svc.state.claims.lock().insert(claim_id, claim);
+
+        let pending = PendingMutation::Execute {
+            claim_id,
+            state: ClaimState::Certified,
+            decision: pb::Decision::Approve as i32,
+            capsule_hash,
+            capsule_bytes: b"capsule".to_vec(),
+            etl_index: Some(5),
+        };
+        persist_pending_mutation(&svc.state, &pending).expect("persist pending");
+
+        recover_pending_mutations(&svc.state).expect("recover");
+        recover_pending_mutations(&svc.state).expect("recover second");
+
+        assert!(!pending_mutation_path_for_claim(&svc.state.data_path, claim_id).exists());
+        let claim = svc
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .cloned()
+            .expect("claim");
+        assert_eq!(claim.state, ClaimState::Certified);
+        assert_eq!(claim.last_decision, Some(pb::Decision::Approve as i32));
+    }
     #[test]
     fn tee_backend_populates_capsule_environment_attestations() {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
