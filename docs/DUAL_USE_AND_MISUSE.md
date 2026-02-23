@@ -39,6 +39,7 @@ For high-risk domains:
 - Output schema must be `CBRN_SC_V1` (`cbrn-sc.v1`).
 - Legacy/free-text schemas are not permitted in production.
 - Structured output canonicalization and validation are mandatory.
+- Structured-claim envelope checks are evaluated against the active envelope registry loaded at daemon startup (for example, signed packs from `--envelope-packs-dir` when `--require-signed-envelopes` is enabled).
 
 ## Enforcement Knobs (Default-Secure)
 

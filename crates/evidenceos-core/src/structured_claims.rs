@@ -1,5 +1,5 @@
 use crate::error::{EvidenceOSError, EvidenceOSResult};
-use crate::magnitude_envelope::{EnvelopeRegistry, EnvelopeViolation};
+use crate::magnitude_envelope::EnvelopeViolation;
 use crate::physhir::{check_dimension, quantity_from_parts, Dimension, Quantity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -425,7 +425,7 @@ pub fn validate_and_canonicalize(
     if canonical_bytes.len() > max_bytes_upper_bound() as usize {
         return Err(EvidenceOSError::InvalidArgument);
     }
-    let envelope_registry = EnvelopeRegistry::with_builtin_defaults();
+    let envelope_registry = crate::magnitude_envelope::active_registry();
     let mut envelope_violation = envelope_registry.validate_claim(&claim).err().map(|v| *v);
     if envelope_violation.is_none()
         && claim.fields.iter().any(|f| {
@@ -516,6 +516,11 @@ pub fn max_bytes_upper_bound() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::magnitude_envelope::{
+        clear_active_registry_for_tests, set_active_registry, EnvelopeRegistry, MagnitudeEnvelope,
+        QuantityEnvelopeBound,
+    };
+    use crate::physhir::Dimension;
     use serde_json::json;
 
     fn id_hex() -> String {
@@ -577,5 +582,29 @@ mod tests {
         payload["claim_id"] = json!("http://not-allowed");
         let bytes = serde_json::to_vec(&payload).expect("json");
         assert!(validate_and_canonicalize(SCHEMA_ID, &bytes).is_err());
+    }
+
+    #[test]
+    fn active_registry_is_used_for_envelope_checks() {
+        clear_active_registry_for_tests().expect("clear");
+        let mut registry = EnvelopeRegistry::empty();
+        registry.insert_envelope(MagnitudeEnvelope {
+            envelope_id: "pack.cbrn.strict.v1".to_string(),
+            profile_id: "cbrn.v1".to_string(),
+            schema_id: SCHEMA_ID.to_string(),
+            quantity_bounds: vec![QuantityEnvelopeBound {
+                field: "quantities".to_string(),
+                expected_dimension: Dimension::new(-3, 0, 0, 0, 0, 1, 0),
+                min_value: -1,
+                max_value: 10,
+            }],
+        });
+        set_active_registry(registry).expect("set active registry");
+
+        let bytes = serde_json::to_vec(&valid_payload()).expect("json");
+        let validated = validate_and_canonicalize(SCHEMA_ID, &bytes).expect("valid");
+        assert!(validated.envelope_violation.is_some());
+
+        clear_active_registry_for_tests().expect("clear");
     }
 }
