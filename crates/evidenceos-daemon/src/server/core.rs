@@ -3787,6 +3787,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_claim_v2_reservation_expires_and_is_reclaimed() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-a";
+        let handle = [7u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            Request::new(claim_request(holdout_ref)),
+        )
+        .await
+        .expect("create")
+        .into_inner();
+        let claim_id: [u8; 32] = created
+            .claim_id
+            .as_slice()
+            .try_into()
+            .expect("claim_id len");
+
+        let (topic_id, holdout_handle_id, reserved_before) = {
+            let claims = svc.state.claims.lock();
+            let claim = claims.get(&claim_id).expect("claim");
+            assert_eq!(claim.state, ClaimState::Uncommitted);
+            assert!(claim.reserved_k_bits > 0.0);
+            assert!(claim.reserved_access_credit > 0.0);
+            assert!(claim.reserved_expires_at_unix_ms > 0);
+            (
+                claim.topic_id,
+                claim.holdout_handle_id,
+                claim.reserved_k_bits,
+            )
+        };
+
+        {
+            let mut claims = svc.state.claims.lock();
+            let claim = claims.get_mut(&claim_id).expect("claim");
+            claim.reserved_expires_at_unix_ms = 1;
+        }
+
+        let swept = svc.sweep_expired_reservations().expect("sweep");
+        assert_eq!(swept, 1);
+
+        let claim = svc
+            .state
+            .claims
+            .lock()
+            .get(&claim_id)
+            .cloned()
+            .expect("claim");
+        assert_eq!(claim.state, ClaimState::Stale);
+        assert_eq!(claim.reserved_k_bits, 0.0);
+        assert_eq!(claim.reserved_access_credit, 0.0);
+
+        let topic_pool = svc
+            .state
+            .topic_pools
+            .lock()
+            .get(&topic_id)
+            .cloned()
+            .expect("topic pool");
+        assert_eq!(topic_pool.reserved_k_bits(), 0.0);
+
+        let holdout_keys =
+            svc.holdout_pool_keys(holdout_handle_id, "anonymous", HoldoutPoolScope::Global);
+        let holdout_pools = svc.state.holdout_pools.lock();
+        for key in holdout_keys {
+            let pool = holdout_pools.get(&key).expect("holdout pool");
+            assert_eq!(pool.reserved_k_bits(), 0.0);
+        }
+        assert!(reserved_before > 0.0);
+    }
+
+    #[tokio::test]
     async fn dependency_root_mismatch_rejected() {
         let dir = TempDir::new().expect("tmp");
         let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
@@ -4464,6 +4554,32 @@ mod tests {
         assert_eq!(claim.reserved_k_bits, 0.0);
         assert_eq!(claim.reserved_access_credit, 0.0);
         assert_eq!(claim.reserved_expires_at_unix_ms, 0);
+
+        let topic_pool = svc
+            .state
+            .topic_pools
+            .lock()
+            .get(&topic_id)
+            .cloned()
+            .expect("topic pool");
+        assert_eq!(topic_pool.reserved_k_bits(), 0.0);
+        assert_eq!(topic_pool.reserved_access_credit(), 0.0);
+
+        let holdout_keys =
+            svc.holdout_pool_keys(holdout_handle_id, "test-owner", HoldoutPoolScope::Global);
+        let holdout_pools = svc.state.holdout_pools.lock();
+        for holdout_key in holdout_keys {
+            let holdout_pool = holdout_pools.get(&holdout_key).expect("holdout pool");
+            assert_eq!(holdout_pool.reserved_k_bits(), 0.0);
+            assert_eq!(holdout_pool.reserved_access_credit(), 0.0);
+        }
+
+        let etl_bytes = std::fs::read(dir.path().join("etl.log")).expect("etl");
+        let etl_text = String::from_utf8_lossy(&etl_bytes);
+        assert!(etl_text.contains("\"kind\":\"reservation_expired\""));
+        assert!(etl_text.contains(&hex::encode(claim_id)));
+        assert!(etl_text.contains("\"released_k_bits\":7.0"));
+        assert!(etl_text.contains("\"released_access_credit\":7.0"));
     }
 
     #[test]

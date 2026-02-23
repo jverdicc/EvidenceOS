@@ -1046,7 +1046,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         let created_at_unix_ms = current_time_unix_ms()?;
         let reserved_expires_at_unix_ms =
             created_at_unix_ms.saturating_add(self.reservation_ttl_ms);
-        let claim = Claim {
+        let mut claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
             dependency_merkle_root,
@@ -1101,19 +1101,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             reserved_access_credit: 0.0,
             reserved_expires_at_unix_ms,
         };
-        {
-            let mut claims = self.state.claims.lock();
-            if let Some(existing) = claims.get(&claim_id).cloned() {
-                let response = pb::CreateClaimV2Response {
-                    claim_id: claim_id.to_vec(),
-                    topic_id: existing.topic_id.to_vec(),
-                    state: existing.state.to_proto(),
-                };
-                self.idempotency_store_success(idempotency_context.clone(), &response)?;
-                return Ok(Response::new(response));
-            }
-            claims.insert(claim_id, claim.clone());
-        }
+
         self.state
             .topic_pools
             .lock()
@@ -1126,20 +1114,94 @@ impl EvidenceOsV2 for EvidenceOsService {
                 )
                 .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
             );
+        let holdout_scope = self.holdout_pool_scope;
+        let holdout_keys =
+            self.holdout_pool_keys(holdout_handle_id, &caller.principal_id, holdout_scope);
         {
-            let holdout_scope = self.holdout_pool_scope;
-            let holdout_keys =
-                self.holdout_pool_keys(holdout_handle_id, &caller.principal_id, holdout_scope);
             let mut holdout_pools = self.state.holdout_pools.lock();
-            for holdout_key in holdout_keys {
+            for holdout_key in &holdout_keys {
                 holdout_pools
                     .entry(holdout_key.clone())
                     .or_insert(HoldoutBudgetPool::new(
-                        holdout_key,
+                        holdout_key.clone(),
                         self.default_holdout_k_bits_budget,
                         self.default_holdout_access_credit_budget,
                     )?);
             }
+        }
+
+        let vault_cfg = vault_config(&claim)?;
+        let k_oracle_max =
+            claim.oracle_resolution.bits_per_call() * f64::from(vault_cfg.max_oracle_calls);
+        let k_out_max = structured_claims::schema_kout_bits_upper_bound(&claim.output_schema_id)
+            .map_err(|_| Status::failed_precondition("invalid output schema"))?
+            as f64;
+        let worst_case_taxed = (k_oracle_max * self.dependence_tax_multiplier).ceil() + k_out_max;
+
+        {
+            let mut topic_pools = self.state.topic_pools.lock();
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            let topic_pool = topic_pools
+                .get_mut(&claim.topic_id)
+                .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+            if topic_pool
+                .reserve(worst_case_taxed, worst_case_taxed)
+                .is_err()
+            {
+                return Err(Status::failed_precondition("topic budget exhausted"));
+            }
+            let mut reserved_holdout_keys: Vec<&HoldoutPoolKey> = Vec::new();
+            for holdout_key in &holdout_keys {
+                let holdout_pool = holdout_pools
+                    .get_mut(holdout_key)
+                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
+                if holdout_pool
+                    .reserve(worst_case_taxed, worst_case_taxed)
+                    .is_err()
+                {
+                    for key in reserved_holdout_keys {
+                        if let Some(pool) = holdout_pools.get_mut(key) {
+                            let _ = pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                        }
+                    }
+                    let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                    return Err(Status::failed_precondition("holdout budget exhausted"));
+                }
+                reserved_holdout_keys.push(holdout_key);
+            }
+        }
+        claim.reserved_k_bits = worst_case_taxed;
+        claim.reserved_access_credit = worst_case_taxed;
+        claim.reserved_expires_at_unix_ms =
+            created_at_unix_ms.saturating_add(self.reservation_ttl_ms);
+
+        {
+            let mut claims = self.state.claims.lock();
+            if let Some(existing) = claims.get(&claim_id).cloned() {
+                {
+                    let mut topic_pools = self.state.topic_pools.lock();
+                    if let Some(topic_pool) = topic_pools.get_mut(&claim.topic_id) {
+                        let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                    }
+                }
+                {
+                    let mut holdout_pools = self.state.holdout_pools.lock();
+                    for holdout_key in &holdout_keys {
+                        if let Some(holdout_pool) = holdout_pools.get_mut(holdout_key) {
+                            let _ =
+                                holdout_pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                        }
+                    }
+                }
+                let response = pb::CreateClaimV2Response {
+                    claim_id: claim_id.to_vec(),
+                    topic_id: existing.topic_id.to_vec(),
+                    state: existing.state.to_proto(),
+                };
+                self.idempotency_store_success(idempotency_context.clone(), &response)?;
+                return Ok(Response::new(response));
+            }
+            claims.insert(claim_id, claim.clone());
         }
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
         let response = pb::CreateClaimV2Response {
@@ -1320,45 +1382,50 @@ impl EvidenceOsV2 for EvidenceOsService {
                 &claim.owner_principal_id,
                 claim.holdout_pool_scope,
             );
-            {
-                let mut topic_pools = self.state.topic_pools.lock();
-                let mut holdout_pools = self.state.holdout_pools.lock();
-                let topic_pool = topic_pools
-                    .get_mut(&claim.topic_id)
-                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
-                if topic_pool
-                    .reserve(worst_case_taxed, worst_case_taxed)
-                    .is_err()
+            let has_active_reservation =
+                claim.reserved_k_bits > 0.0 && claim.reserved_access_credit > 0.0;
+            if !has_active_reservation {
                 {
-                    let _ = self.record_incident(claim, "topic_budget_exhausted");
-                    return Err(Status::failed_precondition("topic budget exhausted"));
-                }
-                for holdout_key in &holdout_keys {
-                    let holdout_pool = holdout_pools.get_mut(holdout_key).ok_or_else(|| {
-                        Status::failed_precondition("missing holdout budget pool")
-                    })?;
-                    if holdout_pool
+                    let mut topic_pools = self.state.topic_pools.lock();
+                    let mut holdout_pools = self.state.holdout_pools.lock();
+                    let topic_pool = topic_pools
+                        .get_mut(&claim.topic_id)
+                        .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                    if topic_pool
                         .reserve(worst_case_taxed, worst_case_taxed)
                         .is_err()
                     {
-                        let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
-                        let _ = self.record_incident(claim, "holdout_budget_exhausted");
-                        return Err(Status::failed_precondition("holdout budget exhausted"));
+                        let _ = self.record_incident(claim, "topic_budget_exhausted");
+                        return Err(Status::failed_precondition("topic budget exhausted"));
+                    }
+                    for holdout_key in &holdout_keys {
+                        let holdout_pool = holdout_pools.get_mut(holdout_key).ok_or_else(|| {
+                            Status::failed_precondition("missing holdout budget pool")
+                        })?;
+                        if holdout_pool
+                            .reserve(worst_case_taxed, worst_case_taxed)
+                            .is_err()
+                        {
+                            let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
+                            let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                            return Err(Status::failed_precondition("holdout budget exhausted"));
+                        }
                     }
                 }
+                claim.reserved_k_bits = worst_case_taxed;
+                claim.reserved_access_credit = worst_case_taxed;
             }
+            claim.reserved_expires_at_unix_ms =
+                current_time_unix_ms()?.saturating_add(self.reservation_ttl_ms);
+            let reserved_amount = claim.reserved_k_bits;
             let mut reservation_guard = BudgetReservationGuard {
                 state: Arc::clone(&self.state),
                 topic_id: claim.topic_id,
                 holdout_keys,
-                reserved_k_bits: worst_case_taxed,
-                reserved_access_credit: worst_case_taxed,
+                reserved_k_bits: reserved_amount,
+                reserved_access_credit: claim.reserved_access_credit,
                 active: true,
             };
-            claim.reserved_k_bits = worst_case_taxed;
-            claim.reserved_access_credit = worst_case_taxed;
-            claim.reserved_expires_at_unix_ms =
-                current_time_unix_ms()?.saturating_add(self.reservation_ttl_ms);
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let registry = self.ensure_nullspec_registry_fresh()?;
@@ -1454,8 +1521,8 @@ impl EvidenceOsV2 for EvidenceOsService {
                     .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
                 if pool
                     .settle_reserved(
-                        worst_case_taxed,
-                        worst_case_taxed,
+                        reservation_guard.reserved_k_bits,
+                        reservation_guard.reserved_access_credit,
                         taxed_bits + vault_result.kout_bits_total,
                         taxed_bits + vault_result.kout_bits_total,
                         covariance_charge,
@@ -1474,8 +1541,8 @@ impl EvidenceOsV2 for EvidenceOsService {
                     })?;
                     if pool
                         .settle_reserved(
-                            worst_case_taxed,
-                            worst_case_taxed,
+                            reservation_guard.reserved_k_bits,
+                            reservation_guard.reserved_access_credit,
                             taxed_bits + vault_result.kout_bits_total,
                             taxed_bits + vault_result.kout_bits_total,
                         )
