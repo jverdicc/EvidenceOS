@@ -17,7 +17,9 @@ Read in this order:
 2. [Daemon API surface (gRPC lifecycle and IPC methods)](../README.md#ipc-api)
 3. [Determinism + durability notes (DLC/ETL + storage/ops)](OFFLINE_SETTLEMENT.md)
 4. [ETL FAQ: append-only transparency log (not blockchain)](ETL_FAQ.md)
-5. [Coverage maps (mechanism + parameter level)](TEST_COVERAGE_MATRIX.md)
+5. Coverage maps:
+   - [Mechanism-level matrix](TEST_COVERAGE_MATRIX.md)
+   - [Parameter-level appendix](TEST_COVERAGE_PARAMETERS.md)
 
 ## If you’re deploying
 
