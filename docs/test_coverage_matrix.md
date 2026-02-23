@@ -26,7 +26,6 @@ This matrix maps required parameter-level API coverage to concrete tests.
 | `e_product` | `e_product_rejects_invalid_or_empty` | `e_product_proptest_invariants`, `fuzz_ledger_ops` | `e_product_integration_matrix`, `ledger_public_api_matrix` |
 | `JointLeakagePool` | `joint_pool_charges_correctly`, `joint_pool_rejects_invalid_budget` | `joint_pool_invariants_proptest`, `fuzz_ledger_ops` | `ledger_public_api_matrix` |
 | `TopicBudgetPool` | `topic_budget_is_shared`, `topic_pool_rejects_invalid_budget` | `topic_pool_invariants_proptest`, `fuzz_ledger_ops` | `ledger_public_api_matrix` |
-| `CanaryPulse` | `canary_pulse_freezes_at_threshold` | `canary_pulse_proptest_freezes_at_threshold`, `fuzz_ledger_ops` | `canary_pulse_integration`, `ledger_public_api_matrix` |
 | `ConservationLedger` | `charge_all_rejects_negative_or_nonfinite`, `freeze_after_budget_exhaustion` | `conservation_ledger_invariants_hold_under_random_sequences`, `fuzz_ledger_ops` | `epsilon_delta_accounting_integration`, `ledger_public_api_matrix` |
 
 ## Oracle (`crates/evidenceos-core/src/oracle.rs`)

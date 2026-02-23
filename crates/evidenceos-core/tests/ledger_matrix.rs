@@ -1,7 +1,7 @@
 use evidenceos_core::error::EvidenceOSError;
 use evidenceos_core::ledger::{
-    alpha_prime, certification_barrier, e_merge, e_merge_equal, e_product, CanaryPulse,
-    ConservationLedger, JointLeakagePool, TopicBudgetPool,
+    alpha_prime, certification_barrier, e_merge, e_merge_equal, e_product, ConservationLedger,
+    JointLeakagePool, TopicBudgetPool,
 };
 use serde_json::Value;
 
@@ -15,9 +15,6 @@ fn ledger_public_api_matrix() {
 
     assert!(JointLeakagePool::new("h".into(), f64::NAN).is_err());
     assert!(TopicBudgetPool::new("topic".into(), 2.0, 2.0).is_ok());
-
-    let mut canary = CanaryPulse::new(0.1).expect("canary");
-    assert!(canary.update(1.5).is_ok());
 
     let mut ledger = ConservationLedger::new(0.1)
         .expect("ledger")

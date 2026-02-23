@@ -1,5 +1,5 @@
 use evidenceos_core::error::EvidenceOSError;
-use evidenceos_core::ledger::{CanaryPulse, JointLeakagePool, TopicBudgetPool};
+use evidenceos_core::ledger::{JointLeakagePool, TopicBudgetPool};
 
 #[test]
 fn joint_leakage_pool_budget_boundary_matrix() {
@@ -33,13 +33,4 @@ fn topic_budget_pool_boundary_matrix_with_covariance() {
             Err(EvidenceOSError::Frozen)
         ));
     }
-}
-
-#[test]
-fn canary_pulse_threshold_matrix_deterministic() {
-    let mut c = CanaryPulse::new(0.25).expect("canary");
-    assert!(c.update(1.5).is_ok());
-    assert!(c.update(2.0).is_ok());
-    assert!(matches!(c.update(2.0), Err(EvidenceOSError::Frozen)));
-    assert!(matches!(c.update(1.01), Err(EvidenceOSError::Frozen)));
 }
