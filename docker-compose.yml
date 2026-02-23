@@ -13,6 +13,7 @@ services:
       - "9464:9464"
     environment:
       EVIDENCEOS_KEY_PROVIDER: "file"
+      EVIDENCEOS_HMAC_KEYS: "default:6368616e67652d6d652d64656661756c742d736563726574,rotate-2026q2:6368616e67652d6d652d726f74617465642d736563726574"
     volumes:
       - ./ops/data:/data
       - ./ops/certs:/certs:ro

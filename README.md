@@ -394,6 +394,13 @@ A `Dockerfile`, `docker-compose.yml`, and a hardened `systemd` unit are provided
 
 All deployment entrypoints should pass `--data-dir` (not the removed `--etl-path`) so the daemon manages `etl.log` and state files under one directory.
 
+For HMAC-authenticated agents, production deployments should configure key rotation through `EVIDENCEOS_HMAC_KEYS` and optional compatibility fallback `EVIDENCEOS_HMAC_SHARED_SECRET`:
+
+- `EVIDENCEOS_HMAC_KEYS` format: `"kid1:hexsecret1,kid2:hexsecret2"`.
+- Requests may set `x-evidenceos-key-id`; if omitted, the daemon uses `default`.
+- `EVIDENCEOS_HMAC_SHARED_SECRET` remains supported and maps to key id `default` for backward compatibility.
+- Do not define the `default` key in both places simultaneously.
+
 ## Migration notes (V2 claim execution)
 
 - New secure RPCs are available: `CreateClaimV2` and `ExecuteClaimV2`.

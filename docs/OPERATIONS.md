@@ -3,7 +3,7 @@
 ## Deployment checklist
 
 - Enforce TLS for every gRPC listener (`--tls-cert`, `--tls-key`) and require mTLS for operator/private environments (`--mtls-client-ca`, `--require-client-cert`).
-- Configure request authentication (`--auth-token` or `--auth-hmac-key`) and keep credentials out of logs.
+- Configure request authentication (`--auth-token`, `--auth-hmac-key`, or `EVIDENCEOS_HMAC_KEYS`) and keep credentials out of logs.
 - Set `--max-request-bytes` defensively for your workload envelope.
 - Store daemon data (`--data-dir`) on durable storage with backups for:
   - `etl.log`

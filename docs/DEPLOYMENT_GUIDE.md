@@ -17,7 +17,11 @@ The image is built with a multi-stage Rust build and runs on a minimal distroles
    - `ops/certs/server.key`
    - `ops/certs/ca.crt`
    - `ops/keys/<key-id>.key` (32-byte Ed25519 seed file, mode `0600`)
-2. Start the stack:
+2. Configure daemon request auth (recommended for production):
+   - `EVIDENCEOS_HMAC_KEYS="default:<hexsecret>,next-2026q2:<hexsecret>"`
+   - Optional backward-compat fallback: `EVIDENCEOS_HMAC_SHARED_SECRET="<raw-secret>"` (mapped to key-id `default`)
+   - Clients selecting rotated keys send `x-evidenceos-key-id: <kid>`.
+3. Start the stack:
 
 ```bash
 docker compose up --build
