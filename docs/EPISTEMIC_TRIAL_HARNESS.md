@@ -4,8 +4,11 @@ This document specifies how to run and analyze "trial-like" experiments against 
 
 For extending EvidenceOS with new NullSpecs, cost
 models, and e-process constructions, see
-docs/RESEARCH_EXTENSIBILITY.md. This document covers
-the statistical design and analysis pipeline only.
+docs/RESEARCH_EXTENSIBILITY.md. The extension registry
+architecture is currently specification-only and remains
+behind the `research_extensions` feature flag in
+`evidenceos-core`; this document covers the statistical
+design and analysis pipeline only.
 
 ## 1) Trial unit definition
 
