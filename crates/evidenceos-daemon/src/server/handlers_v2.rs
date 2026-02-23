@@ -729,7 +729,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_execute_claim");
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
-        clear_pending_mutation(&self.state)?;
+        clear_pending_mutation(&self.state, claim_id)?;
 
         Ok(Response::new(pb::ExecuteClaimResponse {
             state: state.to_proto(),
@@ -1685,7 +1685,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_execute_claim_v2");
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
-        clear_pending_mutation(&self.state)?;
+        clear_pending_mutation(&self.state, claim_id)?;
 
         let response = pb::ExecuteClaimV2Response {
             state: state.to_proto(),
@@ -1979,7 +1979,7 @@ impl EvidenceOsV2 for EvidenceOsService {
         persist_pending_mutation(&self.state, &pending)?;
         maybe_abort_failpoint("after_etl_append_revoke_claim");
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
-        clear_pending_mutation(&self.state)?;
+        clear_pending_mutation(&self.state, claim_id)?;
 
         let message = {
             let etl = self.state.etl.lock();
