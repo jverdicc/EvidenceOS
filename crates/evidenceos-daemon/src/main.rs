@@ -92,6 +92,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     offline_settlement_ingest: bool,
     #[arg(long, default_value_t = false)]
+    offline_settlement_ingest_operator_ack: bool,
+    #[arg(long, default_value_t = false)]
     insecure_synthetic_holdout: bool,
     #[arg(long, default_value_t = false)]
     allow_plaintext_holdouts: bool,
@@ -134,9 +136,64 @@ struct Args {
     enable_trials: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StartupSafetyInputs {
+    production_mode: bool,
+    allow_plaintext_holdouts_enabled: bool,
+    insecure_synthetic_holdout_enabled: bool,
+    offline_settlement_ingest_enabled: bool,
+    offline_settlement_ingest_operator_ack: bool,
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(default)
+}
+
+fn enforce_startup_safety(inputs: StartupSafetyInputs) -> Result<(), String> {
+    if !inputs.production_mode {
+        return Ok(());
+    }
+
+    if inputs.allow_plaintext_holdouts_enabled {
+        return Err(
+            "refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids plaintext holdouts; disable --allow-plaintext-holdouts and EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS".to_string(),
+        );
+    }
+
+    if inputs.insecure_synthetic_holdout_enabled {
+        return Err(
+            "refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids insecure synthetic holdouts; disable --insecure-synthetic-holdout and EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT".to_string(),
+        );
+    }
+
+    if inputs.offline_settlement_ingest_enabled && !inputs.offline_settlement_ingest_operator_ack {
+        return Err(
+            "refusing startup: offline settlement ingest bypass requires --offline-settlement-ingest-operator-ack when EVIDENCEOS_PRODUCTION_MODE=1"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
+    let production_mode = env_flag("EVIDENCEOS_PRODUCTION_MODE", false);
+
+    enforce_startup_safety(StartupSafetyInputs {
+        production_mode,
+        allow_plaintext_holdouts_enabled: args.allow_plaintext_holdouts
+            || env_flag("EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS", false),
+        insecure_synthetic_holdout_enabled: args.insecure_synthetic_holdout
+            || env_flag("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", false),
+        offline_settlement_ingest_enabled: args.offline_settlement_ingest
+            || env_flag("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", false),
+        offline_settlement_ingest_operator_ack: args.offline_settlement_ingest_operator_ack,
+    })
+    .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
     if let Some(etl_path) = args.etl_path.take() {
         let etl_path = std::path::PathBuf::from(etl_path);
@@ -155,6 +212,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&args.data_dir)?;
     if args.offline_settlement_ingest {
         std::env::set_var("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", "1");
+        tracing::warn!(
+            "offline settlement ingest bypass enabled; development-only unless explicitly operator-acknowledged in production"
+        );
     }
     if args.allow_plaintext_holdouts {
         std::env::set_var("EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS", "1");
@@ -228,9 +288,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .map(std::path::Path::new),
     )?;
-    let production_mode = std::env::var("EVIDENCEOS_PRODUCTION_MODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     let require_signed_envelopes = args.require_signed_envelopes.unwrap_or(production_mode);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -475,4 +532,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{enforce_startup_safety, StartupSafetyInputs};
+
+    #[test]
+    fn production_rejects_plaintext_holdouts() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: true,
+            allow_plaintext_holdouts_enabled: true,
+            insecure_synthetic_holdout_enabled: false,
+            offline_settlement_ingest_enabled: false,
+            offline_settlement_ingest_operator_ack: false,
+        });
+        assert!(result
+            .expect_err("plaintext holdouts must fail in production")
+            .contains("forbids plaintext holdouts"));
+    }
+
+    #[test]
+    fn production_rejects_synthetic_holdout_mode() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: true,
+            allow_plaintext_holdouts_enabled: false,
+            insecure_synthetic_holdout_enabled: true,
+            offline_settlement_ingest_enabled: false,
+            offline_settlement_ingest_operator_ack: false,
+        });
+        assert!(result
+            .expect_err("synthetic holdout mode must fail in production")
+            .contains("forbids insecure synthetic holdouts"));
+    }
+
+    #[test]
+    fn production_rejects_offline_ingest_without_operator_ack() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: true,
+            allow_plaintext_holdouts_enabled: false,
+            insecure_synthetic_holdout_enabled: false,
+            offline_settlement_ingest_enabled: true,
+            offline_settlement_ingest_operator_ack: false,
+        });
+        assert!(result
+            .expect_err("offline ingest bypass must fail without operator ack")
+            .contains("offline settlement ingest bypass requires"));
+    }
+
+    #[test]
+    fn production_allows_offline_ingest_with_operator_ack() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: true,
+            allow_plaintext_holdouts_enabled: false,
+            insecure_synthetic_holdout_enabled: false,
+            offline_settlement_ingest_enabled: true,
+            offline_settlement_ingest_operator_ack: true,
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn development_mode_allows_insecure_flags() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: false,
+            allow_plaintext_holdouts_enabled: true,
+            insecure_synthetic_holdout_enabled: true,
+            offline_settlement_ingest_enabled: true,
+            offline_settlement_ingest_operator_ack: false,
+        });
+        assert!(result.is_ok());
+    }
 }
