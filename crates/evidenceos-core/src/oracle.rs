@@ -756,6 +756,31 @@ mod matrix_tests {
     }
 
     #[test]
+    fn leakage_charge_is_log2_alphabet_size() {
+        let r = OracleResolution::new(256, 0.0).expect("r");
+        assert!((r.bits_per_call() - 8.0).abs() < 1e-12);
+
+        // Support size upper-bound used by transcript accounting: |Y| <= 2^k.
+        let support_upper_bound = 2f64.powf(r.bits_per_call());
+        assert!(support_upper_bound >= f64::from(r.num_symbols));
+        assert!((support_upper_bound - f64::from(r.num_symbols)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn canonical_encoding_rejects_padding_ambiguity() {
+        let r = OracleResolution::new(8, 0.0).expect("r");
+        let canonical = r.encode_bucket(3).expect("enc");
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(r.validate_canonical_bytes(&canonical).expect("dec"), 3);
+
+        // Same value with extra leading byte must fail-closed.
+        assert!(matches!(
+            r.validate_canonical_bytes(&[0, canonical[0]]),
+            Err(EvidenceOSError::InvalidCanonicalEncoding)
+        ));
+    }
+
+    #[test]
     fn ttl_none_vs_zero_and_one_boundaries() {
         let mut r = OracleResolution::new(8, 0.0).expect("r");
         r.calibrated_at_epoch = 10;
