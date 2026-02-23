@@ -537,6 +537,8 @@ struct Claim {
     #[serde(default)]
     trial_commitment_hash: [u8; 32],
     #[serde(default)]
+    execution_nonce: u64,
+    #[serde(default)]
     holdout_pool_scope: HoldoutPoolScope,
 }
 
@@ -4213,6 +4215,7 @@ mod tests {
             created_at_unix_ms: 1,
             trial_assignment: None,
             trial_commitment_hash: [0u8; 32],
+            execution_nonce: 0,
             holdout_pool_scope: HoldoutPoolScope::Global,
         };
         let err = vault_context(
@@ -4277,6 +4280,7 @@ mod tests {
             created_at_unix_ms: 1,
             trial_assignment: None,
             trial_commitment_hash: [0u8; 32],
+            execution_nonce: 0,
             holdout_pool_scope: HoldoutPoolScope::Global,
         }
     }
