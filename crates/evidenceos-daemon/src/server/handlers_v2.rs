@@ -170,6 +170,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             created_at_unix_ms,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
+            execution_nonce: 0,
             holdout_pool_scope: self.holdout_pool_scope,
         };
 
@@ -1087,6 +1088,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             created_at_unix_ms,
             trial_assignment: Some(trial_assignment),
             trial_commitment_hash: [0u8; 32],
+            execution_nonce: 0,
             holdout_pool_scope: self.holdout_scope_for(&holdout_descriptor),
         };
         {
@@ -1173,14 +1175,20 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule_bytes,
             stored_etl_index,
         ) = {
-            let mut claims = self.state.claims.lock();
-            let claim = claims
-                .get_mut(&claim_id)
-                .ok_or_else(|| Status::not_found("claim not found"))?;
+            let (mut claim, execution_nonce) = {
+                let mut claims = self.state.claims.lock();
+                let claim = claims
+                    .get_mut(&claim_id)
+                    .ok_or_else(|| Status::not_found("claim not found"))?;
+                self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
+                claim.execution_nonce = claim.execution_nonce.saturating_add(1);
+                let execution_nonce = claim.execution_nonce;
+                (claim.clone(), execution_nonce)
+            };
             let claim_id_hex = hex::encode(claim.claim_id);
             let span = tracing::info_span!("execute_claim_v2", operation_id=%claim.operation_id, claim_id=%claim_id_hex);
             let _guard = span.enter();
-            let current_epoch = self.current_epoch_for_claim(claim)?;
+            let current_epoch = self.current_epoch_for_claim(&claim)?;
             Self::maybe_mark_stale(claim, current_epoch)?;
             if claim.state == ClaimState::Stale {
                 return Err(Status::failed_precondition(
@@ -1338,7 +1346,6 @@ impl EvidenceOsV2 for EvidenceOsService {
                 active: true,
             };
 
-            self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let registry = self.ensure_nullspec_registry_fresh()?;
             let reg_nullspec = registry
@@ -1786,6 +1793,18 @@ impl EvidenceOsV2 for EvidenceOsService {
             } else {
                 Some(etl_index)
             };
+            {
+                let mut claims = self.state.claims.lock();
+                let stored = claims
+                    .get_mut(&claim.claim_id)
+                    .ok_or_else(|| Status::not_found("claim not found"))?;
+                if stored.execution_nonce != execution_nonce
+                    || stored.state != ClaimState::Executing
+                {
+                    return Err(Status::aborted("claim execution superseded"));
+                }
+                *stored = claim.clone();
+            }
             (
                 claim.state,
                 decision,
