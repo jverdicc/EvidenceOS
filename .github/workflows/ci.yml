@@ -197,3 +197,20 @@ jobs:
 
       - name: Run paper conformance harness
         run: cargo test -p evidenceos-core --test paper_conformance
+
+  paper-parity-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install pytest numpy matplotlib scipy pandas --break-system-packages
+      - name: Run paper parity checks
+        run: |
+          cd artifacts/forc10/original_python
+          pytest test_paper_parity.py -v \
+            --tb=short \
+            -x
