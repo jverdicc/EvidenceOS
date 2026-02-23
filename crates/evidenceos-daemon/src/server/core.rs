@@ -3245,6 +3245,10 @@ mod tests {
     use tempfile::TempDir;
     use tonic::Code;
 
+    fn dependency_artifact(seed: u8) -> [u8; 32] {
+        [seed; 32]
+    }
+
     #[test]
     fn canonical_encoding_rejects_invalid_without_charge() {
         let mut ledger = ConservationLedger::new(0.1).expect("valid ledger");
@@ -3576,6 +3580,125 @@ mod tests {
             .expect_err("negative dp budget should fail");
         assert_eq!(err.code(), Code::InvalidArgument);
         assert!(err.message().contains("dp_epsilon_budget"));
+    }
+
+    #[tokio::test]
+    async fn dependency_root_mismatch_rejected() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-a";
+        let handle = [7u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let deps = vec![dependency_artifact(10), dependency_artifact(20)];
+        let mut sorted_deps = deps.clone();
+        sorted_deps.sort();
+        let root = dependency_merkle_root(&sorted_deps);
+
+        let mut req = claim_request(holdout_ref);
+        req.signals
+            .as_mut()
+            .expect("signals")
+            .dependency_merkle_root = root.to_vec();
+        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+            .await
+            .expect("create")
+            .into_inner();
+
+        let mut artifacts = vec![pb::Artifact {
+            artifact_hash: sha256_bytes(BURN_WASM_MODULE).to_vec(),
+            kind: "wasm".to_string(),
+        }];
+        artifacts.push(pb::Artifact {
+            artifact_hash: dependency_artifact(30).to_vec(),
+            kind: "dependency".to_string(),
+        });
+
+        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
+            &svc,
+            Request::new(pb::CommitArtifactsRequest {
+                claim_id: created.claim_id,
+                artifacts,
+                wasm_module: BURN_WASM_MODULE.to_vec(),
+            }),
+        )
+        .await
+        .expect_err("dependency root mismatch must fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn dependencies_forbidden_if_root_missing() {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        let svc = EvidenceOsService::build_with_options(
+            dir.path().to_str().expect("utf8"),
+            false,
+            telemetry,
+        )
+        .expect("service");
+
+        let holdout_ref = "holdout-a";
+        let handle = [7u8; 32];
+        let labels = vec![0_u8, 1, 1, 0];
+        write_holdout_registry(
+            dir.path(),
+            holdout_ref,
+            handle,
+            &labels,
+            sha256_bytes(&labels),
+            labels.len(),
+            None,
+        );
+
+        let mut req = claim_request(holdout_ref);
+        req.signals
+            .as_mut()
+            .expect("signals")
+            .dependency_merkle_root = Vec::new();
+        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+            .await
+            .expect("create")
+            .into_inner();
+
+        let artifacts = vec![
+            pb::Artifact {
+                artifact_hash: sha256_bytes(BURN_WASM_MODULE).to_vec(),
+                kind: "wasm".to_string(),
+            },
+            pb::Artifact {
+                artifact_hash: dependency_artifact(42).to_vec(),
+                kind: "dependency".to_string(),
+            },
+        ];
+
+        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
+            &svc,
+            Request::new(pb::CommitArtifactsRequest {
+                claim_id: created.claim_id,
+                artifacts,
+                wasm_module: BURN_WASM_MODULE.to_vec(),
+            }),
+        )
+        .await
+        .expect_err("dependencies without root commitment must fail");
+        assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
     #[tokio::test]

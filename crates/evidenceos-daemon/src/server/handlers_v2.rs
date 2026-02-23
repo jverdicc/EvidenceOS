@@ -208,13 +208,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                     "cannot commit artifacts after freeze",
                 ));
             }
-            self.transition_claim(claim, ClaimState::Committed, 0.0, 0.0, None)?;
-            claim.artifacts.clear();
-            claim.dependency_items.clear();
-            claim.dependency_merkle_root = None;
-            claim.freeze_preimage = None;
-            claim.oracle_pins = None;
             let mut declared_wasm_hash = None;
+            let mut committed_artifacts = Vec::with_capacity(req.artifacts.len());
+            let mut dependency_items = Vec::new();
             for artifact in req.artifacts {
                 if artifact.kind.is_empty() || artifact.kind.len() > 64 {
                     return Err(Status::invalid_argument("artifact kind must be in [1,64]"));
@@ -224,9 +220,27 @@ impl EvidenceOsV2 for EvidenceOsService {
                     declared_wasm_hash = Some(artifact_hash);
                 }
                 if artifact.kind == "dependency" {
-                    claim.dependency_items.push(artifact_hash);
+                    dependency_items.push(artifact_hash);
                 }
-                claim.artifacts.push((artifact_hash, artifact.kind));
+                committed_artifacts.push((artifact_hash, artifact.kind));
+            }
+            dependency_items.sort();
+            let committed_dependency_root = dependency_merkle_root(&dependency_items);
+            match claim.dependency_merkle_root {
+                Some(root_from_create) => {
+                    if committed_dependency_root != root_from_create {
+                        return Err(Status::failed_precondition(
+                            "dependency artifacts do not match create-time dependency_merkle_root",
+                        ));
+                    }
+                }
+                None => {
+                    if !dependency_items.is_empty() {
+                        return Err(Status::failed_precondition(
+                            "dependency artifacts require create-time dependency_merkle_root",
+                        ));
+                    }
+                }
             }
 
             let mut wasm_hasher = Sha256::new();
@@ -265,6 +279,13 @@ impl EvidenceOsV2 for EvidenceOsService {
                 persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
                 return Err(Status::failed_precondition("ASPEC rejected wasm module"));
             }
+            self.transition_claim(claim, ClaimState::Committed, 0.0, 0.0, None)?;
+            claim.artifacts = committed_artifacts;
+            claim.dependency_items = dependency_items;
+            claim.dependency_capsule_hashes =
+                claim.dependency_items.iter().map(hex::encode).collect();
+            claim.freeze_preimage = None;
+            claim.oracle_pins = None;
             claim.lane = if report.heavy_lane_flag || matches!(report.lane, AspecLane::LowAssurance)
             {
                 Lane::Heavy

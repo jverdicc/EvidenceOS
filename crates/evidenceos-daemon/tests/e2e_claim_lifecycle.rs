@@ -41,6 +41,44 @@ fn sha256(payload: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+fn dependency_merkle_root(items: &[[u8; 32]]) -> [u8; 32] {
+    if items.is_empty() {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&sha256(&[]));
+        return out;
+    }
+    let mut layer: Vec<[u8; 32]> = items
+        .iter()
+        .copied()
+        .map(|value| {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&sha256(&value));
+            out
+        })
+        .collect();
+    while layer.len() > 1 {
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() {
+                layer[i + 1]
+            } else {
+                left
+            };
+            let mut concat = [0u8; 64];
+            concat[..32].copy_from_slice(&left);
+            concat[32..].copy_from_slice(&right);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&sha256(&concat));
+            next.push(out);
+            i += 2;
+        }
+        layer = next;
+    }
+    layer[0]
+}
+
 fn trial_commitment_hash_from_fields(
     schema_version: u8,
     arm_id: u16,
@@ -170,6 +208,39 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
         oracle_num_symbols: 4,
         access_credit: 64,
 
+        oracle_id: "builtin.accuracy".to_string(),
+        nullspec_id: String::new(),
+        dp_epsilon_budget: None,
+        dp_delta_budget: None,
+    })
+    .await
+    .expect("create claim v2")
+    .into_inner()
+    .claim_id
+}
+
+async fn create_claim_v2_with_dependency_root(
+    c: &mut EvidenceOsClient<Channel>,
+    seed: u8,
+    dependency_root: [u8; 32],
+) -> Vec<u8> {
+    c.create_claim_v2(pb::CreateClaimV2Request {
+        claim_name: format!("claim-{seed}"),
+        metadata: Some(pb::ClaimMetadataV2 {
+            lane: "fast".to_string(),
+            alpha_micros: 50_000,
+            epoch_config_ref: format!("epoch-{seed}"),
+            output_schema_id: "legacy/v1".to_string(),
+        }),
+        signals: Some(pb::TopicSignalsV2 {
+            semantic_hash: hash(seed),
+            phys_hir_signature_hash: hash(seed.wrapping_add(1)),
+            dependency_merkle_root: dependency_root.to_vec(),
+        }),
+        holdout_ref: format!("holdout-{seed}"),
+        epoch_size: 10,
+        oracle_num_symbols: 4,
+        access_credit: 64,
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
         dp_epsilon_budget: None,
@@ -523,6 +594,77 @@ async fn negative_parameter_boundaries_for_public_rpcs() {
     c.watch_revocations(pb::WatchRevocationsRequest {})
         .await
         .expect("watch revocations ok");
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn capsule_includes_dependency_list() {
+    let dir = TempDir::new().expect("tmp");
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir");
+    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
+    let mut c = client(addr).await;
+
+    let mut deps = vec![[9u8; 32], [2u8; 32], [7u8; 32]];
+    deps.sort();
+    let dependency_root = dependency_merkle_root(&deps);
+    let claim_id = create_claim_v2_with_dependency_root(&mut c, 29, dependency_root).await;
+
+    let mut artifacts = wasm_artifacts(&valid_wasm());
+    artifacts.extend(deps.iter().rev().map(|dep| pb::Artifact {
+        artifact_hash: dep.to_vec(),
+        kind: "dependency".to_string(),
+    }));
+
+    c.commit_artifacts(pb::CommitArtifactsRequest {
+        claim_id: claim_id.clone(),
+        artifacts,
+        wasm_module: valid_wasm(),
+    })
+    .await
+    .expect("commit");
+
+    c.freeze_gates(pb::FreezeGatesRequest {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("freeze");
+
+    c.seal_claim(pb::SealClaimRequest {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("seal");
+
+    c.execute_claim_v2(pb::ExecuteClaimV2Request {
+        claim_id: claim_id.clone(),
+    })
+    .await
+    .expect("execute");
+
+    let capsule = c
+        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .await
+        .expect("fetch")
+        .into_inner();
+    let json: Value = serde_json::from_slice(&capsule.capsule_bytes).expect("capsule json");
+    let dependency_hashes = json["dependency_capsule_hashes"]
+        .as_array()
+        .expect("dependency list");
+    assert_eq!(dependency_hashes.len(), deps.len());
+
+    let expected_hex: Vec<String> = deps.iter().map(hex::encode).collect();
+    let observed_hex: Vec<String> = dependency_hashes
+        .iter()
+        .map(|value| value.as_str().expect("hex").to_string())
+        .collect();
+    assert_eq!(observed_hex, expected_hex);
+
+    let lineage_hex = json["lineage_root_hash_hex"]
+        .as_str()
+        .expect("lineage root");
+    assert_eq!(lineage_hex, hex::encode(dependency_root));
 
     handle.abort();
 }
