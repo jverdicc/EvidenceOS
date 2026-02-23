@@ -24,6 +24,7 @@ The result is a verification system with explicit risk posture, deterministic se
 3. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
 4. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
 5. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
+6. **Security implementation docs:** [`docs/HOLDOUT_ENCRYPTION.md`](docs/HOLDOUT_ENCRYPTION.md), [`docs/TEE.md`](docs/TEE.md), [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
 
 > 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
 > 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
