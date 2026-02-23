@@ -64,6 +64,7 @@ name = "verification_latency"
 harness = false
 
 [features]
+dp_lane = ["evidenceos-core/dp_lane"]
 crash-test-failpoints = []
 kms-aws = ["dep:aws-config", "dep:aws-sdk-kms"]
 kms-gcp = ["dep:google-cloud-kms", "dep:google-cloud-googleapis"]

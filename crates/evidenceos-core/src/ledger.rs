@@ -262,6 +262,14 @@ pub struct ConservationLedger {
     access_credit_budget: Option<f64>,
     epsilon_budget: Option<f64>,
     delta_budget: Option<f64>,
+    #[cfg(feature = "dp_lane")]
+    pub epsilon_spent: f64,
+    #[cfg(feature = "dp_lane")]
+    pub delta_spent: f64,
+    #[cfg(feature = "dp_lane")]
+    pub epsilon_budget_dp_lane: f64,
+    #[cfg(feature = "dp_lane")]
+    pub delta_budget_dp_lane: f64,
     frozen: bool,
 }
 
@@ -304,6 +312,14 @@ impl ConservationLedger {
             access_credit_budget: None,
             epsilon_budget: None,
             delta_budget: None,
+            #[cfg(feature = "dp_lane")]
+            epsilon_spent: 0.0,
+            #[cfg(feature = "dp_lane")]
+            delta_spent: 0.0,
+            #[cfg(feature = "dp_lane")]
+            epsilon_budget_dp_lane: f64::INFINITY,
+            #[cfg(feature = "dp_lane")]
+            delta_budget_dp_lane: f64::INFINITY,
             frozen: false,
         })
     }
@@ -332,6 +348,11 @@ impl ConservationLedger {
     ) -> Self {
         self.epsilon_budget = epsilon_budget.filter(|b| b.is_finite() && *b >= 0.0);
         self.delta_budget = delta_budget.filter(|b| b.is_finite() && *b >= 0.0);
+        #[cfg(feature = "dp_lane")]
+        {
+            self.epsilon_budget_dp_lane = self.epsilon_budget.unwrap_or(f64::INFINITY);
+            self.delta_budget_dp_lane = self.delta_budget.unwrap_or(f64::INFINITY);
+        }
         self
     }
     pub fn alpha_prime(&self) -> f64 {
@@ -529,9 +550,32 @@ impl ConservationLedger {
         self.k_bits_total = new_total;
         self.epsilon_total = epsilon_next;
         self.delta_total = delta_next;
+        #[cfg(feature = "dp_lane")]
+        {
+            self.epsilon_spent = self.epsilon_total;
+            self.delta_spent = self.delta_total;
+        }
         self.access_credit_spent = access_next;
         self.events
             .push(LedgerEvent::leak(kind.to_string(), k_bits, meta));
+        Ok(())
+    }
+
+    #[cfg(feature = "dp_lane")]
+    pub fn charge_dp_basic(&mut self, epsilon: f64, delta: f64) -> EvidenceOSResult<()> {
+        if !(epsilon.is_finite() && delta.is_finite()) || epsilon < 0.0 || delta < 0.0 {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        self.epsilon_spent += epsilon;
+        self.delta_spent += delta;
+        if self.epsilon_spent > self.epsilon_budget_dp_lane
+            || self.delta_spent > self.delta_budget_dp_lane
+        {
+            self.frozen = true;
+            return Err(EvidenceOSError::Frozen);
+        }
+        self.epsilon_total = self.epsilon_spent;
+        self.delta_total = self.delta_spent;
         Ok(())
     }
 

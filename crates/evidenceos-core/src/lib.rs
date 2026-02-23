@@ -35,6 +35,8 @@ pub mod canary;
 pub mod capsule;
 pub mod crypto_transcripts;
 pub mod dlc;
+#[cfg(feature = "dp_lane")]
+pub mod dp_lane;
 pub mod eprocess;
 pub mod error;
 pub mod etl;

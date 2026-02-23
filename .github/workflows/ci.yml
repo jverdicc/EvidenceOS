@@ -178,6 +178,24 @@ jobs:
           name: clippy-report
           path: artifacts/clippy-report.txt
 
+
+  dp-lane-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test with dp_lane feature
+        run: |
+          cargo test --features dp_lane \
+            -p evidenceos-core \
+            --test dp_lane_tests -- --nocapture
+      - name: Test without dp_lane feature
+        run: |
+          cargo test \
+            -p evidenceos-core \
+            --test dp_lane_tests \
+            -- test_aspec_rejects_dp_when_feature_disabled
+
   paper-conformance:
     runs-on: ubuntu-latest
     steps:

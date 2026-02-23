@@ -134,9 +134,22 @@ impl Default for AspecPolicy {
 
 impl AspecPolicy {
     pub fn claim_v1() -> Self {
-        let allowed = allowed_import_pairs()
+        let mut allowed: HashSet<(String, String)> = allowed_import_pairs()
             .map(|(module, name)| (module.to_string(), name.to_string()))
             .collect();
+        #[cfg(feature = "dp_lane")]
+        {
+            allowed.insert((MODULE_ENV.to_string(), "dp_laplace_i64".to_string()));
+            allowed.insert((MODULE_ENV.to_string(), "dp_gaussian_i64".to_string()));
+            allowed.insert((
+                MODULE_KERNEL_ALIAS.to_string(),
+                "dp_laplace_i64".to_string(),
+            ));
+            allowed.insert((
+                MODULE_KERNEL_ALIAS.to_string(),
+                "dp_gaussian_i64".to_string(),
+            ));
+        }
         Self {
             profile_name: ASPEC_PROFILE_CLAIM_V1.to_string(),
             lane: AspecLane::HighAssurance,
@@ -214,7 +227,7 @@ fn is_forbidden_output_import(module: &str, name: &str) -> bool {
         || lowered.contains("output") && !is_required_output_import(module, name)
 }
 
-fn is_forbidden_dp_import(name: &str) -> bool {
+fn is_dp_import(name: &str) -> bool {
     matches!(name, "dp_laplace_i64" | "dp_gaussian_i64")
 }
 
@@ -625,11 +638,13 @@ pub fn verify_aspec(wasm: &[u8], policy: &AspecPolicy) -> AspecReport {
                                     import.module, import.name
                                 ));
                             }
-                            if is_forbidden_dp_import(import.name) {
-                                reasons.push(format!(
-                                    "DP guest syscall is forbidden; host-managed DP only: {}::{}",
-                                    import.module, import.name
-                                ));
+                            if is_dp_import(import.name) {
+                                #[cfg(not(feature = "dp_lane"))]
+                                reasons.push("dp syscalls require dp_lane feature".to_string());
+                                #[cfg(feature = "dp_lane")]
+                                if !matches!(policy.lane, AspecLane::LowAssurance) {
+                                    reasons.push("dp syscalls require HEAVY lane".to_string());
+                                }
                             }
                         }
                         TypeRef::Memory(_) => reasons.push(
@@ -1037,10 +1052,16 @@ mod tests {
         .unwrap();
         let report = verify_aspec(&dp_import, &AspecPolicy::default());
         assert!(!report.ok);
+        #[cfg(not(feature = "dp_lane"))]
         assert!(report
             .reasons
             .iter()
-            .any(|reason| reason.contains("host-managed DP only")));
+            .any(|reason| reason.contains("dp_lane feature")));
+        #[cfg(feature = "dp_lane")]
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("HEAVY lane")));
     }
 
     #[test]
