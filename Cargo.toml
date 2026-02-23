@@ -26,3 +26,6 @@ authors = ["Joseph Verdicchio", "EvidenceOS Contributors"]
 description = "EvidenceOS kernel: deterministic transparency log, claim ledger, and verification daemon."
 license = "Apache-2.0"
 repository = "https://github.com/jverdicc/EvidenceOS"
+
+[workspace.dependencies]
+wasmtime = { version = "25", default-features = false, features = ["cranelift", "runtime"] }

@@ -31,7 +31,7 @@ wasmparser = "0.121"
 parking_lot = "0.12"
 crc32fast = "1"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
-wasmtime = { version = "25", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime = { workspace = true }
 tracing = "0.1"
 prost = "0.13"
 tonic = { version = "0.12", features = ["transport", "tls"] }
