@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub const MAGNITUDE_ENVELOPE_PACK_SCHEMA_V1: &str = "evidenceos.magnitude-envelope-pack.v1";
 
@@ -201,6 +201,11 @@ impl EnvelopeRegistry {
         out
     }
 
+    pub fn insert_envelope(&mut self, envelope: MagnitudeEnvelope) {
+        let key = (envelope.profile_id.clone(), envelope.schema_id.clone());
+        self.envelopes.insert(key, envelope);
+    }
+
     pub fn load_from_signed_packs_dir(
         packs_dir: &Path,
         trusted_keys: &TrustedEnvelopeAuthorities,
@@ -258,43 +263,81 @@ impl EnvelopeRegistry {
             let Some(field) = claim.fields.iter().find(|f| f.name == bound.field) else {
                 continue;
             };
-            let CanonicalFieldValue::Quantity(quantity) = &field.value else {
-                continue;
-            };
-            if check_dimension(quantity, bound.expected_dimension).is_err()
-                || quantity.value < bound.min_value
-                || quantity.value > bound.max_value
-            {
-                return Err(Box::new(EnvelopeViolation {
-                    profile_id: envelope.profile_id.clone(),
-                    schema_id: envelope.schema_id.clone(),
-                    field: bound.field.clone(),
-                    min_value: bound.min_value,
-                    max_value: bound.max_value,
-                    observed_value: quantity.value,
-                }));
+            match &field.value {
+                CanonicalFieldValue::Quantity(quantity) => {
+                    if check_dimension(quantity, bound.expected_dimension).is_err()
+                        || quantity.value < bound.min_value
+                        || quantity.value > bound.max_value
+                    {
+                        return Err(Box::new(EnvelopeViolation {
+                            profile_id: envelope.profile_id.clone(),
+                            schema_id: envelope.schema_id.clone(),
+                            field: bound.field.clone(),
+                            min_value: bound.min_value,
+                            max_value: bound.max_value,
+                            observed_value: quantity.value,
+                        }));
+                    }
+                }
+                CanonicalFieldValue::QuantityList(quantities) => {
+                    for entry in quantities {
+                        let quantity = &entry.quantity;
+                        if check_dimension(quantity, bound.expected_dimension).is_err()
+                            || quantity.value < bound.min_value
+                            || quantity.value > bound.max_value
+                        {
+                            return Err(Box::new(EnvelopeViolation {
+                                profile_id: envelope.profile_id.clone(),
+                                schema_id: envelope.schema_id.clone(),
+                                field: bound.field.clone(),
+                                min_value: bound.min_value,
+                                max_value: bound.max_value,
+                                observed_value: quantity.value,
+                            }));
+                        }
+                    }
+                }
+                _ => continue,
             }
         }
         Ok(())
     }
 }
 
-static ACTIVE_REGISTRY: OnceLock<RwLock<EnvelopeRegistry>> = OnceLock::new();
+static ACTIVE_REGISTRY: OnceLock<RwLock<Option<Arc<EnvelopeRegistry>>>> = OnceLock::new();
 
-pub fn active_registry() -> EnvelopeRegistry {
-    let lock =
-        ACTIVE_REGISTRY.get_or_init(|| RwLock::new(EnvelopeRegistry::with_builtin_defaults()));
+fn production_mode_enabled() -> bool {
+    std::env::var("EVIDENCEOS_PRODUCTION_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn active_registry() -> Arc<EnvelopeRegistry> {
+    let lock = ACTIVE_REGISTRY.get_or_init(|| RwLock::new(None));
     match lock.read() {
-        Ok(reg) => reg.clone(),
-        Err(_) => EnvelopeRegistry::with_builtin_defaults(),
+        Ok(reg) => reg.clone().unwrap_or_else(|| {
+            if production_mode_enabled() {
+                Arc::new(EnvelopeRegistry::empty())
+            } else {
+                Arc::new(EnvelopeRegistry::with_builtin_defaults())
+            }
+        }),
+        Err(_) => Arc::new(EnvelopeRegistry::empty()),
     }
 }
 
 pub fn set_active_registry(registry: EnvelopeRegistry) -> EvidenceOSResult<()> {
-    let lock =
-        ACTIVE_REGISTRY.get_or_init(|| RwLock::new(EnvelopeRegistry::with_builtin_defaults()));
+    let lock = ACTIVE_REGISTRY.get_or_init(|| RwLock::new(None));
     let mut guard = lock.write().map_err(|_| EvidenceOSError::Internal)?;
-    *guard = registry;
+    *guard = Some(Arc::new(registry));
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn clear_active_registry_for_tests() -> EvidenceOSResult<()> {
+    let lock = ACTIVE_REGISTRY.get_or_init(|| RwLock::new(None));
+    let mut guard = lock.write().map_err(|_| EvidenceOSError::Internal)?;
+    *guard = None;
     Ok(())
 }
 

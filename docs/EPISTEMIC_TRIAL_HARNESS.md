@@ -175,3 +175,7 @@ EvidenceOS supports two assignment modes with distinct audit procedures:
   - Each blocked assignment records `allocator_snapshot_hash` (SHA-256 of canonical allocator snapshot) so auditors can confirm assignment traces against persisted allocator state history.
 
 This gives reproducible assignment in hashed mode and replayable/auditable state transitions in blocked mode.
+
+## 12) Structured-claim envelope enforcement source
+
+When trials rely on CBRN structured-claim (`CBRN_SC_V1`) acceptance behavior, envelope checks are performed against the daemon's active envelope registry (for example signed envelope packs loaded from `--envelope-packs-dir`, optionally required by `--require-signed-envelopes`). In non-production/development mode, builtin defaults may be used only when no active registry has been installed.
