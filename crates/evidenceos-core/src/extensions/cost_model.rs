@@ -7,12 +7,7 @@ pub struct LedgerContext;
 pub trait CostModel: Send + Sync {
     fn id(&self) -> &'static str;
 
-    fn charge_bits(
-        &self,
-        symbol: &Symbol,
-        alphabet_size: usize,
-        context: &LedgerContext,
-    ) -> f64;
+    fn charge_bits(&self, symbol: &Symbol, alphabet_size: usize, context: &LedgerContext) -> f64;
 
     /// Must satisfy: charge >= 0 for all inputs.
     /// Recommended: charge >= log2(alphabet_size)

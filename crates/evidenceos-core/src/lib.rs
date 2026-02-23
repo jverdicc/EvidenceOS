@@ -40,6 +40,8 @@ pub mod dp_lane;
 pub mod eprocess;
 pub mod error;
 pub mod etl;
+#[cfg(feature = "research_extensions")]
+pub mod extensions;
 pub mod holdout_crypto;
 pub mod ledger;
 pub mod magnitude_envelope;
