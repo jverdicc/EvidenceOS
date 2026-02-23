@@ -175,6 +175,10 @@ pub struct TopicBudgetPool {
     pub covariance_charge_total: f64,
     k_bits_spent: f64,
     access_credit_spent: f64,
+    #[serde(default)]
+    reserved_k_bits: f64,
+    #[serde(default)]
+    reserved_access_credit: f64,
     pub frozen: bool,
 }
 
@@ -198,8 +202,91 @@ impl TopicBudgetPool {
             covariance_charge_total: 0.0,
             k_bits_spent: 0.0,
             access_credit_spent: 0.0,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
             frozen: false,
         })
+    }
+
+    pub fn reserve(&mut self, k_bits: f64, access_credit: f64) -> EvidenceOSResult<()> {
+        if self.frozen {
+            return Err(EvidenceOSError::Frozen);
+        }
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let next_reserved_k = self.reserved_k_bits + k_bits;
+        let next_reserved_access = self.reserved_access_credit + access_credit;
+        if !next_reserved_k.is_finite() || !next_reserved_access.is_finite() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        let total_k = self.k_bits_spent + next_reserved_k;
+        let total_access = self.access_credit_spent + next_reserved_access;
+        if !total_k.is_finite() || !total_access.is_finite() {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        if total_k > self.k_bits_budget + f64::EPSILON
+            || total_access > self.access_credit_budget + f64::EPSILON
+        {
+            self.frozen = true;
+            return Err(EvidenceOSError::Frozen);
+        }
+        self.reserved_k_bits = next_reserved_k;
+        self.reserved_access_credit = next_reserved_access;
+        Ok(())
+    }
+
+    pub fn settle_reserved(
+        &mut self,
+        reserved_k_bits: f64,
+        reserved_access_credit: f64,
+        actual_k_bits: f64,
+        actual_access_credit: f64,
+        covariance_charge: f64,
+    ) -> EvidenceOSResult<()> {
+        if !reserved_k_bits.is_finite()
+            || !reserved_access_credit.is_finite()
+            || !actual_k_bits.is_finite()
+            || !actual_access_credit.is_finite()
+            || !covariance_charge.is_finite()
+            || reserved_k_bits < 0.0
+            || reserved_access_credit < 0.0
+            || actual_k_bits < 0.0
+            || actual_access_credit < 0.0
+            || covariance_charge < 0.0
+            || actual_k_bits > reserved_k_bits + f64::EPSILON
+            || actual_access_credit > reserved_access_credit + f64::EPSILON
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        if reserved_k_bits > self.reserved_k_bits + f64::EPSILON
+            || reserved_access_credit > self.reserved_access_credit + f64::EPSILON
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        self.reserved_k_bits -= reserved_k_bits;
+        self.reserved_access_credit -= reserved_access_credit;
+        self.charge(actual_k_bits, actual_access_credit, covariance_charge)
+    }
+
+    pub fn release_reserved(&mut self, k_bits: f64, access_credit: f64) -> EvidenceOSResult<()> {
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        if k_bits > self.reserved_k_bits + f64::EPSILON
+            || access_credit > self.reserved_access_credit + f64::EPSILON
+        {
+            return Err(EvidenceOSError::InvalidArgument);
+        }
+        self.reserved_k_bits -= k_bits;
+        self.reserved_access_credit -= access_credit;
+        Ok(())
+    }
+
+    pub fn k_bits_remaining(&self) -> f64 {
+        (self.k_bits_budget - self.k_bits_spent - self.reserved_k_bits).max(0.0)
     }
 
     pub fn charge(
@@ -244,6 +331,10 @@ impl TopicBudgetPool {
 
     pub fn access_credit_spent(&self) -> f64 {
         self.access_credit_spent
+    }
+
+    pub fn reserved_k_bits(&self) -> f64 {
+        self.reserved_k_bits
     }
 }
 

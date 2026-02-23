@@ -497,6 +497,18 @@ pub fn kout_bits_upper_bound(canonical_bytes: &[u8]) -> u64 {
     }
 }
 
+pub fn schema_kout_bits_upper_bound(output_schema_id: &str) -> EvidenceOSResult<u64> {
+    let canonical_schema_id = canonicalize_schema_id(output_schema_id)?;
+    if canonical_schema_id == LEGACY_SCHEMA_ID {
+        Ok(0)
+    } else {
+        Ok(kout_bits_upper_bound_for_claim(&StructuredClaim {
+            schema_id: SCHEMA_ID.to_string(),
+            fields: vec![],
+        }))
+    }
+}
+
 pub fn max_bytes_upper_bound() -> u32 {
     2048
 }

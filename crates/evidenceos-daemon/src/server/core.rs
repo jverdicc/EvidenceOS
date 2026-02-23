@@ -642,6 +642,10 @@ struct HoldoutBudgetPool {
     access_credit_budget: f64,
     k_bits_spent: f64,
     access_credit_spent: f64,
+    #[serde(default)]
+    reserved_k_bits: f64,
+    #[serde(default)]
+    reserved_access_credit: f64,
     frozen: bool,
 }
 
@@ -704,8 +708,84 @@ impl HoldoutBudgetPool {
             access_credit_budget,
             k_bits_spent: 0.0,
             access_credit_spent: 0.0,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
             frozen: false,
         })
+    }
+
+    fn reserve(&mut self, k_bits: f64, access_credit: f64) -> Result<(), Status> {
+        if self.frozen {
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        let next_reserved_k = self.reserved_k_bits + k_bits;
+        let next_reserved_access = self.reserved_access_credit + access_credit;
+        if !next_reserved_k.is_finite() || !next_reserved_access.is_finite() {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        let next_k = self.k_bits_spent + next_reserved_k;
+        let next_access = self.access_credit_spent + next_reserved_access;
+        if !next_k.is_finite() || !next_access.is_finite() {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        if next_k > self.k_bits_budget + f64::EPSILON
+            || next_access > self.access_credit_budget + f64::EPSILON
+        {
+            self.frozen = true;
+            return Err(Status::failed_precondition("holdout pool exhausted"));
+        }
+        self.reserved_k_bits = next_reserved_k;
+        self.reserved_access_credit = next_reserved_access;
+        Ok(())
+    }
+
+    fn settle_reserved(
+        &mut self,
+        reserved_k_bits: f64,
+        reserved_access_credit: f64,
+        actual_k_bits: f64,
+        actual_access_credit: f64,
+    ) -> Result<(), Status> {
+        if !reserved_k_bits.is_finite()
+            || !reserved_access_credit.is_finite()
+            || !actual_k_bits.is_finite()
+            || !actual_access_credit.is_finite()
+            || reserved_k_bits < 0.0
+            || reserved_access_credit < 0.0
+            || actual_k_bits < 0.0
+            || actual_access_credit < 0.0
+            || actual_k_bits > reserved_k_bits + f64::EPSILON
+            || actual_access_credit > reserved_access_credit + f64::EPSILON
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        if reserved_k_bits > self.reserved_k_bits + f64::EPSILON
+            || reserved_access_credit > self.reserved_access_credit + f64::EPSILON
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        self.reserved_k_bits -= reserved_k_bits;
+        self.reserved_access_credit -= reserved_access_credit;
+        self.charge(actual_k_bits, actual_access_credit)
+    }
+
+    fn release_reserved(&mut self, k_bits: f64, access_credit: f64) -> Result<(), Status> {
+        if !k_bits.is_finite() || !access_credit.is_finite() || k_bits < 0.0 || access_credit < 0.0
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        if k_bits > self.reserved_k_bits + f64::EPSILON
+            || access_credit > self.reserved_access_credit + f64::EPSILON
+        {
+            return Err(Status::invalid_argument("invalid holdout pool charge"));
+        }
+        self.reserved_k_bits -= k_bits;
+        self.reserved_access_credit -= access_credit;
+        Ok(())
     }
 
     fn charge(&mut self, k_bits: f64, access_credit: f64) -> Result<(), Status> {
