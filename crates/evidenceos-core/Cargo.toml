@@ -9,7 +9,6 @@ license.workspace = true
 
 [features]
 default = []
-trial-harness = []
 kms-aws = ["dep:aws-config", "dep:aws-sdk-kms", "dep:tokio"]
 kms-gcp = ["dep:google-cloud-kms", "dep:google-cloud-googleapis", "dep:tokio"]
 kms-azure = ["dep:azure_identity", "dep:azure_security_keyvault_keys", "dep:tokio"]

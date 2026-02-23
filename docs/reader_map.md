@@ -60,7 +60,7 @@ The daemon gRPC server is split for faster code-path review:
 - `crates/evidenceos-daemon/src/server/mod.rs`: service/state wiring and shared helpers.
 - `crates/evidenceos-daemon/src/server/handlers_v2.rs`: v2 gRPC handlers.
 - `crates/evidenceos-daemon/src/server/handlers_v1.rs`: v1 compatibility handlers and transcode bridge.
-- `crates/evidenceos-daemon/src/server/lifecycle.rs`: lifecycle transition module placeholder.
-- `crates/evidenceos-daemon/src/server/sealing.rs`: sealing module placeholder.
-- `crates/evidenceos-daemon/src/server/execution.rs`: execution module placeholder.
-- `crates/evidenceos-daemon/src/server/telemetry.rs`: telemetry module placeholder.
+- `crates/evidenceos-daemon/src/server/lifecycle.rs`: lifecycle transition helpers and claim-state transition logic.
+- `crates/evidenceos-daemon/src/server/sealing.rs`: sealing flow helpers (freeze gates, incident handling, idempotency cache wiring).
+- `crates/evidenceos-daemon/src/server/execution.rs`: claim execution helpers and execute-claim orchestration logic.
+- `crates/evidenceos-daemon/src/server/telemetry.rs`: probe detection, ETL event appenders, and telemetry emission helpers.

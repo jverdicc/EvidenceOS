@@ -247,52 +247,6 @@ impl TopicBudgetPool {
     }
 }
 
-/// §13 Canary Pulse drift circuit breaker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CanaryPulse {
-    alpha_drift: f64,
-    e_drift: f64,
-    frozen: bool,
-}
-
-impl CanaryPulse {
-    pub fn new(alpha_drift: f64) -> EvidenceOSResult<Self> {
-        if !(alpha_drift > 0.0 && alpha_drift < 1.0) {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        Ok(Self {
-            alpha_drift,
-            e_drift: 1.0,
-            frozen: false,
-        })
-    }
-
-    pub fn update(&mut self, e_drift_increment: f64) -> EvidenceOSResult<bool> {
-        if self.frozen {
-            return Err(EvidenceOSError::Frozen);
-        }
-        if e_drift_increment <= 0.0 || !e_drift_increment.is_finite() {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        if self.e_drift > f64::MAX / e_drift_increment {
-            return Err(EvidenceOSError::InvalidArgument);
-        }
-        self.e_drift *= e_drift_increment;
-        if self.e_drift >= 1.0 / self.alpha_drift {
-            self.frozen = true;
-            return Err(EvidenceOSError::Frozen);
-        }
-        Ok(false)
-    }
-
-    pub fn is_frozen(&self) -> bool {
-        self.frozen
-    }
-    pub fn e_drift(&self) -> f64 {
-        self.e_drift
-    }
-}
-
 /// The Conservation Ledger.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConservationLedger {
@@ -710,12 +664,6 @@ mod tests {
         assert!(matches!(p.charge(5.0), Err(EvidenceOSError::Frozen)));
     }
 
-    #[test]
-    fn canary_pulse_freezes_at_threshold() {
-        let mut c = CanaryPulse::new(0.05).expect("canary");
-        assert!(matches!(c.update(25.0), Err(EvidenceOSError::Frozen)));
-    }
-
     proptest! {
         #[test]
         fn conservation_ledger_invariants_hold_under_random_sequences(
@@ -1045,29 +993,6 @@ mod matrix_tests {
         }
         #[test] fn events_never_decrease_under_random_ops(ops in prop::collection::vec(0.0f64..3.0f64,1..64)) { let mut l=ConservationLedger::new(0.1).expect("l"); let mut prev=0usize; for v in ops { let _=l.charge(v,"x",Value::Null); prop_assert!(l.events.len()>=prev); prev=l.events.len(); } }
         #[test] fn random_meta_does_not_panic(v in any::<u64>()) { let mut l=ConservationLedger::new(0.1).expect("l"); let _=l.charge(0.1,"x",json!({"v":v})); prop_assert!(true); }
-        #[test] fn canary_pulse_invariants_proptest(alpha in 0.01f64..0.99f64, increments in prop::collection::vec(0.000001f64..4.0f64, 1..64)) {
-            let mut c=CanaryPulse::new(alpha).expect("c");
-            let threshold = 1.0 / alpha;
-            let mut running = 1.0f64;
-            let mut froze = false;
-            for inc in increments {
-                let expected_cross = running * inc >= threshold;
-                let result = c.update(inc);
-                if expected_cross {
-                    froze = true;
-                    prop_assert!(matches!(result,Err(EvidenceOSError::Frozen)));
-                    prop_assert!(c.is_frozen());
-                    break;
-                } else {
-                    running *= inc;
-                    prop_assert!(result.is_ok());
-                    prop_assert!(!c.is_frozen());
-                }
-            }
-            if froze {
-                prop_assert!(matches!(c.update(1.01), Err(EvidenceOSError::Frozen)));
-            }
-        }
         #[test] fn joint_pool_invariants_proptest(a in 0.1f64..10.0f64, x in 0.0f64..5.0f64) { let mut p=JointLeakagePool::new("h".into(), a).expect("p"); let _=p.charge(x); prop_assert!(p.k_bits_remaining() <= a + 1e-12); }
         #[test] fn topic_pool_invariants_proptest(a in 0.1f64..10.0f64, b in 0.1f64..10.0f64, x in 0.0f64..5.0f64, covariance_charge in 0.0f64..8.0f64) {
             let mut p=TopicBudgetPool::new("t".into(), a,b).expect("p");

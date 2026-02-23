@@ -36,9 +36,4 @@ Coverage policy consistency check passed (threshold: 95%)
 - Added ETL schema compatibility tests for `ClaimSettlementEvent` in `crates/evidenceos-core/src/etl.rs`:
   - Legacy event payloads without trial fields deserialize with `None` defaults.
   - Full trial metadata payload round-trips through serde.
-- Added trial harness tests under feature flag `trial-harness` in `crates/evidenceos-core/src/trial/tests.rs`:
-  - ClassicalSupportBound threshold parity with kernel barrier math.
-  - `k_cost` parity with `log2(alphabet_size)` charge semantics.
-  - Router assignment distribution check over 10,000 draws.
-  - Router nonce uniqueness checks.
-  - Property tests for threshold parity and settlement-event serde/backward-compat.
+- Trial harness behavior is covered by daemon-side tests in `crates/evidenceos-daemon/src/trial/mod.rs` and server integration paths.

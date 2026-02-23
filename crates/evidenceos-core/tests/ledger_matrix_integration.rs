@@ -1,4 +1,4 @@
-use evidenceos_core::ledger::{e_merge, e_product, CanaryPulse, ConservationLedger};
+use evidenceos_core::ledger::{e_merge, e_product, ConservationLedger};
 use serde_json::Value;
 
 #[test]
@@ -8,12 +8,6 @@ fn epsilon_delta_accounting_integration() {
         .expect("charge");
     assert!((l.epsilon_total() - 0.5).abs() < 1e-12);
     assert!((l.delta_total() - 0.2).abs() < 1e-12);
-}
-
-#[test]
-fn canary_pulse_integration() {
-    let mut c = CanaryPulse::new(0.05).expect("canary");
-    assert!(c.update(1.0).is_ok());
 }
 
 #[test]
