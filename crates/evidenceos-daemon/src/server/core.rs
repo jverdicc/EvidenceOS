@@ -67,8 +67,9 @@ use evidenceos_core::eprocess::DirichletMixtureEProcess;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof, Etl};
 use evidenceos_core::holdout_crypto::{decrypt_holdout_labels, EnvKeyProvider, HoldoutKeyProvider};
 use evidenceos_core::ledger::{ConservationLedger, TopicBudgetPool};
-use evidenceos_core::nullspec::{EProcessKind, NullSpecKind};
-use evidenceos_core::nullspec_contract::DraftNullSpecContractV1 as RegistryNullSpecContractV1;
+use evidenceos_core::nullspec::{
+    EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
+};
 use evidenceos_core::nullspec_registry::{NullSpecAuthorityKeyring, NullSpecRegistry};
 use evidenceos_core::nullspec_store::NullSpecStore;
 use evidenceos_core::oracle::OracleResolution;
@@ -3047,18 +3048,24 @@ fn build_operation_id(
     ])
 }
 
-fn default_registry_nullspec() -> Result<RegistryNullSpecContractV1, Status> {
-    let mut null_spec = RegistryNullSpecContractV1 {
-        id: String::new(),
-        domain: "sealed-vault".to_string(),
-        null_accuracy: 0.5,
-        e_value: evidenceos_core::nullspec_contract::EValueSpecV1::LikelihoodRatio {
-            n_observations: 1,
+fn default_registry_nullspec() -> Result<SignedNullSpecContractV1, Status> {
+    let mut null_spec = SignedNullSpecContractV1 {
+        schema: NULLSPEC_SCHEMA_V1.to_string(),
+        nullspec_id: [0_u8; 32],
+        oracle_id: "builtin.accuracy".to_string(),
+        oracle_resolution_hash: [0_u8; 32],
+        holdout_handle: "synthetic-holdout".to_string(),
+        epoch_created: 0,
+        ttl_epochs: u64::MAX,
+        kind: NullSpecKind::ParametricBernoulli { p: 0.5 },
+        eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+            alt: vec![0.5, 0.5],
         },
-        created_at_unix: 0,
-        version: 1,
+        calibration_manifest_hash: None,
+        created_by: "test".to_string(),
+        signature_ed25519: vec![0_u8; 64],
     };
-    null_spec.id = null_spec
+    null_spec.nullspec_id = null_spec
         .compute_id()
         .map_err(|_| Status::internal("nullspec id compute failed"))?;
     Ok(null_spec)
@@ -3066,7 +3073,7 @@ fn default_registry_nullspec() -> Result<RegistryNullSpecContractV1, Status> {
 
 fn vault_context(
     claim: &Claim,
-    null_spec: RegistryNullSpecContractV1,
+    null_spec: SignedNullSpecContractV1,
     holdout_provider: &dyn HoldoutProvider,
 ) -> Result<VaultExecutionContext, Status> {
     let descriptor = holdout_provider.resolve(&claim.holdout_ref)?;
@@ -4682,5 +4689,57 @@ mod tests {
 
         assert_eq!(executed.capsule_hash, executed_2.capsule_hash);
         assert_eq!(executed.etl_index, executed_2.etl_index);
+    }
+
+    #[test]
+    fn nullspec_e_value_parametric_bernoulli_matches_reference() {
+        let mut contract = SignedNullSpecContractV1 {
+            schema: NULLSPEC_SCHEMA_V1.to_string(),
+            nullspec_id: [0; 32],
+            oracle_id: "builtin.accuracy".to_string(),
+            oracle_resolution_hash: [0; 32],
+            holdout_handle: "h1".to_string(),
+            epoch_created: 0,
+            ttl_epochs: 10,
+            kind: NullSpecKind::ParametricBernoulli { p: 0.4 },
+            eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+                alt: vec![0.3, 0.7],
+            },
+            calibration_manifest_hash: None,
+            created_by: "test".to_string(),
+            signature_ed25519: vec![0; 64],
+        };
+        contract.nullspec_id = contract.compute_id().expect("compute id");
+
+        let (e, kind) = compute_nullspec_e_value(&contract, &[1, 0, 1]).expect("compute e-value");
+        assert_eq!(kind, "likelihood_ratio_fixed_alt");
+        assert!((e - 1.53125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nullspec_e_value_dirichlet_matches_reference() {
+        let mut contract = SignedNullSpecContractV1 {
+            schema: NULLSPEC_SCHEMA_V1.to_string(),
+            nullspec_id: [0; 32],
+            oracle_id: "builtin.accuracy".to_string(),
+            oracle_resolution_hash: [0; 32],
+            holdout_handle: "h1".to_string(),
+            epoch_created: 0,
+            ttl_epochs: 10,
+            kind: NullSpecKind::DiscreteBuckets {
+                p0: vec![0.2, 0.3, 0.5],
+            },
+            eprocess: EProcessKind::DirichletMultinomialMixture {
+                alpha: vec![1.0, 1.0, 1.0],
+            },
+            calibration_manifest_hash: None,
+            created_by: "test".to_string(),
+            signature_ed25519: vec![0; 64],
+        };
+        contract.nullspec_id = contract.compute_id().expect("compute id");
+
+        let (e, kind) = compute_nullspec_e_value(&contract, &[2, 1, 2]).expect("compute e-value");
+        assert_eq!(kind, "dirichlet_multinomial_mixture");
+        assert!((e - (4.0 / 9.0)).abs() < 1e-12);
     }
 }
