@@ -84,6 +84,29 @@ impl EvidenceOsService {
         Ok(())
     }
 
+    pub(super) fn append_reservation_expired_incident(
+        &self,
+        claim: &Claim,
+        released_k_bits: f64,
+        released_access_credit: f64,
+    ) -> Result<(), Status> {
+        let entry = serde_json::to_vec(&json!({
+            "kind": "reservation_expired",
+            "claim_id": hex::encode(claim.claim_id),
+            "topic_id": hex::encode(claim.topic_id),
+            "released_k_bits": released_k_bits,
+            "released_access_credit": released_access_credit,
+            "operation_id": claim.operation_id,
+        }))
+        .map_err(|_| Status::internal("reservation expired incident encoding failed"))?;
+        self.state
+            .etl
+            .lock()
+            .append(&entry)
+            .map_err(|_| Status::internal("reservation expired incident append failed"))?;
+        Ok(())
+    }
+
     pub(super) fn append_canary_incident(
         &self,
         claim: &Claim,

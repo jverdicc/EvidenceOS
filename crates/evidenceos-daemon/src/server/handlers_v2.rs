@@ -121,6 +121,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             }),
         )?;
         let created_at_unix_ms = current_time_unix_ms()?;
+        let reserved_expires_at_unix_ms =
+            created_at_unix_ms.saturating_add(self.reservation_ttl_ms);
         let claim = Claim {
             claim_id,
             topic_id,
@@ -172,6 +174,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             trial_commitment_hash: [0u8; 32],
             execution_nonce: 0,
             holdout_pool_scope: self.holdout_pool_scope,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
+            reserved_expires_at_unix_ms,
         };
 
         self.state.claims.lock().insert(claim_id, claim.clone());
@@ -1039,6 +1044,8 @@ impl EvidenceOsV2 for EvidenceOsService {
             hex::encode(semantic_hash),
         )?;
         let created_at_unix_ms = current_time_unix_ms()?;
+        let reserved_expires_at_unix_ms =
+            created_at_unix_ms.saturating_add(self.reservation_ttl_ms);
         let claim = Claim {
             claim_id,
             topic_id: topic.topic_id,
@@ -1090,6 +1097,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             trial_commitment_hash: [0u8; 32],
             execution_nonce: 0,
             holdout_pool_scope: self.holdout_scope_for(&holdout_descriptor),
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
+            reserved_expires_at_unix_ms,
         };
         {
             let mut claims = self.state.claims.lock();
@@ -1345,6 +1355,10 @@ impl EvidenceOsV2 for EvidenceOsService {
                 reserved_access_credit: worst_case_taxed,
                 active: true,
             };
+            claim.reserved_k_bits = worst_case_taxed;
+            claim.reserved_access_credit = worst_case_taxed;
+            claim.reserved_expires_at_unix_ms =
+                current_time_unix_ms()?.saturating_add(self.reservation_ttl_ms);
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
             let registry = self.ensure_nullspec_registry_fresh()?;
@@ -1473,6 +1487,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                 }
             }
             reservation_guard.active = false;
+            claim.reserved_k_bits = 0.0;
+            claim.reserved_access_credit = 0.0;
+            claim.reserved_expires_at_unix_ms = 0;
             let principal_k_bits =
                 if taxed_bits.is_finite() && vault_result.kout_bits_total.is_finite() {
                     Some((taxed_bits + vault_result.kout_bits_total).max(0.0).ceil() as u64)
