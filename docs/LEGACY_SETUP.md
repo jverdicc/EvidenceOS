@@ -1,3 +1,6 @@
+# Legacy Setup Notes
+*Retained for reference. For current setup see README.md Quickstart section.*
+
 <!-- Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
@@ -41,4 +44,4 @@ cargo build -p evidenceos-daemon
 
 ## 5) Remove legacy Python (if migrating)
 
-See `MIGRATION_REMOVE_PYTHON.md`.
+See `docs/MIGRATION_REMOVE_PYTHON.md`.
