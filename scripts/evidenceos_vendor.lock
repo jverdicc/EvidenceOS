@@ -1,0 +1,4 @@
+# EvidenceOS vendor lock for downstream DiscOS integrations.
+# Canonical upstream must match public project source of truth.
+repo=https://github.com/jverdicc/EvidenceOS
+ref=forc-submission-v1.0
