@@ -31,6 +31,29 @@ The result is a verification system with explicit risk posture, deterministic se
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
+## Clinical Trials & Research
+
+EvidenceOS includes an **Epistemic Trial Harness** for clinical-trial-style evaluation so researchers can answer: *which interventions were tested, across which trial arms, and what outcomes were observed under controlled holdout evaluation?*
+
+- **Harness specification:** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md)
+- **Analysis pipeline:** [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md)
+- **FDA integration guidance:** [`docs/integrations/fda_clinical_trials.md`](docs/integrations/fda_clinical_trials.md)
+
+### Enable the framework
+
+- Define intervention/arm structure in `config/trial_arms.json`.
+- Activate trial execution using the documented environment toggles.
+- Run the harness with the documented CLI flags for trial mode and analysis export.
+
+See the harness spec for exact config schema and runtime switches: [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md).
+
+### Where trial data lands
+
+- Trial artifacts and records are written as **ETL capsules**.
+- Indexed trial evidence is available through the **ETL indexer** for downstream analysis.
+
+For end-to-end data flow and post-processing, see [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md).
+
 This repository contains:
 
 - `evidenceos-core`: Conservation Ledger primitives, deterministic logical clock, ETL Merkle log, and ASPEC-like Wasm verifier.
