@@ -1,4 +1,6 @@
 # Hardening Issue Drafts
+*Internal working notes. Not authoritative documentation.
+See docs/TEST_COVERAGE_MATRIX.md for current status.*
 
 This file captures the repository scan results for `unwrap()`, `panic!()`, and `TODO` markers,
 as well as issue drafts matching the requested format.

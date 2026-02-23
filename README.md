@@ -1,9 +1,12 @@
 <!-- Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18685556.svg)](https://zenodo.org/records/18685556)
-
 # EvidenceOS (Rust)
+
+[![CI](https://github.com/jverdicc/EvidenceOS/actions/workflows/ci.yml/badge.svg)](https://github.com/jverdicc/EvidenceOS/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18685556.svg)](https://doi.org/10.5281/zenodo.18685556)
+[![Paper](https://img.shields.io/badge/paper-FORC%202026-orange.svg)](https://doi.org/10.5281/zenodo.18685556)
 
 EvidenceOS is a production-oriented verification kernel for the Universal Verification Protocol (UVP).
 
@@ -31,35 +34,13 @@ The result is a verification system with explicit risk posture, deterministic se
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
-## Clinical Trials & Research
+## Clinical trial harness
 
-EvidenceOS includes an **Epistemic Trial Harness** for clinical-trial-style evaluation so researchers can answer: *which interventions were tested, across which trial arms, and what outcomes were observed under controlled holdout evaluation?*
+EvidenceOS includes an **Epistemic Trial Harness** for clinical-trial-style evaluation.
 
-- **Harness specification:** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md)
-- **Analysis pipeline:** [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md)
-- **FDA integration guidance:** [`docs/integrations/fda_clinical_trials.md`](docs/integrations/fda_clinical_trials.md)
-
-### Research Extensibility
-- docs/RESEARCH_EXTENSIBILITY.md — 
-  Extending EvidenceOS with new NullSpecs, cost 
-  models, e-processes, and oracles
-- docs/EPISTEMIC_TRIAL_HARNESS.md — 
-  Statistical design for comparing strategies
-
-### Enable the framework
-
-- Define intervention/arm structure in `config/trial_arms.json`.
-- Activate trial execution using the documented environment toggles.
-- Run the harness with the documented CLI flags for trial mode and analysis export.
-
-See the harness spec for exact config schema and runtime switches: [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md).
-
-### Where trial data lands
-
-- Trial artifacts and records are written as **ETL capsules**.
-- Indexed trial evidence is available through the **ETL indexer** for downstream analysis.
-
-For end-to-end data flow and post-processing, see [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md).
+- Harness specification: [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md)
+- Analysis pipeline: [`docs/TRIAL_HARNESS_ANALYSIS.md`](docs/TRIAL_HARNESS_ANALYSIS.md)
+- Analysis workspace overview: [`analysis/README.md`](analysis/README.md)
 
 This repository contains:
 
@@ -93,68 +74,11 @@ For the highest-risk profiles (e.g., CBRN), UVP recommends restricting outputs t
 
 EvidenceOS is best understood as a verification kernel inside a larger secure system: host compromise, key theft, and hardware side-channels require standard isolation and deployment controls in addition to the protocol.
 
-## Threat Model by Example (blackbox walkthrough)
+## Threat model (summary)
 
-For a standalone, outsider-friendly version of this walkthrough, see [`docs/THREAT_MODEL_BLACKBOX.md`](docs/THREAT_MODEL_BLACKBOX.md).
+EvidenceOS assumes adaptive callers can use repeated interactions to extract holdout signal over time, even when each individual response appears harmless. The defensive posture is to canonicalize and meter interactions, maintain shared leakage/evidence budgets, and fail closed through escalation and freezing when risk posture is exceeded.
 
-The goal of this section is to explain the failure mode and defense without needing Rust, gRPC, Merkle-tree, or append-only transparency log (ETL) background.
-
-### Baseline failure: adaptive probing breaks an oracle-only setup
-
-1. Imagine a model-evaluation service that returns a score each time an agent submits a candidate.
-2. The service owner believes each score is “safe enough” because each one looks low detail on its own.
-3. An adaptive agent does not care about any single response; it cares about the sequence.
-4. It makes tiny targeted edits, reads the next score, and updates its next query strategy.
-5. Over many rounds, this creates a feedback loop from hidden holdout data back to the agent.
-6. No one response is catastrophic, but the transcript as a whole can reveal too much.
-7. This is the conceptual lesson from the paper’s Experiment 0: oracle-only controls collapse under adaptive probing.
-8. “Rate limit more” helps only weakly if outputs are still precise and composable.
-9. “Use multiple oracles” can make leakage worse when they share the same hidden holdout.
-10. A baseline system may look stable in one-shot tests but fail once an optimizer is allowed to iterate.
-11. The result is silent overfitting to protected data while confidence appears to rise.
-12. In short: without transcript-level controls, adaptive interaction converts harmless-looking answers into extractable signal.
-
-### EvidenceOS success path: bounded outputs, shared budgets, and automatic halts
-
-1. EvidenceOS treats each evaluation as a governed interaction, not a free-form score API.
-2. Incoming claims and artifacts are canonicalized so semantically equivalent requests map to one normalized form.
-3. Oracle replies are quantized into a finite alphabet (coarse buckets, not arbitrary precision numbers).
-4. Hysteresis adds a stall region: tiny local changes return the previous bucket instead of fresh detail.
-5. This removes high-resolution “gradient-like” feedback from repetitive near-threshold probing.
-6. Each emitted symbol consumes leakage budget `k`, charged from the finite output alphabet.
-7. The system also tracks evidence budget `W` and composes `k/W` across time, not just per request.
-8. If two oracles share a holdout, EvidenceOS meters them jointly so cross-oracle subtraction cannot bypass limits.
-9. As budgets tighten or invariants fail, lanes are frozen or escalated (for example into heavier review paths).
-10. Settlement and log publication continue with auditable receipts, but unsafe interaction bandwidth is reduced.
-11. When limits are exceeded, progress can stall by design instead of leaking incremental holdout information.
-12. In short: EvidenceOS converts adaptive probing from an unbounded extraction game into a metered process that can halt safely.
-
-### Worked blackbox I/O example
-
-| Stage | Input to EvidenceOS (type-level) | Output from EvidenceOS (type-level) | Security effect |
-| --- | --- | --- | --- |
-| `CreateClaim` | Claim statement, claimant identity, declared policy/topic | Claim ID + initial lane/budget state | Starts auditable lineage and shared budgeting context |
-| `FreezeGates` | Finalized claim metadata + artifact references | Immutable gate/freeze receipt | Prevents mid-flight mutation of what will be evaluated |
-| `ExecuteClaim` | Sealed claim + oracle binding + holdout policy | Quantized oracle symbol(s), updated `k/W`, lane decision (`PASS/CANARY/HEAVY/REJECT`) | Emits bounded information and charges transcript leakage |
-| `Capsule + ETL inclusion` | Settlement-ready claim state | Signed capsule + ETL inclusion/consistency-verifiable record | Produces portable proof that can be audited later |
-
-### What this is NOT
-
-- Not a general sandbox for arbitrary internet-connected agents.
-- Not a promise that one query is always harmless; safety is enforced over the transcript.
-- Not a replacement for host hardening, key management, or side-channel defenses.
-- Not a loophole-free guarantee against every real-world deployment mistake.
-
-### Threats out of scope
-
-- Compromised host/VM or runtime that can tamper with process memory/execution.
-- Stolen or misused signing/service keys.
-- Hardware/microarchitectural side channels and physical exfiltration paths.
-- Any path that bypasses the kernel and directly exposes raw holdout data.
-
-### ETL is append-only transparency-log infrastructure
-
-EvidenceOS uses ETL as an append-only Merkle transparency log with signed checkpoints plus inclusion/consistency proofs. This is **not** a blockchain, and blockchain-style mining or global consensus are **not** required for EvidenceOS to operate.
+For the full narrative walkthrough and examples, see [`docs/THREAT_MODEL_BLACKBOX.md`](docs/THREAT_MODEL_BLACKBOX.md).
 
 ## Architecture diagrams
 
@@ -248,7 +172,7 @@ EvidenceOS addresses **evaluation integrity and adaptive leakage control**. It d
 
 EvidenceOS is designed for settings where an AI system is assumed to be capable, possibly deceptive, and operating across many interactions over time. Its guarantees are protocol-level and mathematical, not behavioral.
 
-See [docs/POSITIONING.md in DiscOS](link) for a full capability and risk matrix.
+See [`docs/POSITIONING.md`](docs/POSITIONING.md) for a full capability and risk matrix.
 
 ## Practical Use Cases and Outcomes
 
