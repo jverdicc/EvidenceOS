@@ -57,9 +57,26 @@ impl EvidenceOsService {
             ));
         }
         claim.dependency_items.sort();
+        claim.dependency_capsule_hashes = claim.dependency_items.iter().map(hex::encode).collect();
 
         let dependency_merkle_root = dependency_merkle_root(&claim.dependency_items);
-        claim.dependency_merkle_root = Some(dependency_merkle_root);
+        match claim.dependency_merkle_root {
+            Some(committed_root) => {
+                if committed_root != dependency_merkle_root {
+                    return Err(Status::failed_precondition(
+                        "dependency merkle root mismatch",
+                    ));
+                }
+            }
+            None => {
+                if !claim.dependency_items.is_empty() {
+                    return Err(Status::failed_precondition(
+                        "dependency items require create-time dependency_merkle_root",
+                    ));
+                }
+            }
+        }
+        claim.lineage_root_hash = dependency_merkle_root;
 
         let wasm_hash = sha256_bytes(&claim.wasm_module);
         let artifacts_hash = artifacts_commitment(&claim.artifacts);
