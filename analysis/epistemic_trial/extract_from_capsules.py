@@ -86,7 +86,17 @@ def _settlement_outcome(capsule: dict[str, Any], frozen: bool) -> str:
     return "FAIL"
 
 
-def extract_capsule_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _is_terminal_success_state(state: str, include_settled_success: bool) -> bool:
+    if state == "CERTIFIED":
+        return True
+    if include_settled_success and state == "SETTLED":
+        return True
+    return False
+
+
+def extract_capsule_rows(
+    records: list[dict[str, Any]], *, include_settled_success: bool = False
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in records:
         if record.get("schema") != "evidenceos.v2.claim_capsule":
@@ -98,23 +108,46 @@ def extract_capsule_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(ledger, dict):
             raise CapsuleExtractionError(f"capsule at ETL index {etl_index} has invalid ledger")
         k_bits_total = _require(record, "ledger.k_bits_total", etl_index)
+        state = str(record.get("state", "")).upper()
+
+        ledger_snapshot = record.get("ledger_snapshot")
+        snapshot_frozen: bool | None = None
+        if ledger_snapshot is not None:
+            if not isinstance(ledger_snapshot, dict):
+                raise CapsuleExtractionError(
+                    f"capsule at ETL index {etl_index} has invalid ledger_snapshot"
+                )
+            snapshot_frozen_raw = ledger_snapshot.get("frozen")
+            if snapshot_frozen_raw is None:
+                snapshot_frozen = None
+            elif isinstance(snapshot_frozen_raw, bool):
+                snapshot_frozen = snapshot_frozen_raw
+            else:
+                raise CapsuleExtractionError(
+                    f"capsule at ETL index {etl_index} has non-boolean ledger_snapshot.frozen"
+                )
+
         frozen_raw = ledger.get("frozen")
         if frozen_raw is None:
-            frozen = bool(record.get("decision") == 3 or str(record.get("state", "")).upper() == "FROZEN")
+            frozen_ledger = None
         elif isinstance(frozen_raw, bool):
-            frozen = frozen_raw
+            frozen_ledger = frozen_raw
         else:
             raise CapsuleExtractionError(
                 f"capsule at ETL index {etl_index} has non-boolean ledger.frozen"
             )
 
-        state = str(record.get("state", "")).upper()
+        frozen = bool(state == "FROZEN" or snapshot_frozen is True or frozen_ledger is True)
+
         canary_incident = bool(record.get("canary_incident"))
         revoked_incident = state in {"REVOKED", "TAINTED", "STALE"}
         certified = bool(record.get("certified"))
-        adversary_success = bool(record.get("adversary_success")) or (
-            record.get("decision") == 1 and not certified
-        )
+
+        # Use terminal state as the canonical endpoint when present; otherwise
+        # fail over to the certified boolean.
+        adversary_success = _is_terminal_success_state(state, include_settled_success)
+        if state == "":
+            adversary_success = certified
 
         if frozen:
             event_type = EVENT_FROZEN_CONTAINMENT
@@ -204,9 +237,11 @@ def write_extracted_rows(rows: list[dict[str, Any]], out_path: Path) -> None:
     raise ValueError("Unsupported output format; use .csv or .parquet")
 
 
-def run_extraction(etl_path: Path, out_path: Path) -> list[dict[str, Any]]:
+def run_extraction(
+    etl_path: Path, out_path: Path, *, include_settled_success: bool = False
+) -> list[dict[str, Any]]:
     records = parse_json_records(read_etl_records(etl_path))
-    rows = extract_capsule_rows(records)
+    rows = extract_capsule_rows(records, include_settled_success=include_settled_success)
     write_extracted_rows(rows, out_path)
     return rows
 
@@ -215,9 +250,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Extract trial rows from ClaimCapsule ETL records")
     parser.add_argument("--etl", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path, help="Output file (.csv or .parquet)")
+    parser.add_argument(
+        "--success-includes-settled",
+        action="store_true",
+        help="Count state=SETTLED as adversary_success in addition to state=CERTIFIED.",
+    )
     args = parser.parse_args()
 
-    rows = run_extraction(args.etl, args.out)
+    rows = run_extraction(
+        args.etl,
+        args.out,
+        include_settled_success=args.success_includes_settled,
+    )
     if not rows:
         raise SystemExit("No claim capsules found in ETL")
     print(f"Extracted {len(rows)} capsule rows to {args.out}")

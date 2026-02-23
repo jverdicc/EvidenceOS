@@ -18,8 +18,8 @@ The extractor emits explicit trial endpoint fields:
 - `time` (alias of `duration_kbits`) measured in **k-bits consumed**.
 - `event_type` integer encoding:
   - `0 = censored`
-  - `1 = adversary_success` (primary endpoint)
-  - `2 = frozen_containment`
+  - `1 = adversary_success` (primary endpoint; `state == CERTIFIED`, or fallback `certified == true` when state unavailable; `SETTLED` only when opted in during extraction)
+  - `2 = frozen_containment` (`state == FROZEN` or `ledger_snapshot.frozen == true`; also accepts `ledger.frozen == true`)
   - `3 = incident` (revoked/tainted/stale/canary incident)
 
 The same unit (`duration_kbits`) is used consistently across KM, CIF, Cox, and RMST outputs.
