@@ -31,6 +31,9 @@ jobs:
       - name: Check case-insensitive filename collisions
         run: ./scripts/check_case_insensitive_collisions.sh
 
+      - name: Check single Wasmtime version
+        run: ./scripts/check_single_wasmtime_version.sh
+
       - name: Check coverage policy consistency
         run: ./scripts/check_coverage_policy.py
 

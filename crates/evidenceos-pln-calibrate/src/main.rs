@@ -4,9 +4,10 @@
 
 use clap::Parser;
 use evidenceos_core::pln::{DistributionSummary, PlnProfile, RecommendedPlnCosts};
+use evidenceos_core::wasm_config::deterministic_wasmtime_config;
 use std::fs;
 use std::path::PathBuf;
-use wasmtime::{Config, Engine, Instance, Module, Store};
+use wasmtime::{Engine, Instance, Module, Store};
 
 #[derive(Debug, Parser)]
 #[command(name = "evidenceos-pln-calibrate")]
@@ -43,14 +44,7 @@ fn summarize(samples: &mut [u64]) -> DistributionSummary {
 }
 
 fn wasmtime_engine() -> Result<Engine, String> {
-    let mut cfg = Config::new();
-    cfg.consume_fuel(true);
-    cfg.wasm_threads(false);
-    cfg.wasm_simd(false);
-    cfg.wasm_relaxed_simd(false);
-    cfg.wasm_multi_memory(false);
-    cfg.wasm_reference_types(false);
-    cfg.wasm_memory64(false);
+    let cfg = deterministic_wasmtime_config();
     Engine::new(&cfg).map_err(|e| format!("engine init failed: {e}"))
 }
 
