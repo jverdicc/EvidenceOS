@@ -15,11 +15,9 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use parking_lot::Mutex;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tonic::metadata::MetadataMap;
@@ -27,7 +25,6 @@ use tonic::service::Interceptor;
 use tonic::{GrpcMethod, Request, Status};
 
 const DEFAULT_REPLAY_TTL: Duration = Duration::from_secs(300);
-const DEFAULT_MAX_REPLAY_IDS: usize = 10_000;
 const MAX_REQUEST_ID_LEN: usize = 128;
 const MAX_SCOPES_HEADER_LEN: usize = 1024;
 const DEFAULT_HMAC_KEY_ID: &str = "default";
@@ -76,16 +73,11 @@ enum AuthenticatedRole {
 pub struct RequestGuard {
     auth: Option<AuthConfig>,
     timeout: Option<Duration>,
-    replay_cache: Arc<ReplayCache>,
 }
 
 impl RequestGuard {
     pub fn new(auth: Option<AuthConfig>, timeout: Option<Duration>) -> Self {
-        Self {
-            auth,
-            timeout,
-            replay_cache: Arc::new(ReplayCache::new(DEFAULT_REPLAY_TTL, DEFAULT_MAX_REPLAY_IDS)),
-        }
+        Self { auth, timeout }
     }
 
     #[allow(clippy::result_large_err)]
@@ -138,6 +130,9 @@ impl RequestGuard {
                 let req_id = validate_request_id(metadata)?;
                 let key_id = read_key_id(metadata)?;
                 let timestamp = read_timestamp(metadata)?;
+                if production_mode() && timestamp.is_none() {
+                    return Err(Status::unauthenticated("missing x-evidenceos-timestamp"));
+                }
                 if let Some(ts) = timestamp {
                     validate_timestamp_skew(ts, DEFAULT_REPLAY_TTL)?;
                 }
@@ -165,9 +160,6 @@ impl RequestGuard {
                     return Err(Status::unauthenticated("invalid signature"));
                 }
 
-                if !self.replay_cache.check_and_insert(req_id) {
-                    return Err(Status::unauthenticated("replayed x-request-id"));
-                }
                 Ok(AuthenticatedRole::Agent)
             }
             None => Ok(AuthenticatedRole::Agent),
@@ -228,66 +220,10 @@ impl Interceptor for RequestGuard {
     }
 }
 
-#[derive(Debug)]
-struct ReplayCache {
-    ttl: Duration,
-    max_entries: usize,
-    state: Mutex<ReplayState>,
-}
-
-#[derive(Debug, Default)]
-struct ReplayState {
-    entries: HashMap<String, Instant>,
-    order: VecDeque<(Instant, String)>,
-}
-
-impl ReplayCache {
-    fn new(ttl: Duration, max_entries: usize) -> Self {
-        Self {
-            ttl,
-            max_entries,
-            state: Mutex::new(ReplayState::default()),
-        }
-    }
-
-    fn check_and_insert(&self, request_id: &str) -> bool {
-        let now = Instant::now();
-        let mut state = self.state.lock();
-        state.evict_expired(now, self.ttl);
-
-        if state.entries.contains_key(request_id) {
-            return false;
-        }
-
-        let request_id = request_id.to_owned();
-        state.entries.insert(request_id.clone(), now);
-        state.order.push_back((now, request_id));
-        state.evict_overflow(self.max_entries);
-        true
-    }
-}
-
-impl ReplayState {
-    fn evict_expired(&mut self, now: Instant, ttl: Duration) {
-        while let Some((seen_at, request_id)) = self.order.front() {
-            if now.duration_since(*seen_at) <= ttl {
-                break;
-            }
-            let request_id = request_id.clone();
-            self.order.pop_front();
-            self.entries.remove(&request_id);
-        }
-    }
-
-    fn evict_overflow(&mut self, max_entries: usize) {
-        while self.entries.len() > max_entries {
-            if let Some((_, request_id)) = self.order.pop_front() {
-                self.entries.remove(&request_id);
-            } else {
-                break;
-            }
-        }
-    }
+fn production_mode() -> bool {
+    std::env::var("EVIDENCEOS_PRODUCTION_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn signing_material(request_id: &str, path: &str, timestamp: Option<u64>) -> String {
@@ -640,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn replayed_request_id_rejected() {
+    fn replayed_request_id_is_not_rejected_in_auth_layer() {
         let key = b"hmac-secret".to_vec();
         let mut guard = RequestGuard::new(
             Some(AuthConfig::HmacKeyring(HashMap::from([(
@@ -654,8 +590,7 @@ mod tests {
         guard.call(req).expect("first use accepted");
 
         let req = hmac_request(("evidenceos.v1.EvidenceOS", "Health"), "req-replay", &key);
-        let err = guard.call(req).expect_err("replay must fail");
-        assert_eq!(err.code(), Code::Unauthenticated);
+        guard.call(req).expect("duplicate request-id passes auth");
     }
 
     #[test]
@@ -690,6 +625,24 @@ mod tests {
 
         std::env::remove_var("EVIDENCEOS_OPERATOR_CERT_FINGERPRINTS");
     }
+
+    #[test]
+    fn hmac_requires_timestamp_in_production_mode() {
+        std::env::set_var("EVIDENCEOS_PRODUCTION_MODE", "1");
+        let key = b"hmac-secret".to_vec();
+        let mut guard = RequestGuard::new(
+            Some(AuthConfig::HmacKeyring(HashMap::from([(
+                "default".to_string(),
+                key.clone(),
+            )]))),
+            None,
+        );
+        let req = hmac_request(("evidenceos.v1.EvidenceOS", "Health"), "req-prod", &key);
+        let err = guard.call(req).expect_err("timestamp required");
+        assert_eq!(err.code(), Code::Unauthenticated);
+        std::env::remove_var("EVIDENCEOS_PRODUCTION_MODE");
+    }
+
     #[test]
     fn timestamp_skew_rejected() {
         let key = b"hmac-secret".to_vec();

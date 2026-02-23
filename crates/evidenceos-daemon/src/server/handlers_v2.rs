@@ -743,6 +743,20 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::CreateClaimV2Request>,
     ) -> Result<Response<pb::CreateClaimV2Response>, Status> {
         let caller = Self::caller_identity(request.metadata());
+        let principal_id = caller.principal_id.clone();
+        let request_id = Self::request_id_from_metadata(request.metadata())?;
+        let req_msg = request.get_ref().clone();
+        let idempotency = self
+            .idempotency_lookup::<pb::CreateClaimV2Request, pb::CreateClaimV2Response>(
+                "/evidenceos.v2.EvidenceOS/CreateClaimV2",
+                &principal_id,
+                &request_id,
+                &req_msg,
+            )?;
+        let idempotency_context = match idempotency {
+            IdempotencyLookup::Cached(cached) => return Ok(Response::new(cached)),
+            IdempotencyLookup::Miss(ctx) => ctx,
+        };
         let req = request.into_inner();
         validate_required_str_field(&req.claim_name, "claim_name", 128)?;
         let oracle_id = if req.oracle_id.trim().is_empty() {
@@ -1025,11 +1039,13 @@ impl EvidenceOsV2 for EvidenceOsService {
         {
             let mut claims = self.state.claims.lock();
             if let Some(existing) = claims.get(&claim_id).cloned() {
-                return Ok(Response::new(pb::CreateClaimV2Response {
+                let response = pb::CreateClaimV2Response {
                     claim_id: claim_id.to_vec(),
                     topic_id: existing.topic_id.to_vec(),
                     state: existing.state.to_proto(),
-                }));
+                };
+                self.idempotency_store_success(idempotency_context.clone(), &response)?;
+                return Ok(Response::new(response));
             }
             claims.insert(claim_id, claim.clone());
         }
@@ -1061,11 +1077,13 @@ impl EvidenceOsV2 for EvidenceOsService {
             }
         }
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
-        Ok(Response::new(pb::CreateClaimV2Response {
+        let response = pb::CreateClaimV2Response {
             claim_id: claim_id.to_vec(),
             topic_id: claim.topic_id.to_vec(),
             state: claim.state.to_proto(),
-        }))
+        };
+        self.idempotency_store_success(idempotency_context, &response)?;
+        Ok(Response::new(response))
     }
 
     async fn execute_claim_v2(
@@ -1075,11 +1093,18 @@ impl EvidenceOsV2 for EvidenceOsService {
         let caller = Self::caller_identity(request.metadata());
         let principal_id = caller.principal_id.clone();
         let request_id = Self::request_id_from_metadata(request.metadata())?;
-        if let Some(cached) =
-            self.idempotency_lookup_execute_claim_v2(&principal_id, &request_id)?
-        {
-            return Ok(Response::new(cached));
-        }
+        let req_msg = request.get_ref().clone();
+        let idempotency = self
+            .idempotency_lookup::<pb::ExecuteClaimV2Request, pb::ExecuteClaimV2Response>(
+                "/evidenceos.v2.EvidenceOS/ExecuteClaimV2",
+                &principal_id,
+                &request_id,
+                &req_msg,
+            )?;
+        let idempotency_context = match idempotency {
+            IdempotencyLookup::Cached(cached) => return Ok(Response::new(cached)),
+            IdempotencyLookup::Miss(ctx) => ctx,
+        };
         let req = request.into_inner();
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
         let (
@@ -1697,11 +1722,9 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
         };
-        self.idempotency_store_execute_claim_v2(
-            principal_id.clone(),
-            request_id.clone(),
-            response.clone(),
-        );
+        if let Err(status) = self.idempotency_store_success(idempotency_context, &response) {
+            return Err(status);
+        }
         Ok(Response::new(response))
     }
 
@@ -1914,6 +1937,20 @@ impl EvidenceOsV2 for EvidenceOsService {
         request: Request<pb::RevokeClaimRequest>,
     ) -> Result<Response<pb::RevokeClaimResponse>, Status> {
         let caller = Self::caller_identity(request.metadata());
+        let principal_id = caller.principal_id.clone();
+        let request_id = Self::request_id_from_metadata(request.metadata())?;
+        let req_msg = request.get_ref().clone();
+        let idempotency = self
+            .idempotency_lookup::<pb::RevokeClaimRequest, pb::RevokeClaimResponse>(
+                "/evidenceos.v2.EvidenceOS/RevokeClaimV2",
+                &principal_id,
+                &request_id,
+                &req_msg,
+            )?;
+        let idempotency_context = match idempotency {
+            IdempotencyLookup::Cached(cached) => return Ok(Response::new(cached)),
+            IdempotencyLookup::Miss(ctx) => ctx,
+        };
         let req = request.into_inner();
         if req.reason.is_empty() || req.reason.len() > 256 {
             return Err(Status::invalid_argument("reason must be in [1,256]"));
@@ -1996,10 +2033,12 @@ impl EvidenceOsV2 for EvidenceOsService {
             let _ = tx.try_send(message.clone());
         }
 
-        Ok(Response::new(pb::RevokeClaimResponse {
+        let response = pb::RevokeClaimResponse {
             state: pb::ClaimState::Revoked as i32,
             timestamp_unix,
-        }))
+        };
+        self.idempotency_store_success(idempotency_context, &response)?;
+        Ok(Response::new(response))
     }
 
     async fn grant_credit(

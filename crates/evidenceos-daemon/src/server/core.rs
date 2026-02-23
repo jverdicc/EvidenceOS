@@ -847,9 +847,13 @@ const ORACLE_TTL_ESCALATED_REASON_CODE: u32 = 9203;
 const MAGNITUDE_ENVELOPE_REASON_CODE: u32 = 9205;
 const LEDGER_NUMERIC_GUARD_REASON_CODE: u32 = 9206;
 
-#[derive(Debug, Clone)]
-struct IdempotencyCachedResponse {
-    response: pb::ExecuteClaimV2Response,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IdempotencyRecord {
+    request_hash: [u8; 32],
+    status_code: u32,
+    status_message: Option<String>,
+    response_bytes: Vec<u8>,
+    created_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -859,8 +863,14 @@ enum IdempotencyEntry {
     },
     Ready {
         expires_at: Instant,
-        cached: IdempotencyCachedResponse,
+        record: IdempotencyRecord,
     },
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyContext {
+    key: (String, String, String),
+    request_hash: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -879,7 +889,7 @@ struct ServerState {
     operator_config: Mutex<OperatorRuntimeConfig>,
     account_store: Mutex<AccountStore>,
     nullspec_registry_state: Mutex<NullSpecRegistryState>,
-    execute_claim_v2_idempotency: Mutex<HashMap<(String, String), IdempotencyEntry>>,
+    idempotency: Mutex<HashMap<(String, String, String), IdempotencyEntry>>,
 }
 
 #[derive(Debug)]
@@ -1229,9 +1239,10 @@ impl EvidenceOsService {
                 last_reload_attempt: Instant::now(),
                 reload_interval: nullspec_config.reload_interval,
             }),
-            execute_claim_v2_idempotency: Mutex::new(HashMap::new()),
+            idempotency: Mutex::new(HashMap::new()),
         });
         recover_pending_mutations(&state)?;
+        load_idempotency_records(&state)?;
         persist_all(&state)?;
         let insecure_v1_enabled = std::env::var("EVIDENCEOS_ENABLE_INSECURE_V1")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -3697,68 +3708,6 @@ mod tests {
         assert!(global_pool.charge(2.0, 2.0).is_ok());
         assert!(principal_pool.charge(2.0, 2.0).is_err());
         assert!(principal_pool.frozen);
-    }
-
-    #[test]
-    fn execute_claim_v2_idempotency_returns_cached_response_for_same_request_id() {
-        let dir = TempDir::new().expect("tmp");
-        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
-        let svc = EvidenceOsService::build_with_options(
-            dir.path().to_str().expect("utf8"),
-            false,
-            telemetry,
-        )
-        .expect("service");
-
-        let principal_id = "principal-a";
-        let request_id = "req-1";
-        assert!(svc
-            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
-            .expect("lookup")
-            .is_none());
-
-        let response = pb::ExecuteClaimV2Response {
-            state: pb::ClaimState::Settled as i32,
-            decision: pb::Decision::Approve as i32,
-            reason_codes: vec![1, 2],
-            canonical_output: vec![9],
-            e_value: 0.25,
-            certified: false,
-            capsule_hash: vec![7; 32],
-            etl_index: 10,
-        };
-        svc.idempotency_store_execute_claim_v2(
-            principal_id.to_string(),
-            request_id.to_string(),
-            response.clone(),
-        );
-
-        let cached = svc
-            .idempotency_lookup_execute_claim_v2(principal_id, request_id)
-            .expect("cached lookup")
-            .expect("cached response");
-        assert_eq!(cached, response);
-    }
-
-    #[test]
-    fn execute_claim_v2_idempotency_tracks_distinct_request_ids_independently() {
-        let dir = TempDir::new().expect("tmp");
-        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
-        let svc = EvidenceOsService::build_with_options(
-            dir.path().to_str().expect("utf8"),
-            false,
-            telemetry,
-        )
-        .expect("service");
-
-        assert!(svc
-            .idempotency_lookup_execute_claim_v2("principal-a", "req-a")
-            .expect("lookup req-a")
-            .is_none());
-        assert!(svc
-            .idempotency_lookup_execute_claim_v2("principal-a", "req-b")
-            .expect("lookup req-b")
-            .is_none());
     }
 
     #[test]
