@@ -2,6 +2,24 @@
 
 This document is the source of truth for whether a paper claim is production-implemented, partial, or still roadmap/spec-only.
 
+## Paper-critical leakage and realization invariants
+
+The following invariants are treated as protocol-level requirements and must remain enforced in code and tests:
+
+- Per-oracle leakage charge: `k_i = log2(|Y_i|)`.
+- Total leakage accounting: `k_tot = Σ k_i + k_out_bits` (+ any explicitly charged additive terms).
+- Conservative alpha adjustment: `alpha' = alpha * 2^{-k_tot}`.
+- Certification threshold: `E_value >= 2^{k_tot} / alpha`.
+- Canonical realization decoding must reject malformed/non-canonical encodings **before** leakage is charged.
+- No padding leakage: unused bits must be zero and out-of-range symbols must be rejected.
+
+Reference enforcement points:
+
+- `crates/evidenceos-core/src/ledger.rs`
+- `crates/evidenceos-core/src/oracle.rs`
+- `crates/evidenceos-core/src/aspec.rs`
+- `docs/TEST_COVERAGE_PARAMETERS.md` (canonical byte decoder and leakage-accounting checks)
+
 | Feature | Paper section | Implementation status | Code/tests |
 |---|---|---|---|
 | DiscOS↔EvidenceOS protocol compatibility (v1/v2 surface) | Protocol compatibility claims | Implemented | `crates/evidenceos-daemon/tests/protocol_compat_system.rs`, `crates/evidenceos-daemon/tests/golden_claims_vs_impl_system.rs` |
