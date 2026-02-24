@@ -1,0 +1,54 @@
+{
+  "manifest_version": "forc10.full.v2",
+  "paper_doi": "10.5281/zenodo.18685556",
+  "paper_artifact_record": "https://zenodo.org/records/18685556",
+  "sources": {
+    "remote": {
+      "archive_url": "https://zenodo.org/records/18685556/files/forc10-paper-artifact.tar.gz?download=1",
+      "sha256": "baf1feb8d91e8acbe218b13f81aa5ea3f65092819c81c162142bb7dbdcd0856b"
+    }
+  },
+  "required_files": [
+    {
+      "path": "artifacts/forc10/original_python/run_all.py",
+      "sha256": "1496e7f82c27af04d394e1bac0ab9eb5eb759318eaaa89203ab23e69e313b8bc"
+    },
+    {
+      "path": "artifacts/forc10/original_python/experiments/experiment01_scenarios.py",
+      "sha256": "925562d656c05b0aa07a310750e3b4173d31fdfbd10adbb3d6dedb999d6e5d59"
+    },
+    {
+      "path": "artifacts/forc10/original_python/experiments/experiment02_probing.py",
+      "sha256": "9e788d1865eb4faba78602c28639405290ed75dd2c46f40131c6be15e7258a43"
+    },
+    {
+      "path": "artifacts/forc10/original_python/figures/figure01_table1.py",
+      "sha256": "6e36b5e42bda43de9c94fba41f630e588ef9b0f532ba0bf3bf0c70024655f64e"
+    },
+    {
+      "path": "artifacts/forc10/original_python/expected/results.json",
+      "sha256": "b8c6dabfea4056c652d2d5006bdbe19ba5856e9df07201011f19d42247e69ec7"
+    },
+    {
+      "path": "artifacts/forc10/original_python/expected/results.csv",
+      "sha256": "7af658d1d697726f2ef5f95c6428d5ae352c0d370bbdb2bfda3d028f3dbf030b"
+    },
+    {
+      "path": "artifacts/forc10/original_python/expected/table_1.csv",
+      "sha256": "2f7887f5720cb9769a2850cbda669f03194c7b0c7f1f79d795f259eeb9a63f6c"
+    },
+    {
+      "path": "artifacts/forc10/original_python/expected/table_1.md",
+      "sha256": "1c70e95ab37a5fbcce281017fcb2d5eb45f17dfb74f5a87c67a8c0eb6bdf63ed"
+    }
+  ],
+  "full_reproduction_outputs": [
+    "artifacts/forc10/out/raw/results.json",
+    "artifacts/forc10/out/raw/results.csv",
+    "artifacts/forc10/out/figures/table_1.csv",
+    "artifacts/forc10/out/figures/table_1.md"
+  ],
+  "explicit_exclusions": [
+    "No additional figures/tables beyond Table 1 are present in the repository PDF experiment section artifacts."
+  ]
+}
