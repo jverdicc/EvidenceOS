@@ -1,17 +1,32 @@
 # Documentation Index
 
-Key starting points:
+## Recommended reading order
 
-- [Start here: threat model walkthrough](threat_model_worked_example.md)
+1. [Start here](START_HERE.md)
+2. [Threat model](THREAT_MODEL_BLACKBOX.md)
+3. [Paper reproduction](../README.md#case-study-distillation-style-probing-public-reporting)
+4. [Epistemic trial harness](EPISTEMIC_TRIAL_HARNESS.md)
+5. [API refs (daemon gRPC/IPC)](../README.md#ipc-api)
+6. [Deployment](OPERATIONS.md)
+7. [Security](OPERATION_LEVEL_SECURITY.md)
+
+## Key docs
+
+- [Start here: reader paths into EvidenceOS + DiscOS](START_HERE.md)
+- [Threat model by example (blackbox walkthrough)](THREAT_MODEL_BLACKBOX.md)
+- [Threat model worked example](threat_model_worked_example.md)
 - [UVP black-box interface (service contract)](uvp_blackbox_interface.md)
-- [Threat Model by Example (Blackbox Walkthrough)](THREAT_MODEL_BLACKBOX.md)
-- [Operation-Level Security](OPERATION_LEVEL_SECURITY.md)
+- [Paper reproduction: case-study section in top-level README](../README.md#case-study-distillation-style-probing-public-reporting)
+- [Epistemic trial harness (units, endpoints, competing risks)](EPISTEMIC_TRIAL_HARNESS.md)
+- [Trial harness analysis quickstart](TRIAL_HARNESS_ANALYSIS.md)
+- [Clinical trials framework quickstart (workflow + examples)](integrations/fda_clinical_trials.md)
+- [API refs: daemon gRPC lifecycle + IPC methods](../README.md#ipc-api)
+- [Deployment operations guide](OPERATIONS.md)
 - [Dual-Use and Misuse Policy](DUAL_USE_AND_MISUSE.md)
+- [Operation-Level Security](OPERATION_LEVEL_SECURITY.md)
 - [Architecture Diagrams](ARCHITECTURE_DIAGRAMS.md)
 - [ETL FAQ (why append-only transparency log, not blockchain)](ETL_FAQ.md)
 - [ETL indexer (SQLite analytics acceleration)](ETL_INDEXER.md)
-- [Epistemic trial harness (units, endpoints, competing risks)](EPISTEMIC_TRIAL_HARNESS.md)
-- [Clinical trials framework quickstart (workflow + examples)](integrations/fda_clinical_trials.md)
 - [Oracle design and controls](ORACLES.md)
 - [Testing evidence](TEST_EVIDENCE.md)
 - [Coverage matrix (mechanism-level)](TEST_COVERAGE_MATRIX.md)

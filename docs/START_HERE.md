@@ -28,6 +28,19 @@ Read in this order:
 2. [Transport/auth hardening (TLS, mTLS, auth)](OPERATIONS.md)
 3. [Runbook and operational checklist](OPERATIONS.md)
 
+## Epistemic Trial Harness (quick orientation)
+
+- **What it is:** a black-box, clinical-trial-style evaluation harness for DiscOS/EvidenceOS claims with pre-registered units/endpoints and competing-risk analysis expectations. Start with [Epistemic trial harness](EPISTEMIC_TRIAL_HARNESS.md).
+- **How to enable:** configure trial arms in [`config/trial_arms.json`](../config/trial_arms.json) and optionally override with `EVIDENCEOS_TRIAL_ARMS_CONFIG=/path/to/trial_arms.json`; the daemon loads this at startup and records `trial_config_hash_hex` for auditability. Details: [Epistemic trial harness runtime configuration](EPISTEMIC_TRIAL_HARNESS.md#8-configuring-trial-arms-runtime).
+- **Where logs/evidence go:** durable trial evidence is emitted under daemon `--data-dir`, primarily `etl.log` and `etl_governance_events.log`; observe structured daemon logs during reloads/operations. Ops reference: [Operations guide](OPERATIONS.md#deployment-checklist).
+- **Analysis quickstart:** run the blessed reporting flow from [Trial harness analysis](TRIAL_HARNESS_ANALYSIS.md) and use [EPISTEMIC_TRIAL_HARNESS.md](EPISTEMIC_TRIAL_HARNESS.md) to keep endpoint mapping/competing-risks interpretation consistent.
+
+## Dual-use / production mode guardrails
+
+- [Dual-Use and Misuse Policy](DUAL_USE_AND_MISUSE.md)
+- [Operation-Level Security](OPERATION_LEVEL_SECURITY.md)
+- [Deployment security envelope (OPERATIONS)](OPERATIONS.md)
+
 ## Terminology bridge
 
 | Systems term | Alignment/security framing |
