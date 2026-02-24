@@ -22,17 +22,53 @@ The result is a verification system with explicit risk posture, deterministic se
 
 ## Start here (2-minute on-ramp)
 
-1. **Worked threat-model example (recommended first read):** [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
-2. **Black-box UVP interface explainer:** [`docs/uvp_blackbox_interface.md`](docs/uvp_blackbox_interface.md)
-3. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
-4. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
-5. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
-6. **Security implementation docs:** [`docs/HOLDOUT_ENCRYPTION.md`](docs/HOLDOUT_ENCRYPTION.md), [`docs/TEE.md`](docs/TEE.md), [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
+1. **Black-box threat model walkthrough (recommended first read):** [`docs/THREAT_MODEL_BLACKBOX.md`](docs/THREAT_MODEL_BLACKBOX.md)
+2. **Guided onboarding paths:** [`docs/START_HERE.md`](docs/START_HERE.md)
+3. **Worked threat-model example:** [`docs/threat_model_worked_example.md`](docs/threat_model_worked_example.md)
+4. **Black-box UVP interface explainer:** [`docs/uvp_blackbox_interface.md`](docs/uvp_blackbox_interface.md)
+5. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
+6. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
+7. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
+8. **Security implementation docs:** [`docs/HOLDOUT_ENCRYPTION.md`](docs/HOLDOUT_ENCRYPTION.md), [`docs/TEE.md`](docs/TEE.md), [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
 
 > 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
 > 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
+
+## 15-line black-box toy scenario (why the kernel works)
+
+1. DiscOS opens a claim with `CreateClaimV2` for a private holdout evaluation.
+2. The attacker sends adaptive oracle query #1; the output alphabet is `Y` with 4 symbols.
+3. EvidenceOS canonicalizes the output first; malformed/non-canonical payloads are rejected with **no k charge**.
+4. Valid query #1 is charged `k_1 = log2(|Y|) = log2(4) = 2` bits.
+5. Query #2 and #3 repeat with canonical outputs; cumulative leakage is `k_tot = Σ_i k_i`.
+6. Before execution proceeds, the claim lifecycle is enforced: `CreateClaimV2 -> Freeze -> Seal -> Execute`.
+7. `Freeze` locks admissibility/materials so probing cannot rewrite the claim midstream.
+8. `Seal` binds deterministic execution context and ledger state for auditable replay.
+9. `Execute` returns only canonical symbols/receipts, never raw holdout internals.
+10. Each accepted symbol multiplies false-certification risk by `2^{k_i}` in the bound.
+11. So EvidenceOS updates significance to `alpha' = alpha * 2^{-k_tot}` after adaptive querying.
+12. Certification requires enough evidence wealth: `E >= 2^{k_tot}/alpha`.
+13. If `E` is below threshold, result is throttle/heavy/freeze instead of certification.
+14. If `k_tot` reaches policy budget, the claim freezes and further queries stop yielding signal.
+15. Net effect: attackers can query, but every bit is metered, bounded, and auditable.
+
+### Minimal pseudo-CLI transcript (existing script path)
+
+```bash
+$ make blackbox-demo
+Generated docs/generated/blackbox_demo.md
+
+$ sed -n '1,40p' docs/generated/blackbox_demo.md
+# Blackbox Demo: Transcript → Ledger → Freeze
+...
+| 1 | c01 | quality_oracle    | Q_BUCKET_MED | 4  | 2.00 | 2.00 | 6.00 | PASS ... |
+| 3 | c03 | safety_oracle     | S_FLAG_LOW   | 8  | 3.00 | 7.00 | 1.00 | PASS ... |
+| 4 | c04 | robustness_oracle | R_BAND_2     | 16 | 4.00 | 11.00| 0.00 | FROZEN ... |
+```
+
+Then read [`docs/START_HERE.md`](docs/START_HERE.md) for the guided map and [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) for rigorous trial-style evaluation.
 
 ## Clinical trial harness
 
