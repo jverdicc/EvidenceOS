@@ -36,6 +36,11 @@ Key fields:
 - Output confinement: kernel quantizes/hysteresis/canonicalizes buckets.
 - Fail closed: trap/oom/fuel/nan/inf or validation violations return `OracleViolation`.
 
+## Bit-width semantics
+
+- `OracleResolution.bit_width` is the minimal symbol width in bits (`ceil(log2(|Y|))`).
+- `OraclePins.bit_width` records this same minimal bit-width (no byte-rounding/padding).
+
 ## Configuration
 
 Use daemon flags:

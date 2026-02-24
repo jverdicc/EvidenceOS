@@ -82,7 +82,7 @@ impl EvidenceOsService {
         let artifacts_hash = artifacts_commitment(&claim.artifacts);
         let holdout_ref_hash = sha256_bytes(claim.holdout_ref.as_bytes());
 
-        let bit_width = canonical_len_for_symbols(claim.oracle_num_symbols)? as u32 * 8;
+        let bit_width = claim.oracle_resolution.bit_width as u32;
         let pinned_epoch = self.current_epoch_for_claim(claim)?;
         let ttl_epochs = self.oracle_ttl_for_claim(claim);
         let oracle_id = claim.oracle_id.clone();
@@ -255,6 +255,34 @@ mod tests {
         assert_eq!(claim.oracle_resolution.ttl_epochs, Some(1));
         let oracle_pins = claim.oracle_pins.expect("pins");
         assert_eq!(oracle_pins.ttl_epochs, 1);
+    }
+
+    #[test]
+    fn freeze_claim_gates_preserves_minimal_oracle_bit_width_in_pins() {
+        let svc = test_service();
+        let mut claim = committed_claim("oracle-alpha", "claim-bit-width-3-symbols");
+        claim.oracle_num_symbols = 3;
+        claim.oracle_resolution = OracleResolution::new(3, 0.0).expect("resolution");
+
+        svc.freeze_claim_gates(&mut claim).expect("freeze");
+
+        assert_eq!(claim.oracle_resolution.bit_width, 2);
+        let pins = claim.oracle_pins.expect("pins");
+        assert_eq!(pins.bit_width, 2);
+
+        let freeze_preimage = claim.freeze_preimage.expect("freeze preimage");
+        let mut preimage_payload = Vec::new();
+        preimage_payload.extend_from_slice(&freeze_preimage.artifacts_hash);
+        preimage_payload.extend_from_slice(&freeze_preimage.wasm_hash);
+        preimage_payload.extend_from_slice(&freeze_preimage.dependency_merkle_root);
+        preimage_payload.extend_from_slice(&freeze_preimage.holdout_ref_hash);
+        preimage_payload.extend_from_slice(&freeze_preimage.oracle_hash);
+        preimage_payload.extend_from_slice(&freeze_preimage.trial_commitment_hash);
+
+        assert_eq!(
+            freeze_preimage.sealed_preimage_hash,
+            sha256_bytes(&preimage_payload)
+        );
     }
 
     #[test]
