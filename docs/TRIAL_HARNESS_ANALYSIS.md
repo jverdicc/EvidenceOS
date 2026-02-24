@@ -3,7 +3,7 @@
 This analysis package provides a userland pipeline for survival analysis and CONSORT-style flow artifacts from an ETL export.
 
 For the statistical contract (trial unit definitions, endpoint mapping, competing risks assumptions, and concealment limits), see [`docs/EPISTEMIC_TRIAL_HARNESS.md`](EPISTEMIC_TRIAL_HARNESS.md).
-For the blessed analysis entrypoint for this repository, use this document's one-command workflow (`python -m analysis.survival ...`) and treat it as the canonical pipeline.
+For the blessed analysis entrypoint for this repository, use `python -m analysis.epistemic_trial.report ...` as the canonical pipeline. `python -m analysis.survival ...` remains a compatibility wrapper.
 
 ## Install
 
@@ -25,6 +25,14 @@ The extractor emits explicit trial endpoint fields:
 The same unit (`duration_kbits`) is used consistently across KM, CIF, Cox, and RMST outputs.
 
 ## One-command workflow
+
+Canonical entrypoint:
+
+```bash
+python -m analysis.epistemic_trial.report --etl path/to/etl.log --out out_dir/
+```
+
+Compatibility wrapper:
 
 ```bash
 python -m analysis.survival --etl path/to/etl.log --out out_dir/
