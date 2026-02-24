@@ -331,6 +331,13 @@ cargo fuzz run fuzz_structured_claim_validate
 cargo fuzz run fuzz_probe_detector
 ```
 
+## Transparency and incident reporting
+
+- See [`docs/REGULATORY_REPORTING.md`](docs/REGULATORY_REPORTING.md) for a neutral overview of how EvidenceOS artifacts can support compliance, audit, and post-incident review workflows.
+- The guide explains how signed ETL records, inclusion proofs, and consistency checks can be assembled into verifiable reporting packets without exposing raw sensitive payloads.
+- It includes implementation-oriented recommendations for chain of custody, retention posture, and evidence quality checks so reporting remains reproducible and reviewable.
+- **EvidenceOS is not a policing tool; this is about auditability and verifiable event logging.**
+
 ## IPC API
 
 EvidenceOS exposes gRPC/Protobuf APIs defined in:
