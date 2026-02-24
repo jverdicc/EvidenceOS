@@ -6,7 +6,7 @@ impl EvidenceOsService {
             .operator_config
             .lock()
             .oracle_ttl_epochs
-            .get(&claim.claim_name)
+            .get(&claim.oracle_id)
             .copied()
             .unwrap_or(1)
             .max(1)
@@ -150,6 +150,113 @@ impl EvidenceOsService {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_service() -> EvidenceOsService {
+        let dir = TempDir::new().expect("tmp");
+        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+        EvidenceOsService::build_with_options(dir.path().to_str().expect("utf8"), true, telemetry)
+            .expect("service")
+    }
+
+    fn committed_claim(oracle_id: &str, claim_name: &str) -> Claim {
+        Claim {
+            claim_id: [1; 32],
+            topic_id: [2; 32],
+            holdout_handle_id: [3; 32],
+            holdout_ref: "holdout".to_string(),
+            epoch_config_ref: "epoch-a".to_string(),
+            holdout_len: 4,
+            metadata_locked: false,
+            claim_name: claim_name.to_string(),
+            oracle_id: oracle_id.to_string(),
+            nullspec_id: String::new(),
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
+            output_schema_id: "legacy/v1".to_string(),
+            phys_hir_hash: [0; 32],
+            semantic_hash: [0; 32],
+            topic_oracle_receipt: None,
+            output_schema_id_hash: [0; 32],
+            holdout_handle_hash: [0; 32],
+            lineage_root_hash: [0; 32],
+            disagreement_score: 0,
+            semantic_physhir_distance_bits: 0,
+            escalate_to_heavy: false,
+            epoch_size: 10,
+            epoch_counter: 0,
+            dlc_fuel_accumulated: 0,
+            pln_config: None,
+            oracle_num_symbols: 4,
+            oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
+            state: ClaimState::Committed,
+            artifacts: vec![("artifact-a".to_string(), [7; 32])],
+            dependency_capsule_hashes: Vec::new(),
+            dependency_items: Vec::new(),
+            dependency_merkle_root: None,
+            wasm_module: vec![1, 2, 3],
+            aspec_rejection: None,
+            aspec_report_summary: None,
+            lane: Lane::Fast,
+            heavy_lane_diversion_recorded: false,
+            ledger: ConservationLedger::new(0.1).expect("ledger"),
+            last_decision: None,
+            last_capsule_hash: None,
+            capsule_bytes: None,
+            etl_index: None,
+            oracle_pins: None,
+            freeze_preimage: None,
+            operation_id: "op".to_string(),
+            owner_principal_id: "test-owner".to_string(),
+            created_at_unix_ms: 1,
+            trial_assignment: None,
+            trial_commitment_hash: [0; 32],
+            execution_nonce: 0,
+            holdout_pool_scope: HoldoutPoolScope::Global,
+            reserved_k_bits: 0.0,
+            reserved_access_credit: 0.0,
+            reserved_expires_at_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn freeze_claim_gates_uses_oracle_id_ttl_override() {
+        let svc = test_service();
+        let oracle_id = "oracle-alpha";
+        let ttl = 9;
+        svc.state
+            .operator_config
+            .lock()
+            .oracle_ttl_epochs
+            .insert(oracle_id.to_string(), ttl);
+
+        let mut claim = committed_claim(oracle_id, "different-claim-name");
+        svc.freeze_claim_gates(&mut claim).expect("freeze");
+
+        assert_eq!(claim.oracle_resolution.ttl_epochs, Some(ttl));
+        let oracle_pins = claim.oracle_pins.expect("pins");
+        assert_eq!(oracle_pins.ttl_epochs, ttl);
+    }
+
+    #[test]
+    fn freeze_claim_gates_uses_default_ttl_for_unknown_oracle_id() {
+        let svc = test_service();
+        svc.state
+            .operator_config
+            .lock()
+            .oracle_ttl_epochs
+            .insert("some-other-oracle".to_string(), 7);
+
+        let mut claim = committed_claim("oracle-missing", "claim-without-override");
+        svc.freeze_claim_gates(&mut claim).expect("freeze");
+
+        assert_eq!(claim.oracle_resolution.ttl_epochs, Some(1));
+        let oracle_pins = claim.oracle_pins.expect("pins");
+        assert_eq!(oracle_pins.ttl_epochs, 1);
+    }
+
     #[test]
     fn module_smoke_test() {
         assert_eq!(2 + 2, 4);
