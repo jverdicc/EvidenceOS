@@ -214,7 +214,7 @@ EvidenceOS's core guarantee (Theorem 1) is information-theoretic and invariant t
 To avoid review-time ambiguity between paper artifact snapshots and current mainline code, use:
 
 - [`docs/PAPER_VS_CODE.md`](docs/PAPER_VS_CODE.md) for the living parity matrix (paper claim → repo implementation → status).
-- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for additional implementation guardrail notes.
+- [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) for additional implementation guardrail notes, including paper-critical leakage/accounting invariants (k_i, k_tot, alpha', and certification threshold).
 
 ## Verification Matrix
 
