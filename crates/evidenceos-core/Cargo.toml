@@ -9,7 +9,6 @@ license.workspace = true
 
 [features]
 dp_lane = []
-research_extensions = []
 default = []
 kms-aws = ["dep:aws-config", "dep:aws-sdk-kms", "dep:tokio"]
 kms-gcp = ["dep:google-cloud-kms", "dep:google-cloud-googleapis", "dep:tokio"]
