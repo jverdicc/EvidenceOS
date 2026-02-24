@@ -60,10 +60,12 @@ Production startup hard-fail behavior:
 - When `EVIDENCEOS_PRODUCTION_MODE=1`, daemon startup fails closed (non-zero exit) if any of the following insecure toggles are enabled via CLI or environment:
   - `--allow-plaintext-holdouts` or `EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS=1`
   - `--insecure-synthetic-holdout` or `EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT=1`
+  - `EVIDENCEOS_ENABLE_INSECURE_V1=1`
   - `--offline-settlement-ingest` or `EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST=1` **without** `--offline-settlement-ingest-operator-ack`
 - Startup error messages are explicit:
   - `refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids plaintext holdouts; disable --allow-plaintext-holdouts and EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS`
   - `refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids insecure synthetic holdouts; disable --insecure-synthetic-holdout and EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT`
+  - `refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids insecure v1 compatibility mode; disable EVIDENCEOS_ENABLE_INSECURE_V1`
   - `refusing startup: offline settlement ingest bypass requires --offline-settlement-ingest-operator-ack when EVIDENCEOS_PRODUCTION_MODE=1`
 - In non-production mode, these flags remain available for controlled development/testing and are logged as unsafe for production.
 

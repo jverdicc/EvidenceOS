@@ -142,6 +142,7 @@ struct StartupSafetyInputs {
     production_mode: bool,
     allow_plaintext_holdouts_enabled: bool,
     insecure_synthetic_holdout_enabled: bool,
+    insecure_v1_enabled: bool,
     offline_settlement_ingest_enabled: bool,
     offline_settlement_ingest_operator_ack: bool,
 }
@@ -193,6 +194,13 @@ fn enforce_startup_safety(inputs: StartupSafetyInputs) -> Result<(), String> {
         );
     }
 
+    if inputs.insecure_v1_enabled {
+        return Err(
+            "refusing startup: EVIDENCEOS_PRODUCTION_MODE=1 forbids insecure v1 compatibility mode; disable EVIDENCEOS_ENABLE_INSECURE_V1"
+                .to_string(),
+        );
+    }
+
     if inputs.offline_settlement_ingest_enabled && !inputs.offline_settlement_ingest_operator_ack {
         return Err(
             "refusing startup: offline settlement ingest bypass requires --offline-settlement-ingest-operator-ack when EVIDENCEOS_PRODUCTION_MODE=1"
@@ -214,6 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || env_flag("EVIDENCEOS_ALLOW_PLAINTEXT_HOLDOUTS", false),
         insecure_synthetic_holdout_enabled: args.insecure_synthetic_holdout
             || env_flag("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", false),
+        insecure_v1_enabled: env_flag("EVIDENCEOS_ENABLE_INSECURE_V1", false),
         offline_settlement_ingest_enabled: args.offline_settlement_ingest
             || env_flag("EVIDENCEOS_OFFLINE_SETTLEMENT_INGEST", false),
         offline_settlement_ingest_operator_ack: args.offline_settlement_ingest_operator_ack,
@@ -654,6 +663,7 @@ mod tests {
             production_mode: true,
             allow_plaintext_holdouts_enabled: true,
             insecure_synthetic_holdout_enabled: false,
+            insecure_v1_enabled: false,
             offline_settlement_ingest_enabled: false,
             offline_settlement_ingest_operator_ack: false,
         });
@@ -668,6 +678,7 @@ mod tests {
             production_mode: true,
             allow_plaintext_holdouts_enabled: false,
             insecure_synthetic_holdout_enabled: true,
+            insecure_v1_enabled: false,
             offline_settlement_ingest_enabled: false,
             offline_settlement_ingest_operator_ack: false,
         });
@@ -682,6 +693,7 @@ mod tests {
             production_mode: true,
             allow_plaintext_holdouts_enabled: false,
             insecure_synthetic_holdout_enabled: false,
+            insecure_v1_enabled: false,
             offline_settlement_ingest_enabled: true,
             offline_settlement_ingest_operator_ack: false,
         });
@@ -696,6 +708,7 @@ mod tests {
             production_mode: true,
             allow_plaintext_holdouts_enabled: false,
             insecure_synthetic_holdout_enabled: false,
+            insecure_v1_enabled: false,
             offline_settlement_ingest_enabled: true,
             offline_settlement_ingest_operator_ack: true,
         });
@@ -708,9 +721,25 @@ mod tests {
             production_mode: false,
             allow_plaintext_holdouts_enabled: true,
             insecure_synthetic_holdout_enabled: true,
+            insecure_v1_enabled: true,
             offline_settlement_ingest_enabled: true,
             offline_settlement_ingest_operator_ack: false,
         });
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn production_rejects_insecure_v1_mode() {
+        let result = enforce_startup_safety(StartupSafetyInputs {
+            production_mode: true,
+            allow_plaintext_holdouts_enabled: false,
+            insecure_synthetic_holdout_enabled: false,
+            insecure_v1_enabled: true,
+            offline_settlement_ingest_enabled: false,
+            offline_settlement_ingest_operator_ack: false,
+        });
+        assert!(result
+            .expect_err("insecure v1 compatibility mode must fail in production")
+            .contains("forbids insecure v1 compatibility mode"));
     }
 }

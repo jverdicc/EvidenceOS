@@ -368,7 +368,7 @@ for the external service contract and configuration.
 ## Migration notes (V2 claim execution)
 
 - New secure RPCs are available: `CreateClaimV2` and `ExecuteClaimV2`.
-- Legacy `ExecuteClaim` (v1) is disabled by default and can be re-enabled only with `EVIDENCEOS_ENABLE_INSECURE_V1=true`.
+- Legacy `ExecuteClaim` (v1) is disabled by default and can be re-enabled only with `EVIDENCEOS_ENABLE_INSECURE_V1=true` (or `=1`); startup hard-fails when combined with `EVIDENCEOS_PRODUCTION_MODE=1`.
 - `topic_id` should now be kernel-computed from V2 metadata and topic signals.
 - CI and local validation are standardized via `./scripts/test_evidence.sh` with a 95% line-coverage gate.
 
