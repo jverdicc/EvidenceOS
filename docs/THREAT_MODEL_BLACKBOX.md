@@ -75,6 +75,39 @@ Blackbox I/O comparison:
 
 Defensive result: adaptive probing no longer scales linearly with query count; information gain is compressed and eventually cut off under policy.
 
+### 15-line toy blackbox flow (CreateClaimV2 → Freeze → Seal → Execute)
+
+1. DiscOS submits `CreateClaimV2` for claim `toy-01` against a hidden holdout.
+2. Caller attempts adaptive probing by mutating prompts/model weights between calls.
+3. EvidenceOS canonicalizes each oracle response before any accounting update.
+4. If encoding is invalid/non-canonical, request is rejected immediately and `k` is **not** charged.
+5. For accepted call `i`, leakage spend is `k_i = log2(|Y|)` where `Y` is that oracle's output alphabet.
+6. Example: 4-bucket oracle (`|Y|=4`) costs `k_i=2` bits; 8-bucket oracle costs `k_i=3` bits.
+7. Ledger accumulates `k_tot = Σ_i k_i` over the transcript, not per-call in isolation.
+8. Lifecycle is enforced in order: `CreateClaimV2 -> Freeze -> Seal -> Execute` (fail-closed otherwise).
+9. `Freeze` locks claim materials/policy so the adversary cannot shift goalposts mid-run.
+10. `Seal` commits deterministic execution context and binds receipts to ledger state.
+11. `Execute` emits only canonical symbols + receipts; no raw holdout rows/signals are released.
+12. Statistical budget is tightened to `alpha' = alpha * 2^{-k_tot}` as adaptivity grows.
+13. Certification requires evidence wealth `E >= 2^{k_tot}/alpha`.
+14. If threshold is unmet or policy budget exhausted, lane escalates to HEAVY/FROZEN.
+15. Result: interaction remains possible, but extraction is metered, bounded, and auditable.
+
+### Minimal pseudo-CLI transcript (using existing script)
+
+```bash
+$ make blackbox-demo
+Generated docs/generated/blackbox_demo.md
+
+$ sed -n '1,40p' docs/generated/blackbox_demo.md
+# Blackbox Demo: Transcript → Ledger → Freeze
+| 1 | c01 | quality_oracle    | Q_BUCKET_MED | 4  | 2.00 | 2.00 | 6.00 | PASS ... |
+| 3 | c03 | safety_oracle     | S_FLAG_LOW   | 8  | 3.00 | 7.00 | 1.00 | PASS ... |
+| 4 | c04 | robustness_oracle | R_BAND_2     | 16 | 4.00 | 11.00| 0.00 | FROZEN ... |
+```
+
+For onboarding and evaluation context, pair this page with [`docs/START_HERE.md`](START_HERE.md) and [`docs/EPISTEMIC_TRIAL_HARNESS.md`](EPISTEMIC_TRIAL_HARNESS.md).
+
 ## D) Worked example #2 (optional): Cross-oracle probing on shared holdout
 
 ### Baseline
