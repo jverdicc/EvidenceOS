@@ -113,7 +113,15 @@ impl EvidenceOsService {
             oracle_resolution_hash: resolution_hash,
         };
         let oracle_hash = oracle_pins_hash(&oracle_pins);
-        let trial_commitment_hash = trial_commitment_hash(claim.trial_assignment.as_ref());
+        let trial_schema_version = claim.trial_assignment.as_ref().map_or(
+            TRIAL_COMMITMENT_SCHEMA_VERSION_CURRENT,
+            |assignment| {
+                u8::try_from(assignment.schema_version)
+                    .unwrap_or(TRIAL_COMMITMENT_SCHEMA_VERSION_CURRENT)
+            },
+        );
+        let trial_commitment_hash =
+            trial_commitment_hash(claim.trial_assignment.as_ref(), trial_schema_version);
 
         let mut preimage_payload = Vec::new();
         preimage_payload.extend_from_slice(&artifacts_hash);
