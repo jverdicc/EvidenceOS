@@ -61,14 +61,10 @@ Use this for new core math/logic not represented in shipped runtime knobs.
 - New `NullSpecKind` / `EProcessKind` enum variants and verification paths.
 
 ### Files typically modified
-- `crates/evidenceos-core/src/nullspec.rs` (add new kind enums/serialization rules).
-- `crates/evidenceos-core/src/extensions/*.rs` and `crates/evidenceos-core/src/extensions/registry.rs` (currently research-architecture scaffolding, not primary prod path).
+- `crates/evidenceos-core/src/nullspec.rs` and daemon evaluation paths for adding new `NullSpecKind` / `EProcessKind` variants and decision logic.
 - `crates/evidenceos-daemon/src/trial/mod.rs` (if new arm action types are introduced).
 - `crates/evidenceos-daemon/src/server/core.rs` and handler code (if runtime behavior changes).
 - Tests under `crates/evidenceos-daemon/tests/` and core tests for determinism/safety invariants.
-
-### Registry status note
-Mentions of a trait/registry plug-in mechanism for NullSpec/CostModel/EProcess are **research scaffolding**, not the primary shipped extension mechanism today. The production path is trial-arm config + NullSpec governance contracts.
 
 ---
 
