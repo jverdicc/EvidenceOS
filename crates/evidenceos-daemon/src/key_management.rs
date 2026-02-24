@@ -23,23 +23,51 @@ pub enum SigningKeySource {
 
 impl SigningKeySource {
     pub fn from_env() -> Result<Self, Status> {
-        match std::env::var(KEY_PROVIDER_ENV) {
-            Ok(value) if value.eq_ignore_ascii_case("kms") => Ok(Self::Kms),
-            Ok(value) if value.eq_ignore_ascii_case("file") => Ok(Self::File),
-            Ok(_) => Err(Status::failed_precondition(
+        Self::from_env_with(|name| std::env::var(name).ok())
+    }
+
+    pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Result<Self, Status> {
+        match get(KEY_PROVIDER_ENV) {
+            Some(value) if value.eq_ignore_ascii_case("kms") => Ok(Self::Kms),
+            Some(value) if value.eq_ignore_ascii_case("file") => Ok(Self::File),
+            Some(_) => Err(Status::failed_precondition(
                 "invalid key provider; expected file or kms",
             )),
-            Err(_) => Ok(Self::File),
+            None => Ok(Self::File),
         }
     }
 }
 
 pub fn load_signing_key_from_kms() -> Result<SigningKey, Status> {
-    let provider = std::env::var(KMS_PROVIDER_ENV).map_err(|_| {
+    load_signing_key_source_with(|name| std::env::var(name).ok())
+}
+
+pub fn load_signing_key_source_with(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<SigningKey, Status> {
+    let provider = get(KMS_PROVIDER_ENV).ok_or_else(|| {
         Status::failed_precondition("kms provider is required when key provider=kms")
     })?;
-    let key_id = std::env::var(KMS_KEY_ID_ENV).ok();
+    if provider.eq_ignore_ascii_case("mock") {
+        let value = get(KMS_MOCK_KEY_HEX_ENV)
+            .ok_or_else(|| Status::failed_precondition("mock kms key env is missing"))?;
+        return signing_key_from_hex(&value);
+    }
+    let key_id = get(KMS_KEY_ID_ENV);
     provider_for_name(&provider)?.load_signing_key(key_id.as_deref())
+}
+
+fn signing_key_from_hex(value: &str) -> Result<SigningKey, Status> {
+    let bytes = hex::decode(value)
+        .map_err(|_| Status::failed_precondition("mock kms key must be valid hex"))?;
+    if bytes.len() != 32 {
+        return Err(Status::failed_precondition(
+            "mock kms key must decode to 32 bytes",
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 fn provider_for_name(provider: &str) -> Result<Box<dyn KmsSigningKeyProvider>, Status> {
@@ -67,16 +95,7 @@ impl KmsSigningKeyProvider for MockKmsProvider {
     fn load_signing_key(&self, _key_id: Option<&str>) -> Result<SigningKey, Status> {
         let value = std::env::var(KMS_MOCK_KEY_HEX_ENV)
             .map_err(|_| Status::failed_precondition("mock kms key env is missing"))?;
-        let bytes = hex::decode(value)
-            .map_err(|_| Status::failed_precondition("mock kms key must be valid hex"))?;
-        if bytes.len() != 32 {
-            return Err(Status::failed_precondition(
-                "mock kms key must decode to 32 bytes",
-            ));
-        }
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&bytes);
-        Ok(SigningKey::from_bytes(&seed))
+        signing_key_from_hex(&value)
     }
 }
 
@@ -363,27 +382,20 @@ mod tests {
 
     #[test]
     fn key_source_defaults_to_file() {
-        unsafe {
-            std::env::remove_var(KEY_PROVIDER_ENV);
-        }
-        let source = SigningKeySource::from_env().expect("source");
+        let env = std::collections::HashMap::<String, String>::new();
+        let source = SigningKeySource::from_env_with(|key| env.get(key).cloned()).expect("source");
         assert!(matches!(source, SigningKeySource::File));
     }
 
     #[test]
     fn mock_kms_loads_signing_key() {
-        unsafe {
-            std::env::set_var(KMS_PROVIDER_ENV, "mock");
-            std::env::set_var(KMS_MOCK_KEY_HEX_ENV, "11".repeat(32));
-        }
+        let env = std::collections::HashMap::from([
+            (KMS_PROVIDER_ENV.to_string(), "mock".to_string()),
+            (KMS_MOCK_KEY_HEX_ENV.to_string(), "11".repeat(32)),
+        ]);
 
-        let key = load_signing_key_from_kms().expect("kms key");
+        let key = load_signing_key_source_with(|key| env.get(key).cloned()).expect("kms key");
         assert_eq!(key.to_bytes().len(), 32);
-
-        unsafe {
-            std::env::remove_var(KMS_PROVIDER_ENV);
-            std::env::remove_var(KMS_MOCK_KEY_HEX_ENV);
-        }
     }
 
     #[test]

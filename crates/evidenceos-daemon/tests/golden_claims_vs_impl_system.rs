@@ -68,9 +68,7 @@ fn v1_create(seed: u8) -> v1::CreateClaimV2Request {
 }
 
 async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-    unsafe {
-        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
-    }
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -173,8 +171,6 @@ async fn golden_claims_vs_impl_status_gate() {
     verify_revocations_snapshot(&synthetic_snapshot, &signing_key.verifying_key().to_bytes())
         .expect("revocation snapshot");
 
-    unsafe {
-        std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
-    }
+    std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
     handle.abort();
 }
