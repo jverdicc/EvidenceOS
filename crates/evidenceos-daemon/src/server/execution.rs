@@ -264,10 +264,12 @@ mod tests {
                 &req,
             )
             .expect("lookup");
+        assert!(matches!(lookup, IdempotencyLookup::Miss(_)));
         let ctx = match lookup {
-            IdempotencyLookup::Miss(ctx) => ctx,
-            IdempotencyLookup::Cached(_) => panic!("expected miss"),
+            IdempotencyLookup::Miss(ctx) => Some(ctx),
+            IdempotencyLookup::Cached(_) => None,
         };
+        let ctx = ctx.expect("expected miss");
         let response = pb::SetCreditLimitResponse { credit_limit: 42 };
         svc.idempotency_store_success(ctx, &response)
             .expect("store");
@@ -280,10 +282,13 @@ mod tests {
                 &req,
             )
             .expect("lookup cached");
-        match cached {
-            IdempotencyLookup::Cached(v) => assert_eq!(v.credit_limit, 42),
-            IdempotencyLookup::Miss(_) => panic!("expected cached"),
-        }
+        assert!(matches!(cached, IdempotencyLookup::Cached(_)));
+        let cached = match cached {
+            IdempotencyLookup::Cached(v) => Some(v),
+            IdempotencyLookup::Miss(_) => None,
+        };
+        let cached = cached.expect("expected cached");
+        assert_eq!(cached.credit_limit, 42);
     }
 
     #[test]
@@ -314,10 +319,12 @@ mod tests {
                 &req_a,
             )
             .expect("lookup");
+        assert!(matches!(lookup, IdempotencyLookup::Miss(_)));
         let ctx = match lookup {
-            IdempotencyLookup::Miss(ctx) => ctx,
-            IdempotencyLookup::Cached(_) => panic!("expected miss"),
+            IdempotencyLookup::Miss(ctx) => Some(ctx),
+            IdempotencyLookup::Cached(_) => None,
         };
+        let ctx = ctx.expect("expected miss");
         svc.idempotency_store_success(ctx, &pb::SetCreditLimitResponse { credit_limit: 42 })
             .expect("store");
 
