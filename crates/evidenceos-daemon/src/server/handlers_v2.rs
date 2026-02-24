@@ -679,8 +679,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     });
             capsule.trial_commitment_hash_hex = Some(hex::encode(claim.trial_commitment_hash));
             if let Some(assignment) = claim.trial_assignment.as_ref() {
-                capsule.trial_commitment_schema_version =
-                    Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
+                capsule.trial_commitment_schema_version = Some(assignment.schema_version);
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
                 capsule.trial_intervention_version = Some(assignment.intervention_version.clone());
@@ -1806,8 +1805,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                     });
             capsule.trial_commitment_hash_hex = Some(hex::encode(claim.trial_commitment_hash));
             if let Some(assignment) = claim.trial_assignment.as_ref() {
-                capsule.trial_commitment_schema_version =
-                    Some(u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION));
+                capsule.trial_commitment_schema_version = Some(assignment.schema_version);
                 capsule.trial_arm_id = Some(u32::from(assignment.arm_id));
                 capsule.trial_intervention_id = Some(assignment.intervention_id.clone());
                 capsule.trial_intervention_version = Some(assignment.intervention_version.clone());

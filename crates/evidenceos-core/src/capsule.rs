@@ -217,6 +217,9 @@ pub struct ClaimCapsule {
     pub eprocess_kind: Option<String>,
     #[serde(default)]
     pub nullspec_contract_hash_hex: Option<String>,
+    /// Version tag for `trial_commitment_hash_hex` encoding.
+    ///
+    /// Auditors should interpret commitment hashes together with this schema version.
     #[serde(default)]
     pub trial_commitment_schema_version: Option<u32>,
     #[serde(default)]

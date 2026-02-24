@@ -182,3 +182,20 @@ This gives reproducible assignment in hashed mode and replayable/auditable state
 ## 12) Structured-claim envelope enforcement source
 
 When trials rely on CBRN structured-claim (`CBRN_SC_V1`) acceptance behavior, envelope checks are performed against the daemon's active envelope registry (for example signed envelope packs loaded from `--envelope-packs-dir`, optionally required by `--require-signed-envelopes`). In non-production/development mode, builtin defaults may be used only when no active registry has been installed.
+
+## 13) Commitment hash (schema v2, prefix-free)
+
+Claim capsules carry both `trial_commitment_hash_hex` and `trial_commitment_schema_version`.
+
+For new claims, EvidenceOS uses **schema version 2** with a prefix-free byte encoding:
+
+```text
+[schema:1B] [arm_id:2B] [len(intervention_id):2B][intervention_id bytes]
+[len(intervention_version):2B][intervention_version bytes]
+[arm_params_hash:32B] [trial_nonce:16B]
+```
+
+The explicit length prefixes remove ambiguity between adjacent variable-length strings (for example `("ab","c")` vs `("a","bc")`), so distinct assignments cannot share the same preimage.
+
+Schema version 1 is retained only for backward compatibility with historical capsules; auditors should treat `(trial_commitment_schema_version, trial_commitment_hash_hex)` as the commitment identifier.
+

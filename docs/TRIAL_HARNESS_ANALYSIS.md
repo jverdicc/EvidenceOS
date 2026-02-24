@@ -45,3 +45,16 @@ Artifacts generated in `out_dir/`:
 - ETL parsing validates per-record CRC (`crc32(length_prefix || payload)`) and fails closed on mismatch.
 - Cause-specific Cox models treat non-target events as censored for that cause, while cumulative incidence uses explicit competing-risk coding.
 - `cif_primary_by_arm.png` is the preferred endpoint-probability artifact when competing risks are present.
+
+
+## Auditor keying guidance for trial commitments
+
+When joining capsules or ETL-derived exports across runs, use the pair:
+
+- `trial_commitment_schema_version`
+- `trial_commitment_hash_hex`
+
+as a stable audit key.
+
+Schema v2 uses prefix-free commitment encoding for intervention identifiers/versions, so auditors can safely rely on commitment uniqueness under normal SHA-256 assumptions. Schema v1 values remain valid for legacy records and should not be reinterpreted as v2.
+

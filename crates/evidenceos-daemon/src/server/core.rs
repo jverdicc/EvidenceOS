@@ -99,7 +99,9 @@ const DOMAIN_CLAIM_ID: &[u8] = b"evidenceos:claim_id:v2";
 const DOMAIN_TOPIC_MANIFEST_HASH_V1: &[u8] = b"evidenceos:topic_manifest_hash:v1";
 const DOMAIN_TOPIC_ORACLE_RECEIPT_V1: &[u8] = b"evidenceos:topic_oracle_receipt:v1";
 const TRIAL_NONCE_LEN: usize = 16;
-const TRIAL_COMMITMENT_SCHEMA_VERSION: u8 = 1;
+const TRIAL_COMMITMENT_SCHEMA_VERSION_V1: u8 = 1;
+const TRIAL_COMMITMENT_SCHEMA_VERSION_V2: u8 = 2;
+const TRIAL_COMMITMENT_SCHEMA_VERSION_CURRENT: u8 = TRIAL_COMMITMENT_SCHEMA_VERSION_V2;
 const HOLDOUT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BURN_WASM_MODULE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02,
@@ -2562,9 +2564,9 @@ fn sha256_bytes(payload: &[u8]) -> [u8; 32] {
     digest
 }
 
-fn trial_commitment_hash(assignment: Option<&TrialAssignment>) -> [u8; 32] {
+fn trial_commitment_hash_v1(assignment: Option<&TrialAssignment>) -> [u8; 32] {
     let mut payload = Vec::new();
-    payload.push(TRIAL_COMMITMENT_SCHEMA_VERSION);
+    payload.push(TRIAL_COMMITMENT_SCHEMA_VERSION_V1);
     match assignment {
         Some(assignment) => {
             payload.extend_from_slice(&assignment.arm_id.to_be_bytes());
@@ -2579,6 +2581,39 @@ fn trial_commitment_hash(assignment: Option<&TrialAssignment>) -> [u8; 32] {
         }
     }
     sha256_bytes(&payload)
+}
+
+fn trial_commitment_hash_v2(assignment: Option<&TrialAssignment>) -> [u8; 32] {
+    let mut payload = Vec::new();
+    payload.push(TRIAL_COMMITMENT_SCHEMA_VERSION_V2);
+    match assignment {
+        Some(assignment) => {
+            payload.extend_from_slice(&assignment.arm_id.to_be_bytes());
+            payload.extend_from_slice(&(assignment.intervention_id.len() as u16).to_be_bytes());
+            payload.extend_from_slice(assignment.intervention_id.as_bytes());
+            payload
+                .extend_from_slice(&(assignment.intervention_version.len() as u16).to_be_bytes());
+            payload.extend_from_slice(assignment.intervention_version.as_bytes());
+            payload.extend_from_slice(&assignment.arm_parameters_hash);
+            payload.extend_from_slice(&assignment.trial_nonce);
+        }
+        None => {
+            payload.extend_from_slice(&0u16.to_be_bytes());
+            payload.extend_from_slice(&0u16.to_be_bytes());
+            payload.extend_from_slice(&0u16.to_be_bytes());
+            payload.extend_from_slice(&[0u8; 32]);
+            payload.extend_from_slice(&[0u8; TRIAL_NONCE_LEN]);
+        }
+    }
+    sha256_bytes(&payload)
+}
+
+fn trial_commitment_hash(assignment: Option<&TrialAssignment>, schema_version: u8) -> [u8; 32] {
+    match schema_version {
+        TRIAL_COMMITMENT_SCHEMA_VERSION_V1 => trial_commitment_hash_v1(assignment),
+        TRIAL_COMMITMENT_SCHEMA_VERSION_V2 => trial_commitment_hash_v2(assignment),
+        _ => trial_commitment_hash_v2(assignment),
+    }
 }
 
 fn artifacts_commitment(artifacts: &[([u8; 32], String)]) -> [u8; 32] {
@@ -3451,6 +3486,58 @@ mod tests {
 
     fn dependency_artifact(seed: u8) -> [u8; 32] {
         [seed; 32]
+    }
+
+    fn test_assignment(intervention_id: &str, intervention_version: &str) -> TrialAssignment {
+        TrialAssignment {
+            trial_nonce: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            arm_id: 7,
+            intervention_id: intervention_id.to_string(),
+            intervention_version: intervention_version.to_string(),
+            arm_parameters_hash: [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                23, 24, 25, 26, 27, 28, 29, 30, 31,
+            ],
+            descriptors: crate::trial::InterventionDescriptors {
+                oracle_policy: crate::trial::OraclePolicyDescriptor {
+                    policy_id: "oracle.default.v1".to_string(),
+                    params: json!({}),
+                },
+                dependence_policy: crate::trial::DependencePolicyDescriptor {
+                    policy_id: "dependence.default.v1".to_string(),
+                    params: json!({}),
+                },
+                nullspec_policy: crate::trial::NullSpecPolicyDescriptor {
+                    policy_id: "nullspec.default.v1".to_string(),
+                    params: json!({}),
+                },
+                output_policy: crate::trial::OutputPolicyDescriptor {
+                    policy_id: "output.default.v1".to_string(),
+                    params: json!({}),
+                },
+            },
+            schema_version: u32::from(TRIAL_COMMITMENT_SCHEMA_VERSION_V2),
+            allocator_snapshot_hash: None,
+        }
+    }
+
+    #[test]
+    fn trial_commitment_hash_v2_is_prefix_free_for_strings() {
+        let assignment_left = test_assignment("ab", "c");
+        let assignment_right = test_assignment("a", "bc");
+        let left_hash = trial_commitment_hash_v2(Some(&assignment_left));
+        let right_hash = trial_commitment_hash_v2(Some(&assignment_right));
+        assert_ne!(left_hash, right_hash);
+    }
+
+    #[test]
+    fn trial_commitment_hash_v1_matches_legacy_fixture() {
+        let assignment = test_assignment("ab", "c");
+        let hash = trial_commitment_hash_v1(Some(&assignment));
+        assert_eq!(
+            hex::encode(hash),
+            "631f48bbf3b73770732b67d2a5644f14d8164295508687c329a4b4614da6c0fb"
+        );
     }
 
     #[test]

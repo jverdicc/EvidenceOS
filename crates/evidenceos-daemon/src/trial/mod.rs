@@ -9,7 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tonic::Status;
 
-const DEFAULT_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_SCHEMA_VERSION: u32 = 2;
 const SCALE_PPM_MIN: u32 = 100_000;
 const SCALE_PPM_MAX: u32 = 2_000_000;
 pub const MAX_INTERVENTION_DESCRIPTOR_BYTES: usize = 4096;
