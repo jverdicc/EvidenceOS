@@ -40,6 +40,13 @@ The canonical report includes both cause-specific and competing-risk artifacts:
 - RMST for adversary success (`rmst_by_arm.csv`).
 - CONSORT flow/event totals plus machine-readable run summary (`consort_flow.csv`, `summary.json`).
 
+Notes on endpoint coding in current extraction/report behavior:
+
+- **Primary endpoint**: `event_type = 1` (`adversary_success`).
+- **Competing endpoint**: `event_type = 2` (`frozen_containment`).
+- **Other competing event**: `event_type = 3` (`incident`, revoked/tainted/stale/canary).
+- **Censoring**: `event_type = 0` (no endpoint observed by ETL end; e.g., budget exhausted / still active).
+
 ## Artifacts
 
 The report directory contains stable, machine-readable outputs:
@@ -48,6 +55,7 @@ The report directory contains stable, machine-readable outputs:
 - `cif_primary_by_arm.png`
 - `cox_summary.csv`
 - `rmst_by_arm.csv`
-- `nullspec_holm_bonferroni.csv`
 - `consort_flow.csv`, `consort_flow.dot`, `consort_flow.png`
 - `summary.json`
+
+Current pipeline does **not** emit PH-assumption diagnostics, multiple-comparison correction tables, or an explicit tabular CONSORT allocation/enrollment matrix beyond `consort_flow.csv`.
