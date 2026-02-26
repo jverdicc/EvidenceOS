@@ -8,8 +8,7 @@ import re
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SERVER_RS = REPO_ROOT / "crates" / "evidenceos-daemon" / "src" / "server.rs"
-SERVER_MOD_RS = REPO_ROOT / "crates" / "evidenceos-daemon" / "src" / "server" / "mod.rs"
+DAEMON_SRC = REPO_ROOT / "crates" / "evidenceos-daemon" / "src"
 
 
 class GuardFailure(RuntimeError):
@@ -20,28 +19,47 @@ def fail(message: str) -> None:
     raise GuardFailure(message)
 
 
-def load_daemon_server_sources() -> str:
-    if SERVER_RS.exists():
-        return SERVER_RS.read_text(encoding="utf-8")
+def discover_daemon_server_sources() -> list[Path]:
+    sources: list[Path] = []
+    legacy_server_rs = DAEMON_SRC / "server.rs"
+    server_dir = DAEMON_SRC / "server"
 
-    if SERVER_MOD_RS.exists():
-        server_dir = SERVER_MOD_RS.parent
-        parts = [
-            path.read_text(encoding="utf-8")
-            for path in sorted(server_dir.rglob("*.rs"))
-        ]
-        return "\n".join(parts)
+    if legacy_server_rs.exists():
+        sources.append(legacy_server_rs)
+
+    if server_dir.exists():
+        sources.extend(sorted(server_dir.rglob("*.rs")))
+
+    if sources:
+        return sources
 
     fail(
         "could not locate daemon server sources at "
-        "crates/evidenceos-daemon/src/server.rs or crates/evidenceos-daemon/src/server/mod.rs"
+        "crates/evidenceos-daemon/src/server.rs or crates/evidenceos-daemon/src/server/*.rs"
     )
 
 
-def extract_function_body(server_src: str, function_name: str) -> str:
+def format_search_paths(paths: list[Path]) -> str:
+    return ", ".join(str(path.relative_to(REPO_ROOT)) for path in paths)
+
+
+def load_daemon_server_sources() -> tuple[str, list[Path]]:
+    source_paths = discover_daemon_server_sources()
+    parts = [path.read_text(encoding="utf-8") for path in source_paths]
+    return "\n".join(parts), source_paths
+
+
+def fail_missing_symbol(symbol: str, searched_files: list[Path]) -> None:
+    fail(
+        f"missing required symbol: {symbol}; "
+        f"searched files: {format_search_paths(searched_files)}"
+    )
+
+
+def extract_function_body(server_src: str, function_name: str, searched_files: list[Path]) -> str:
     fn_start = server_src.find(f"fn {function_name}")
     if fn_start == -1:
-        fail(f"could not locate {function_name} implementation")
+        fail_missing_symbol(f"fn {function_name}", searched_files)
 
     body_start = server_src.find("{", fn_start)
     if body_start == -1:
@@ -60,10 +78,15 @@ def extract_function_body(server_src: str, function_name: str) -> str:
     fail(f"could not parse {function_name} body end")
 
 
-def check_oracle_signature_verification(server_src: str) -> None:
-    body = extract_function_body(server_src, "verify_signed_oracle_record")
+def check_oracle_signature_verification(server_src: str, searched_files: list[Path]) -> None:
+    body = extract_function_body(server_src, "verify_signed_oracle_record", searched_files)
     if ".verify_strict(" not in body:
         fail("verify_signed_oracle_record must perform strict ed25519 signature verification")
+
+
+def check_signature_guards(server_src: str, searched_files: list[Path]) -> None:
+    check_oracle_signature_verification(server_src, searched_files)
+    extract_function_body(server_src, "verify_epoch_control_record", searched_files)
 
 
 def check_forbidden_zeroed_dp_accounting() -> None:
@@ -80,13 +103,21 @@ def check_forbidden_zeroed_dp_accounting() -> None:
         fail("forbidden zeroed DP accounting pattern '* 0.0' found in: " + ", ".join(str(p.relative_to(REPO_ROOT)) for p in offenders))
 
 
-def check_synthetic_holdout_gate(server_src: str) -> None:
+def check_synthetic_holdout_gate(server_src: str, searched_files: list[Path]) -> None:
+    if "fn derive_holdout_labels" not in server_src:
+        fail_missing_symbol("fn derive_holdout_labels", searched_files)
+
+    derive_holdout_labels_calls = re.findall(r"(?<!fn\s)derive_holdout_labels\s*\(", server_src)
+    if not derive_holdout_labels_calls:
+        fail_missing_symbol("derive_holdout_labels(...) call site", searched_files)
+
     if "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT" not in server_src:
-        fail("synthetic holdout mode must be explicitly gated by EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT")
+        fail_missing_symbol("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", searched_files)
+
     instantiation_pattern = re.compile(r"Arc::new\(\s*SyntheticHoldoutProvider\s*[,)\n]")
     instantiations = list(instantiation_pattern.finditer(server_src))
     if not instantiations:
-        fail("synthetic holdout provider must only be enabled via explicit insecure mode")
+        fail_missing_symbol("Arc::new(SyntheticHoldoutProvider)", searched_files)
 
     marker = "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT"
     window_chars = 8000
@@ -100,15 +131,27 @@ def check_synthetic_holdout_gate(server_src: str) -> None:
             )
 
 
+def check_quantized_hysteresis_credit_line(server_src: str, searched_files: list[Path]) -> None:
+    if "padded_fuel_total" not in server_src:
+        fail_missing_symbol("padded_fuel_total", searched_files)
+
+
 def main() -> int:
     try:
-        server_src = load_daemon_server_sources()
-        check_oracle_signature_verification(server_src)
+        server_src, searched_files = load_daemon_server_sources()
+        check_signature_guards(server_src, searched_files)
         check_forbidden_zeroed_dp_accounting()
-        check_synthetic_holdout_gate(server_src)
+        check_synthetic_holdout_gate(server_src, searched_files)
+        check_quantized_hysteresis_credit_line(server_src, searched_files)
     except GuardFailure as exc:
         print(f"guard check failed: {exc}", file=sys.stderr)
         return 1
+
+    print("guard check passed")
+    print("self-check:")
+    for path in searched_files:
+        print(f" - {path.relative_to(REPO_ROOT)}")
+
     return 0
 
 
