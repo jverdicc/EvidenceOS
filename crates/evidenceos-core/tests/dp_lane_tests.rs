@@ -50,6 +50,23 @@ mod dp_lane_enabled_tests {
     }
 
     #[test]
+    fn test_dp_laplace_no_inf_nan_or_saturation_smoke() {
+        let true_value = 1_000i64;
+        let sensitivity = 3.0_f64;
+        let epsilon = 0.8_f64;
+        let mut saturation_count = 0usize;
+
+        for seed in 0..=5_000u64 {
+            let noisy = dp_laplace_i64(true_value, sensitivity, epsilon, seed).0;
+            if noisy == i64::MIN || noisy == i64::MAX {
+                saturation_count += 1;
+            }
+        }
+
+        assert_eq!(saturation_count, 0);
+    }
+
+    #[test]
     fn test_basic_composition_accumulates() {
         let mut ledger = ConservationLedger::new(0.05)
             .expect("ledger")

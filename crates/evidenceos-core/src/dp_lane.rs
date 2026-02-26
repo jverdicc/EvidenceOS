@@ -17,11 +17,13 @@ pub fn dp_laplace_i64(
     assert!(epsilon > 0.0 && sensitivity > 0.0);
     let scale = sensitivity / epsilon;
     let mut rng = ChaCha8Rng::seed_from_u64(rng_seed);
-    let u: f64 = rng.gen_range(-0.5f64..0.5f64);
-    let noise = if u == 0.0 {
-        0.0
+    let u01 = rng
+        .gen::<f64>()
+        .clamp(f64::MIN_POSITIVE, 1.0f64 - f64::EPSILON);
+    let noise = if u01 < 0.5 {
+        scale * (2.0 * u01).ln()
     } else {
-        -scale * u.signum() * (1.0 - 2.0 * u.abs()).ln()
+        -scale * (2.0 * (1.0 - u01)).ln()
     };
     let noisy = (true_value as f64 + noise)
         .clamp(i64::MIN as f64, i64::MAX as f64)
