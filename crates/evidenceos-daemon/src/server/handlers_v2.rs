@@ -1,3 +1,4 @@
+use super::execution::IdempotencyLookup;
 use super::*;
 
 struct BudgetReservationGuard {
@@ -1260,7 +1261,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let span = tracing::info_span!("execute_claim_v2", operation_id=%claim.operation_id, claim_id=%claim_id_hex);
             let _guard = span.enter();
             let current_epoch = self.current_epoch_for_claim(&claim)?;
-            Self::maybe_mark_stale(claim, current_epoch)?;
+            Self::maybe_mark_stale(&mut claim, current_epoch)?;
             if claim.state == ClaimState::Stale {
                 return Err(Status::failed_precondition(
                     "claim is stale; re-freeze before execution",
@@ -1280,7 +1281,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .ok_or_else(|| Status::failed_precondition("oracle pins missing"))?;
             let current_resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
             if pins.oracle_resolution_hash != current_resolution_hash {
-                self.record_incident(claim, "oracle_resolution_pins_mismatch")?;
+                self.record_incident(&mut claim, "oracle_resolution_pins_mismatch")?;
                 return Err(Status::failed_precondition(
                     "oracle resolution hash mismatch with sealed pins",
                 ));
@@ -1292,7 +1293,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 "execute_claim_v2",
                 Some(claim.phys_hir_hash),
             );
-            Self::enforce_claim_access(&caller, claim, "ExecuteClaimV2")?;
+            Self::enforce_claim_access(&caller, &claim, "ExecuteClaimV2")?;
             self.observe_probe(
                 caller.principal_id.clone(),
                 claim.operation_id.clone(),
@@ -1308,7 +1309,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 {
                     Some(id) => id,
                     None => {
-                        self.record_incident(claim, "nullspec_missing")?;
+                        self.record_incident(&mut claim, "nullspec_missing")?;
                         return Err(Status::failed_precondition("missing active nullspec"));
                     }
                 }
@@ -1324,19 +1325,19 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .get(&active_id)
                 .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
             if contract.is_expired(current_epoch) {
-                self.record_incident(claim, "nullspec_expired")?;
+                self.record_incident(&mut claim, "nullspec_expired")?;
                 return Err(Status::failed_precondition("active nullspec expired"));
             }
             let expected_resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
             if contract.oracle_resolution_hash != expected_resolution_hash {
-                self.record_incident(claim, "nullspec_resolution_hash_mismatch")?;
+                self.record_incident(&mut claim, "nullspec_resolution_hash_mismatch")?;
                 return Err(Status::failed_precondition(
                     "nullspec resolution hash mismatch",
                 ));
             }
             if let Some(contract_calibration_hash) = contract.calibration_manifest_hash {
                 if contract_calibration_hash != claim.oracle_resolution.calibration_manifest_hash {
-                    self.record_incident(claim, "nullspec_calibration_hash_mismatch")?;
+                    self.record_incident(&mut claim, "nullspec_calibration_hash_mismatch")?;
                     return Err(Status::failed_precondition(
                         "nullspec calibration hash mismatch",
                     ));
@@ -1347,15 +1348,15 @@ impl EvidenceOsV2 for EvidenceOsService {
             let oracle_ttl_escalated = if oracle_ttl_expired {
                 match self.oracle_ttl_policy {
                     OracleTtlPolicy::RejectExpired => {
-                        self.record_incident(claim, "oracle_expired")?;
+                        self.record_incident(&mut claim, "oracle_expired")?;
                         return Err(Status::failed_precondition("OracleExpired"));
                     }
                     OracleTtlPolicy::EscalateToHeavy => {
                         if claim.lane != Lane::Heavy {
-                            self.record_incident(claim, "oracle_expired")?;
+                            self.record_incident(&mut claim, "oracle_expired")?;
                             return Err(Status::failed_precondition("OracleExpired"));
                         }
-                        self.record_incident(claim, "oracle_expired_escalated_to_heavy")?;
+                        self.record_incident(&mut claim, "oracle_expired_escalated_to_heavy")?;
                         true
                     }
                 }
@@ -1363,7 +1364,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 false
             };
 
-            let vault_cfg = vault_config(claim)?;
+            let vault_cfg = vault_config(&claim)?;
             let dependence_multiplier = if oracle_ttl_escalated {
                 self.dependence_tax_multiplier * self.oracle_ttl_escalation_tax_multiplier
             } else {
@@ -1394,7 +1395,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                         .reserve(worst_case_taxed, worst_case_taxed)
                         .is_err()
                     {
-                        let _ = self.record_incident(claim, "topic_budget_exhausted");
+                        let _ = self.record_incident(&mut claim, "topic_budget_exhausted");
                         return Err(Status::failed_precondition("topic budget exhausted"));
                     }
                     for holdout_key in &holdout_keys {
@@ -1406,7 +1407,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                             .is_err()
                         {
                             let _ = topic_pool.release_reserved(worst_case_taxed, worst_case_taxed);
-                            let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                            let _ = self.record_incident(&mut claim, "holdout_budget_exhausted");
                             return Err(Status::failed_precondition("holdout budget exhausted"));
                         }
                     }
@@ -1432,11 +1433,11 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .get(&hex::encode(contract.nullspec_id))
                 .cloned()
                 .ok_or_else(|| Status::failed_precondition("active nullspec id not in registry"))?;
-            let context = vault_context(claim, reg_nullspec, self.holdout_provider.as_ref())?;
+            let context = vault_context(&claim, reg_nullspec, self.holdout_provider.as_ref())?;
             let vault_result = match vault.execute(&claim.wasm_module, &context, vault_cfg) {
                 Ok(v) => v,
                 Err(err) => {
-                    self.record_incident(claim, "execution_failure")?;
+                    self.record_incident(&mut claim, "execution_failure")?;
                     return Err(map_vault_error(err));
                 }
             };
@@ -1452,7 +1453,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             let padding_fuel = fuel_total.saturating_sub(fuel_used);
             burn_padding_fuel(&vault, &context, padding_fuel)?;
             claim.dlc_fuel_accumulated = claim.dlc_fuel_accumulated.saturating_add(fuel_total);
-            claim.epoch_counter = current_logical_epoch(claim)?;
+            claim.epoch_counter = current_logical_epoch(&claim)?;
             let trace_hash = vault_result.judge_trace_hash;
             if claim.output_schema_id == structured_claims::LEGACY_SCHEMA_ID {
                 let _sym = decode_canonical_symbol(&canonical_output, claim.oracle_num_symbols)?;
@@ -1528,14 +1529,14 @@ impl EvidenceOsV2 for EvidenceOsService {
                     )
                     .is_err()
                 {
-                    let _ = self.record_incident(claim, "topic_budget_exhausted");
+                    let _ = self.record_incident(&mut claim, "topic_budget_exhausted");
                     return Err(Status::failed_precondition("topic budget exhausted"));
                 }
             }
             {
                 let mut holdout_pools = self.state.holdout_pools.lock();
                 for holdout_key in &reservation_guard.holdout_keys {
-                    let pool = holdout_pools.get_mut(&holdout_key).ok_or_else(|| {
+                    let pool = holdout_pools.get_mut(holdout_key).ok_or_else(|| {
                         Status::failed_precondition("missing holdout budget pool")
                     })?;
                     if pool
@@ -1547,7 +1548,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                         )
                         .is_err()
                     {
-                        let _ = self.record_incident(claim, "holdout_budget_exhausted");
+                        let _ = self.record_incident(&mut claim, "holdout_budget_exhausted");
                         return Err(Status::failed_precondition("holdout budget exhausted"));
                     }
                 }
@@ -1609,7 +1610,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .settle_e_value(e_value, "decision", json!({"e_value_total": e_value}))
                 .map_err(|_| Status::invalid_argument("invalid e-value"))?;
             self.transition_claim(
-                claim,
+                &mut claim,
                 ClaimState::Settled,
                 taxed_bits + vault_result.kout_bits_total,
                 e_value,
@@ -1632,7 +1633,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             if canary_state.drift_frozen {
                 decision = pb::Decision::Reject as i32;
                 self.append_canary_incident(
-                    claim,
+                    &claim,
                     "canary_drift_frozen",
                     canary_state.e_drift,
                     canary_state.barrier,
@@ -1662,7 +1663,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 reason_codes.push(LEDGER_NUMERIC_GUARD_REASON_CODE);
             }
             let oracle_input = policy_oracle_input_json(
-                claim,
+                &claim,
                 &vault_result,
                 fuel_total,
                 &claim.ledger,
@@ -1727,11 +1728,11 @@ impl EvidenceOsV2 for EvidenceOsService {
                 }
             }
             if decision == pb::Decision::Defer as i32 {
-                self.transition_claim(claim, ClaimState::Frozen, 0.0, 0.0, None)?;
+                self.transition_claim(&mut claim, ClaimState::Frozen, 0.0, 0.0, None)?;
             } else if decision == pb::Decision::Approve as i32 {
-                self.transition_claim(claim, ClaimState::Certified, 0.0, 0.0, None)?;
+                self.transition_claim(&mut claim, ClaimState::Certified, 0.0, 0.0, None)?;
             } else {
-                self.transition_claim(claim, ClaimState::Revoked, 0.0, 0.0, None)?;
+                self.transition_claim(&mut claim, ClaimState::Revoked, 0.0, 0.0, None)?;
             }
             reason_codes.sort_unstable();
             reason_codes.dedup();
@@ -1924,9 +1925,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             capsule_hash: capsule_hash.to_vec(),
             etl_index,
         };
-        if let Err(status) = self.idempotency_store_success(idempotency_context, &response) {
-            return Err(status);
-        }
+        self.idempotency_store_success(idempotency_context, &response)?;
         Ok(Response::new(response))
     }
 

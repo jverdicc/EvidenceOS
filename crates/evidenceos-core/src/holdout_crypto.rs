@@ -250,10 +250,25 @@ struct AwsSdkClient;
 
 #[cfg(not(feature = "kms-aws"))]
 impl AwsSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-aws",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-aws"))]
+impl KmsDecryptClient for AwsSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 
@@ -306,10 +321,25 @@ struct GcpSdkClient;
 
 #[cfg(not(feature = "kms-gcp"))]
 impl GcpSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-gcp",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-gcp"))]
+impl KmsDecryptClient for GcpSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 
@@ -362,10 +392,25 @@ struct AzureSdkClient;
 
 #[cfg(not(feature = "kms-azure"))]
 impl AzureSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-azure",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-azure"))]
+impl KmsDecryptClient for AzureSdkClient {
+    fn decrypt(
+        &self,
+        key_resource: &str,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, HoldoutKeyProviderError> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 

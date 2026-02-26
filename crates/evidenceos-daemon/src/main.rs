@@ -22,7 +22,7 @@
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
 use evidenceos_attest::{load_policy, verify_attestation_blob};
-use evidenceos_core::aspec::{AspecPolicy, FloatPolicy};
+use evidenceos_core::aspec::AspecPolicy;
 use evidenceos_core::magnitude_envelope::{set_active_registry, EnvelopeRegistry};
 use evidenceos_core::oracle_registry::OracleRegistry;
 use evidenceos_core::oracle_wasm::WasmOracleSandboxPolicy;
@@ -422,12 +422,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    if !args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty() {
-        if args.agent_tokens.iter().any(|t| t.trim().is_empty())
-            || args.auditor_tokens.iter().any(|t| t.trim().is_empty())
-        {
-            return Err("role token lists must not contain empty entries".into());
-        }
+    if (!args.agent_tokens.is_empty() || !args.auditor_tokens.is_empty())
+        && (args.agent_tokens.iter().any(|t| t.trim().is_empty())
+            || args.auditor_tokens.iter().any(|t| t.trim().is_empty()))
+    {
+        return Err("role token lists must not contain empty entries".into());
     }
     if args.require_client_cert && args.mtls_client_ca.is_none() {
         return Err("--require-client-cert requires --mtls-client-ca".into());
@@ -468,7 +467,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.auth_hmac_key.clone(),
             keyring_env,
         ) {
-            (Some(token), None) => Some(AuthConfig::BearerToken(token)),
+            (Some(token), None, None) => Some(AuthConfig::BearerToken(token)),
+            (Some(_), None, Some(_)) => {
+                return Err("--auth-token and EVIDENCEOS_HMAC_KEYS are mutually exclusive".into())
+            }
             (None, Some(hmac), None) => Some(AuthConfig::HmacKeyring(HashMap::from([(
                 "default".to_string(),
                 hmac.into_bytes(),

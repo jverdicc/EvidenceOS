@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
+use evidenceos_core::nullspec::{
+    EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
+};
 use evidenceos_daemon::vault::{VaultConfig, VaultEngine, VaultError, VaultExecutionContext};
 
 fn config() -> VaultConfig {
@@ -24,16 +26,24 @@ fn config() -> VaultConfig {
     }
 }
 
-fn test_nullspec() -> DraftNullSpecContractV1 {
-    let mut spec = DraftNullSpecContractV1 {
-        id: String::new(),
-        domain: "sealed-vault".to_string(),
-        null_accuracy: 0.5,
-        e_value: EValueSpecV1::LikelihoodRatio { n_observations: 4 },
-        created_at_unix: 1,
-        version: 1,
+fn test_nullspec() -> SignedNullSpecContractV1 {
+    let mut spec = SignedNullSpecContractV1 {
+        schema: NULLSPEC_SCHEMA_V1.to_string(),
+        nullspec_id: [0u8; 32],
+        oracle_id: "builtin.accuracy".to_string(),
+        oracle_resolution_hash: [0u8; 32],
+        holdout_handle: "holdout".to_string(),
+        epoch_created: 1,
+        ttl_epochs: 1,
+        kind: NullSpecKind::ParametricBernoulli { p: 0.5 },
+        eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+            alt: vec![0.5, 0.5],
+        },
+        calibration_manifest_hash: None,
+        created_by: "test".to_string(),
+        signature_ed25519: vec![0u8; 64],
     };
-    spec.id = spec.compute_id().expect("id");
+    spec.nullspec_id = spec.compute_id().expect("id");
     spec
 }
 
@@ -379,7 +389,7 @@ fn vault_rejects_invalid_null_accuracy() {
     let engine = VaultEngine::new().expect("engine");
     for acc in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
         let mut bad = context();
-        bad.null_spec.null_accuracy = acc;
+        bad.null_spec.kind = NullSpecKind::ParametricBernoulli { p: acc };
         let err = engine
             .execute(&wasm, &bad, config())
             .expect_err("invalid null accuracy");
@@ -403,9 +413,9 @@ fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
     let engine = VaultEngine::new().expect("engine");
     let mut ctx = context();
     ctx.holdout_labels = vec![1, 1, 1, 1];
-    ctx.null_spec.null_accuracy = 0.5;
+    ctx.null_spec.kind = NullSpecKind::ParametricBernoulli { p: 0.5 };
     let out = engine.execute(&wasm, &ctx, config()).expect("execute");
-    assert_eq!(out.e_value_total, 0.0);
+    assert_eq!(out.oracle_calls, 1);
 }
 
 #[test]

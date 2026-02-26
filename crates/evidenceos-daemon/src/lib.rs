@@ -13,6 +13,7 @@
 // limitations under the License.
 //
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 

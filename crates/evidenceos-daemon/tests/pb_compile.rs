@@ -116,6 +116,34 @@ async fn protocol_crate_exports_client_and_server_stubs() {
             Err(tonic::Status::unimplemented("compile-only"))
         }
 
+        async fn grant_credit(
+            &self,
+            _request: tonic::Request<pb::GrantCreditRequest>,
+        ) -> Result<tonic::Response<pb::GrantCreditResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
+        async fn set_credit_limit(
+            &self,
+            _request: tonic::Request<pb::SetCreditLimitRequest>,
+        ) -> Result<tonic::Response<pb::SetCreditLimitResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
+        async fn set_holdout_pool_budgets(
+            &self,
+            _request: tonic::Request<pb::SetHoldoutPoolBudgetsRequest>,
+        ) -> Result<tonic::Response<pb::SetHoldoutPoolBudgetsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
+        async fn get_holdout_pool_budgets(
+            &self,
+            _request: tonic::Request<pb::GetHoldoutPoolBudgetsRequest>,
+        ) -> Result<tonic::Response<pb::GetHoldoutPoolBudgetsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("compile-only"))
+        }
+
         async fn get_signed_tree_head(
             &self,
             _request: tonic::Request<pb::GetSignedTreeHeadRequest>,

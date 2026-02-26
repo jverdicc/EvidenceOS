@@ -442,7 +442,7 @@ impl From<&BlockedAllocator> for PersistedBlockedAllocator {
 impl PersistedBlockedAllocator {
     fn into_runtime(self, arm_count: ArmId) -> Result<BlockedAllocator, Status> {
         let arm_count_usize = usize::from(arm_count);
-        if self.block_size == 0 || self.block_size % arm_count_usize != 0 {
+        if self.block_size == 0 || !self.block_size.is_multiple_of(arm_count_usize) {
             return Err(Status::invalid_argument(
                 "persisted block_size must be > 0 and divisible by arm_count",
             ));
@@ -478,7 +478,7 @@ impl PersistedBlockedAllocator {
 impl BlockedAllocator {
     fn new(arm_count: ArmId, block_size: usize) -> Result<Self, Status> {
         let arm_count_usize = usize::from(arm_count);
-        if block_size == 0 || block_size % arm_count_usize != 0 {
+        if block_size == 0 || !block_size.is_multiple_of(arm_count_usize) {
             return Err(Status::invalid_argument(
                 "block_size must be > 0 and divisible by arm_count",
             ));

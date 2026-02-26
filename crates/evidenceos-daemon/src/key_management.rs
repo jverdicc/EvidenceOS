@@ -116,6 +116,12 @@ pub struct AwsKmsProvider {
     client: Box<dyn KmsDecryptClient>,
 }
 
+impl Default for AwsKmsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AwsKmsProvider {
     pub fn new() -> Self {
         Self {
@@ -138,6 +144,12 @@ pub struct GcpKmsProvider {
     client: Box<dyn KmsDecryptClient>,
 }
 
+impl Default for GcpKmsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GcpKmsProvider {
     pub fn new() -> Self {
         Self {
@@ -158,6 +170,12 @@ impl KmsSigningKeyProvider for GcpKmsProvider {
 
 pub struct AzureKmsProvider {
     client: Box<dyn KmsDecryptClient>,
+}
+
+impl Default for AzureKmsProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AzureKmsProvider {
@@ -255,10 +273,21 @@ struct AwsSdkClient;
 
 #[cfg(not(feature = "kms-aws"))]
 impl AwsSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-aws",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-aws"))]
+impl KmsDecryptClient for AwsSdkClient {
+    fn decrypt(&self, key_resource: &str, ciphertext: &[u8]) -> Result<Vec<u8>, Status> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 
@@ -309,10 +338,21 @@ struct GcpSdkClient;
 
 #[cfg(not(feature = "kms-gcp"))]
 impl GcpSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-gcp",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-gcp"))]
+impl KmsDecryptClient for GcpSdkClient {
+    fn decrypt(&self, key_resource: &str, ciphertext: &[u8]) -> Result<Vec<u8>, Status> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 
@@ -359,10 +399,21 @@ struct AzureSdkClient;
 
 #[cfg(not(feature = "kms-azure"))]
 impl AzureSdkClient {
-    fn new() -> MissingFeatureClient {
+    fn build_missing_feature_client() -> MissingFeatureClient {
         MissingFeatureClient {
             feature_name: "kms-azure",
         }
+    }
+
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "kms-azure"))]
+impl KmsDecryptClient for AzureSdkClient {
+    fn decrypt(&self, key_resource: &str, ciphertext: &[u8]) -> Result<Vec<u8>, Status> {
+        Self::build_missing_feature_client().decrypt(key_resource, ciphertext)
     }
 }
 

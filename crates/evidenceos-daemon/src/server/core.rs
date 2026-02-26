@@ -43,6 +43,7 @@ use crate::key_management::{load_signing_key_from_kms, SigningKeySource};
 use crate::policy_oracle::{PolicyOracleDecision, PolicyOracleEngine, PolicyOracleReceipt};
 use crate::probe::{ProbeConfig, ProbeDetector, ProbeObservation, ProbeVerdict};
 use crate::public_error::{public_status, PublicErrorCode};
+use crate::server::execution::load_idempotency_records;
 use crate::settlement::{import_signed_settlements, write_unsigned_proposal};
 use crate::telemetry::{derive_operation_id, LifecycleEvent, Telemetry};
 use crate::trial::{
@@ -128,6 +129,7 @@ fn maybe_abort_failpoint(name: &str) {
 fn maybe_abort_failpoint(_name: &str) {}
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct HoldoutDescriptor {
     holdout_ref: String,
     handle: [u8; 32],
@@ -1043,6 +1045,7 @@ impl CreditBackend {
                     });
                 }
                 entry.balance -= amount;
+                let updated_balance = entry.balance;
                 let encoded = serde_json::to_vec_pretty(&balances)
                     .map_err(|e| CreditError::Parse(e.to_string()))?;
                 let tmp_path = path.with_extension("tmp");
@@ -1055,7 +1058,7 @@ impl CreditBackend {
                 if let Some(parent) = path.parent() {
                     sync_directory(parent).map_err(|e| CreditError::Io(e.message().to_string()))?;
                 }
-                Ok(entry.balance)
+                Ok(updated_balance)
             }
         }
     }
@@ -1131,12 +1134,14 @@ pub struct EvidenceOsService {
     default_holdout_k_bits_budget: f64,
     default_holdout_access_credit_budget: f64,
     holdout_pool_scope: HoldoutPoolScope,
+    #[allow(dead_code)]
     strict_pln: StrictPlnConfig,
     reservation_ttl_ms: u64,
     reservation_sweep_interval: Duration,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct StrictPlnConfig {
     enabled: bool,
     fast_execute_floor_ms: u64,
@@ -1158,6 +1163,7 @@ impl StrictPlnConfig {
         }
     }
 
+    #[allow(dead_code)]
     fn execute_floor_ms(&self, lane: Lane) -> u64 {
         if !self.enabled {
             return 0;
@@ -1247,6 +1253,7 @@ fn env_domain_set(name: &str, default: &str) -> HashSet<String> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn strict_pln_padding_duration(elapsed: Duration, floor_ms: u64) -> Option<Duration> {
     if floor_ms == 0 {
         return None;
@@ -1680,7 +1687,7 @@ impl EvidenceOsService {
             let contract = nullspec_store
                 .get(&active_id)
                 .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
-            return Ok(contract.domain);
+            return Ok(contract.oracle_id);
         }
         Ok("UNSPECIFIED".to_string())
     }
@@ -1899,7 +1906,9 @@ impl EvidenceOsService {
             let topic_pool = topic_pools
                 .get_mut(&claim.topic_id)
                 .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
-            topic_pool.release_reserved(released_k_bits, released_access_credit)?;
+            topic_pool
+                .release_reserved(released_k_bits, released_access_credit)
+                .map_err(|_| Status::internal("failed to release topic reservation"))?;
 
             let holdout_keys = self.holdout_pool_keys(
                 claim.holdout_handle_id,
@@ -1910,7 +1919,9 @@ impl EvidenceOsService {
                 let holdout_pool = holdout_pools
                     .get_mut(&holdout_key)
                     .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
-                holdout_pool.release_reserved(released_k_bits, released_access_credit)?;
+                holdout_pool
+                    .release_reserved(released_k_bits, released_access_credit)
+                    .map_err(|_| Status::internal("failed to release holdout reservation"))?;
             }
 
             claim.reserved_k_bits = 0.0;
@@ -2014,6 +2025,7 @@ impl EvidenceOsService {
             .unwrap_or(self.holdout_pool_scope)
     }
 
+    #[allow(dead_code)]
     fn holdout_budget_for(&self, descriptor: &HoldoutDescriptor) -> (f64, f64) {
         (
             descriptor
@@ -2169,7 +2181,7 @@ fn persist_all_with_trial_router(
             .topic_pools
             .lock()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (*k, v.clone()))
             .collect(),
         holdout_pools: state
             .holdout_pools
@@ -3812,11 +3824,11 @@ mod tests {
             holdout_ref: holdout_ref.to_string(),
             epoch_size: 10,
             oracle_num_symbols: 4,
+            dp_epsilon_budget: None,
+            dp_delta_budget: None,
             access_credit: 32,
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
-            dp_epsilon_budget: None,
-            dp_delta_budget: None,
         }
     }
 
@@ -3958,7 +3970,7 @@ mod tests {
         let holdout_pools = svc.state.holdout_pools.lock();
         for key in holdout_keys {
             let pool = holdout_pools.get(&key).expect("holdout pool");
-            assert_eq!(pool.reserved_k_bits(), 0.0);
+            assert_eq!(pool.reserved_k_bits, 0.0);
         }
         assert!(reserved_before > 0.0);
     }
@@ -4467,8 +4479,6 @@ mod tests {
             claim_name: "c".to_string(),
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
-            dp_epsilon_budget: None,
-            dp_delta_budget: None,
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
@@ -4535,8 +4545,6 @@ mod tests {
             claim_name: "c".to_string(),
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
-            dp_epsilon_budget: None,
-            dp_delta_budget: None,
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
@@ -4650,15 +4658,14 @@ mod tests {
             .cloned()
             .expect("topic pool");
         assert_eq!(topic_pool.reserved_k_bits(), 0.0);
-        assert_eq!(topic_pool.reserved_access_credit(), 0.0);
 
         let holdout_keys =
             svc.holdout_pool_keys(holdout_handle_id, "test-owner", HoldoutPoolScope::Global);
         let holdout_pools = svc.state.holdout_pools.lock();
         for holdout_key in holdout_keys {
             let holdout_pool = holdout_pools.get(&holdout_key).expect("holdout pool");
-            assert_eq!(holdout_pool.reserved_k_bits(), 0.0);
-            assert_eq!(holdout_pool.reserved_access_credit(), 0.0);
+            assert_eq!(holdout_pool.reserved_k_bits, 0.0);
+            assert_eq!(holdout_pool.reserved_access_credit, 0.0);
         }
 
         let etl_bytes = std::fs::read(dir.path().join("etl.log")).expect("etl");
@@ -4824,7 +4831,7 @@ mod tests {
         };
         let pending_b = PendingMutation::Execute {
             claim_id: [12u8; 32],
-            state: ClaimState::Rejected,
+            state: ClaimState::Revoked,
             decision: pb::Decision::Reject as i32,
             capsule_hash: [22u8; 32],
             capsule_bytes: b"capsule-b".to_vec(),

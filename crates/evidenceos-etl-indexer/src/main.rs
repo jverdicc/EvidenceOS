@@ -4,12 +4,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Parser;
 use evidenceos_core::capsule::{ClaimCapsule, ClaimState};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -209,6 +209,7 @@ fn index_etl(etl_path: &Path) -> Result<IndexedRows, IndexerError> {
             });
 
             if let Some(outcome) = outcome {
+                let trial_nonce_b64 = trial_nonce_to_b64(&capsule);
                 settlements.push(SettlementRow {
                     etl_index,
                     capsule_hash: capsule.capsule_hash_hex().ok(),
@@ -222,8 +223,8 @@ fn index_etl(etl_path: &Path) -> Result<IndexedRows, IndexerError> {
                     ended_at: etl_index,
                     topic_id: capsule.topic_id_hex,
                     holdout_ref: capsule.holdout_ref,
-                    nullspec_id: capsule.nullspec_id_hex,
-                    trial_nonce_b64: trial_nonce_to_b64(&capsule),
+                    nullspec_id: capsule.nullspec_id_hex.clone(),
+                    trial_nonce_b64,
                     decision: capsule.decision,
                 });
             }
@@ -458,6 +459,8 @@ fn main() -> Result<(), IndexerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
+    use std::io::Write;
     use tempfile::TempDir;
 
     fn append_record(f: &mut File, payload: &[u8]) {
