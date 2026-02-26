@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Implementation status guardrails for truth-in-advertising CI gates."""
+"""Implementation status guardrails for truth-in-advertising CI gates.
+
+Paper-critical invariants enforced by this guard (fail-closed):
+1) Oracle signature verification MUST be strict in server-side oracle record
+   verification (`verify_strict(...)`, never permissive checks).
+2) Synthetic holdout is an insecure/dev-only mode and MUST be gated behind an
+   explicit opt-in environment variable
+   (`EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT`) rather than production defaults.
+3) DP lane accounting MUST NOT be zeroed out to silently bypass privacy
+   accounting when DP-related code paths are enabled.
+"""
 
 from __future__ import annotations
 
@@ -62,26 +72,68 @@ def fail_missing_symbol(symbol: str, searched_files: list[Path]) -> None:
     )
 
 
-def extract_function_body(server_src: str, function_name: str, searched_files: list[Path]) -> str:
-    fn_start = server_src.find(f"fn {function_name}")
+def extract_fn_body(source: str, fn_name: str) -> str:
+    """Extract the body for `fn <fn_name>` using brace matching."""
+    fn_start = source.find(f"fn {fn_name}")
     if fn_start == -1:
-        fail_missing_symbol(f"fn {function_name}", searched_files)
+        raise ValueError(f"missing fn {fn_name}")
 
-    body_start = server_src.find("{", fn_start)
+    body_start = source.find("{", fn_start)
     if body_start == -1:
-        fail(f"could not parse {function_name} body start")
+        raise ValueError(f"could not parse {fn_name} body start")
 
     brace_depth = 0
-    for idx in range(body_start, len(server_src)):
-        char = server_src[idx]
+    for idx in range(body_start, len(source)):
+        char = source[idx]
         if char == "{":
             brace_depth += 1
         elif char == "}":
             brace_depth -= 1
             if brace_depth == 0:
-                return server_src[body_start + 1 : idx]
+                return source[body_start + 1 : idx]
 
-    fail(f"could not parse {function_name} body end")
+    raise ValueError(f"could not parse {fn_name} body end")
+
+
+def extract_function_body(server_src: str, function_name: str, searched_files: list[Path]) -> str:
+    try:
+        return extract_fn_body(server_src, function_name)
+    except ValueError as exc:
+        if str(exc).startswith("missing fn"):
+            fail_missing_symbol(f"fn {function_name}", searched_files)
+        fail(str(exc))
+
+
+def _find_env_gated_spans(server_src: str, marker: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    scan_idx = 0
+    while True:
+        marker_idx = server_src.find(marker, scan_idx)
+        if marker_idx == -1:
+            return spans
+
+        block_start = server_src.find("{", marker_idx)
+        if block_start == -1:
+            scan_idx = marker_idx + len(marker)
+            continue
+
+        depth = 0
+        block_end = -1
+        for idx in range(block_start, len(server_src)):
+            ch = server_src[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    block_end = idx
+                    break
+
+        if block_end != -1:
+            spans.append((block_start, block_end))
+            scan_idx = block_end + 1
+        else:
+            scan_idx = block_start + 1
 
 
 def check_oracle_signature_verification(
@@ -89,7 +141,8 @@ def check_oracle_signature_verification(
 ) -> None:
     searched_files = resolve_searched_files(searched_files)
     body = extract_function_body(server_src, "verify_signed_oracle_record", searched_files)
-    if ".verify_strict(" not in body:
+    normalized = re.sub(r"\s+", "", body)
+    if "verify_strict(" not in normalized:
         fail("verify_signed_oracle_record must perform strict ed25519 signature verification")
 
 
@@ -133,11 +186,16 @@ def check_synthetic_holdout_gate(
         fail_missing_symbol("Arc::new(SyntheticHoldoutProvider)", searched_files)
 
     marker = "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT"
-    window_chars = 8000
+    gated_spans = _find_env_gated_spans(server_src, marker)
+    if not gated_spans:
+        fail(
+            "could not locate a parseable block gated by "
+            "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT"
+        )
+
     for match in instantiations:
-        window_start = max(0, match.start() - window_chars)
-        window = server_src[window_start : match.start()]
-        if marker not in window:
+        pos = match.start()
+        if not any(start <= pos <= end for start, end in gated_spans):
             fail(
                 "synthetic holdout provider instantiation must be preceded by "
                 "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT gating"
