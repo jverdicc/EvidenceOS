@@ -102,6 +102,39 @@ python -m analysis.survival --etl path/to/etl.log --out out_dir/
 - `out_dir/cox_summary.csv`: hazard ratios for primary vs competing causes.
 - `out_dir/consort.dot` (`consort.png` when graphviz is available): participant flow.
 
+## Minimal end-to-end workflow
+
+This section is the shortest reproducible path for running the harness from a clean checkout.
+
+### 1) Start the EvidenceOS daemon
+
+Run the daemon using your normal local/dev invocation so ETL records are produced while claims are processed.
+
+### 2) Run a batch of claims across trial arms
+
+Submit a mixed batch of claims (for example control + treatment assignments) through the DiscOS/EvidenceOS flow so the ETL contains multiple `trial_arm_id` / `intervention_id` values.
+
+### 3) Produce Kaplan–Meier + CSV artifacts
+
+```bash
+python -m analysis.epistemic_trial.report --etl path/to/etl.log --out out/trial_report
+```
+
+The report writes KM plots and CSV summaries in `out/trial_report/`, including:
+
+- `km_by_arm.png`
+- `cox_summary.csv`
+- `rmst_by_arm.csv`
+- `consort_flow.csv`
+
+### Endpoint/time definitions used by the harness
+
+- **Event:** `FROZEN` (implemented as `event_type = frozen_containment`, i.e., `W` is exhausted and the system transitions to frozen containment in ETL state).
+- **Time axis:** cumulative `k_bits` (`duration_kbits` in analysis outputs).
+- **Censoring:** a session/unit ends before `FROZEN` is observed.
+
+> Scope note: the analysis pipeline and endpoint extraction are implemented and runnable today; trial protocol choices (randomization scope, unit-of-analysis policy, and some causal interpretation assumptions) remain experimental and must be pre-registered per study.
+
 ## 7) Pre-registration checklist
 
 Before running a trial harness report, lock:
@@ -192,4 +225,3 @@ For new claims, EvidenceOS uses **schema version 2** with a prefix-free byte enc
 The explicit length prefixes remove ambiguity between adjacent variable-length strings (for example `("ab","c")` vs `("a","bc")`), so distinct assignments cannot share the same preimage.
 
 Schema version 1 is retained only for backward compatibility with historical capsules; auditors should treat `(trial_commitment_schema_version, trial_commitment_hash_hex)` as the commitment identifier.
-
