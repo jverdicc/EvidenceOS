@@ -134,6 +134,7 @@ impl Default for AspecPolicy {
 
 impl AspecPolicy {
     pub fn claim_v1() -> Self {
+        #[allow(unused_mut)]
         let mut allowed: HashSet<(String, String)> = allowed_import_pairs()
             .map(|(module, name)| (module.to_string(), name.to_string()))
             .collect();
