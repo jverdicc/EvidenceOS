@@ -34,6 +34,13 @@ Reference enforcement points:
 | Access Credit Enforcement | Architecture specified | Config-file backend: Live; gRPC backend: Roadmap | `crates/evidenceos-daemon/src/server/core.rs`, `crates/evidenceos-daemon/tests/credit_tests.rs`, `docs/CREDIT_AND_ADMISSION.md` |
 | Staked Admission (curve) | UVP Section 9.4 | Operator-provided: documented | `docs/CREDIT_AND_ADMISSION.md` |
 
+
+## Supported extension surfaces
+
+- **Declarative (production)**: Signed `SignedNullSpecContractV1` contracts loaded from the NullSpec registry with trusted-key verification, configured via daemon flags `--nullspec-registry-dir` and `--trusted-nullspec-keys-dir`.
+- **Code-level (trusted changes)**: Add new theorem families by extending Rust enums/validation paths (for example `NullSpecKind` / `EProcessKind`) through reviewed PRs.
+- **Not supported as production API**: trait-registry/plugin stubs in `evidenceos-core`.
+
 ## Status policy
 
 - Any roadmap/spec-only behavior must be described as **Not implemented** or **Partial** in this table.
