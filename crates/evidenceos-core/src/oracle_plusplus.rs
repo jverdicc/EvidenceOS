@@ -382,9 +382,21 @@ fn append_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+    use tokio::runtime::Builder;
 
     fn mk_resolution() -> OracleResolution {
         OracleResolution::new(16, 0.01).expect("resolution")
+    }
+
+    fn mock_client() -> pb::oracle_plus_plus_client::OraclePlusPlusClient<Channel> {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let _guard = runtime.enter();
+        pb::oracle_plus_plus_client::OraclePlusPlusClient::new(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+        )
     }
 
     #[test]
@@ -476,9 +488,7 @@ mod tests {
             remaining_budget_bits: None,
             network_errors: 0,
             max_network_errors: 2,
-            client: pb::oracle_plus_plus_client::OraclePlusPlusClient::new(
-                Channel::from_static("http://127.0.0.1:1").connect_lazy(),
-            ),
+            client: mock_client(),
         };
         let bucket = backend.resolution.encode_bucket(1).expect("bucket");
         let sig1 = oracle_signing
@@ -534,9 +544,7 @@ mod tests {
             remaining_budget_bits: None,
             network_errors: 0,
             max_network_errors: 2,
-            client: pb::oracle_plus_plus_client::OraclePlusPlusClient::new(
-                Channel::from_static("http://127.0.0.1:1").connect_lazy(),
-            ),
+            client: mock_client(),
         };
         let bad = vec![0, 1, 2];
         let sig = oracle_signing
@@ -579,9 +587,7 @@ mod tests {
             remaining_budget_bits: None,
             network_errors: 0,
             max_network_errors: 2,
-            client: pb::oracle_plus_plus_client::OraclePlusPlusClient::new(
-                Channel::from_static("http://127.0.0.1:1").connect_lazy(),
-            ),
+            client: mock_client(),
         };
         let bucket = backend.resolution.encode_bucket(1).expect("bucket");
         let sig = oracle_signing

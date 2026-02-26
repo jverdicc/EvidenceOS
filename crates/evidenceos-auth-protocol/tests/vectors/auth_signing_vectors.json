@@ -6,7 +6,7 @@
     "path": "/evidenceos.v1.EvidenceOS/Health",
     "timestamp": null,
     "material": "req-1:/evidenceos.v1.EvidenceOS/Health",
-    "signature_header": "sha256=f4fcf8fa4ee4e4efe84c621e1f1bc25089f0cb1503b8ad1573a35690115de4d3"
+    "signature_header": "sha256=b0a0e75fe3c8bb4296cedb74b4b019148dac88d3ebd7617fac5c29c9f873c994"
   },
   {
     "name": "with_timestamp_health",
@@ -15,7 +15,7 @@
     "path": "/evidenceos.v1.EvidenceOS/Health",
     "timestamp": "1735689600",
     "material": "req-1:/evidenceos.v1.EvidenceOS/Health:1735689600",
-    "signature_header": "sha256=41e287b8b59234ff4b66f5a204253e8a3de537839f7f87d0499f07af0067ee6f"
+    "signature_header": "sha256=ed726476d189dc797b09ebe8f2a881cce52fc7dc714d1b3c32a1ead78a863267"
   },
   {
     "name": "create_claim_path_bound",
@@ -24,6 +24,6 @@
     "path": "/evidenceos.v1.EvidenceOS/CreateClaimV2",
     "timestamp": "1735689620",
     "material": "req-kid:/evidenceos.v1.EvidenceOS/CreateClaimV2:1735689620",
-    "signature_header": "sha256=3112eb42f2654c85839d9786a38642a98ac706f26b7b93363f7b4ea56af2ed95"
+    "signature_header": "sha256=743bd7bc5795b44b3695a19a8f701b5efdf1c704fe3819479a7b87d0975d8d9e"
   }
 ]
