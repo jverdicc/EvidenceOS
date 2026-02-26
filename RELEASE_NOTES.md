@@ -1,30 +1,21 @@
 # forc-submission-v1.0 Release Notes
 
-## Release anchor
-- Tag: `forc-submission-v1.0`
-- Scope: FORC 2026 submission baseline for EvidenceOS (Rust kernel + supporting docs/artifacts).
+## What this tag represents
 
-## Implemented in this release
-- Rust verification kernel and daemon baseline for UVP-style claim verification.
-- Core documentation set in `docs/` covering architecture, threat model, runbooks, testing evidence, and integration guidance.
-- Trial-harness specification and analysis references for clinical-trial-style evaluation workflows.
-- Reproducibility artifacts for FORC submission context and historical comparison materials.
+`forc-submission-v1.0` is the FORC submission baseline for EvidenceOS. It captures the Rust kernel/daemon implementation and the accompanying documentation/artifact set used for the submission package.
 
-## Specified but not fully implemented
-- Some roadmap/planning documents define future hardening and migration targets that are intentionally non-normative.
-- Optional long-term Python reduction remains a future migration objective; Python stays for analysis/reproduction support.
+## What is implemented
 
-## Documentation updates in this release
-- Root markdown housekeeping and migration of legacy/draft notes into `docs/`.
-- README streamlined as project front-door with canonical links to threat model and harness analysis.
-- Added repository metadata helper under `.github/REPO_DESCRIPTION.md`.
+- Rust verification kernel and Rust daemon for UVP claim lifecycle execution.
+- Deterministic lifecycle/ledger behavior with ETL-backed evidence and verification surfaces documented in the repo.
+- Reproducibility materials and test documentation under `docs/` and `artifacts/`.
 
-## Compatibility / migration notes
-- Runtime/kernel path remains Rust-only.
-- Existing Python analysis/reproduction paths are unchanged and remain documented.
-- Legacy setup instructions are retained as reference notes under `docs/LEGACY_SETUP.md`.
+## What is specified but not fully implemented
 
-## Verification checklist
-- Case-insensitive filename collision check script executed.
-- Documentation drift checks executed.
-- Markdown link integrity validated for `README.md` and `docs/` references.
+This release includes roadmap/specification documents for capabilities that are intentionally marked as partial or not implemented. Canonical status is maintained in `docs/IMPLEMENTATION_STATUS.md`.
+
+Examples called out there include partial or roadmap items (e.g., some TEE/PLN/profiled hardening paths) that are not claimed as fully production-complete in this tag.
+
+## Known gaps
+
+Known hardening and follow-up gaps are tracked as internal working notes in `docs/HARDENING_ISSUE_DRAFTS.md` (non-authoritative) and should be interpreted alongside the authoritative coverage and status docs.

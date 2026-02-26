@@ -295,7 +295,24 @@ cargo run -p evidenceos-daemon -- \
 
 > `--etl-path` is deprecated; use `--data-dir` for all daemon launches.
 
-### 3) Test
+### 3) End-to-end: See a claim lifecycle in 60 seconds
+
+Start the daemon in one terminal (see step 2), then in another terminal run:
+
+```bash
+./scripts/run_scenarios.sh
+cat artifacts/scenarios/lifecycle_pass.json
+```
+
+The lifecycle artifact should include an inclusion proof, `W`/`k` ledger entries, and a deterministic claim ID.
+
+To inspect a frozen-path example:
+
+```bash
+cat artifacts/scenarios/reject_invalid_claim.json
+```
+
+### 4) Test
 
 ```bash
 cargo test --workspace
