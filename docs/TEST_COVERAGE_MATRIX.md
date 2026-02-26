@@ -33,7 +33,7 @@ For parameter-level API coverage detail (ASPEC/Ledger/Oracle/ETL), see [`TEST_CO
 | Behavior | Unit tests | Property/Fuzz | System/Integration |
 |---|---|---|---|
 | ETL inclusion & consistency verification | `crates/evidenceos-core/src/etl.rs::tests::inclusion_proof_full_space_and_tamper_resistance` | `fuzz/fuzz_targets/fuzz_etl_ops.rs::fuzz_target` | `crates/evidenceos-daemon/tests/etl_verification_system.rs::verifies_inclusion_consistency_and_sth_signature` |
-| Claim lifecycle guards | `crates/evidenceos-daemon/src/server.rs::tests::lane_config_mapping_is_deterministic` | `fuzz/fuzz_targets/fuzz_daemon_decode_limits.rs::fuzz_target` | `crates/evidenceos-daemon/tests/lifecycle_v2.rs::cannot_execute_before_seal` |
+| Claim lifecycle guards | `crates/evidenceos-daemon/src/server/handlers_v2.rs` (`create_claim_v2`, `seal_claim_v2`), `crates/evidenceos-daemon/src/server/core.rs::tests::lane_config_mapping_is_deterministic` | `fuzz/fuzz_targets/fuzz_daemon_decode_limits.rs::fuzz_target` | `crates/evidenceos-daemon/tests/lifecycle_v2.rs::cannot_execute_before_seal` |
 
 ## Adversarial scenario evidence
 
