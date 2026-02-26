@@ -91,8 +91,6 @@ fn ledger_snapshot_strategy() -> impl Strategy<Value = LedgerSnapshot> {
             finite_f64(),
             finite_f64(),
             finite_f64(),
-            prop::option::of(finite_f64()),
-            prop::option::of(finite_f64()),
             finite_f64(),
         ),
         (
@@ -365,6 +363,7 @@ fn claim_capsule_strategy() -> impl Strategy<Value = ClaimCapsule> {
                     trial_arm_parameters_hash_hex,
                     trial_nonce_hex,
                     trial_commitment_hash_hex,
+                    trial_config_hash_hex: None,
                     trial: None,
                     environment_attestations,
                     state,
@@ -414,7 +413,7 @@ proptest! {
         let consistency = etl.consistency_proof(old_size as u64, size as u64).expect("consistency proof");
         prop_assert!(verify_consistency_proof(&old_root, &root_current, old_size, size, &consistency));
 
-        let mut legacy_etl = Etl::open_or_create(&dir.path().join("etl-compat-legacy.log")).expect("legacy etl");
+        let mut legacy_etl = Etl::open_or_create(dir.path().join("etl-compat-legacy.log")).expect("legacy etl");
         for bytes in &legacy_bytes {
             legacy_etl.append(bytes).expect("append legacy bytes");
         }

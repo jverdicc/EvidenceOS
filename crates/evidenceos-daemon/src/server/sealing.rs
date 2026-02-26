@@ -102,6 +102,7 @@ impl EvidenceOsService {
         };
         claim.oracle_resolution = claim
             .oracle_resolution
+            .clone()
             .with_calibration(calibration_hash, pinned_epoch);
         claim.oracle_resolution.ttl_epochs = Some(ttl_epochs);
         let resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
@@ -173,8 +174,6 @@ mod tests {
             claim_name: claim_name.to_string(),
             oracle_id: oracle_id.to_string(),
             nullspec_id: String::new(),
-            dp_epsilon_budget: None,
-            dp_delta_budget: None,
             output_schema_id: "legacy/v1".to_string(),
             phys_hir_hash: [0; 32],
             semantic_hash: [0; 32],
@@ -192,7 +191,7 @@ mod tests {
             oracle_num_symbols: 4,
             oracle_resolution: OracleResolution::new(4, 0.0).expect("resolution"),
             state: ClaimState::Committed,
-            artifacts: vec![("artifact-a".to_string(), [7; 32])],
+            artifacts: vec![([7; 32], "artifact-a".to_string())],
             dependency_capsule_hashes: Vec::new(),
             dependency_items: Vec::new(),
             dependency_merkle_root: None,

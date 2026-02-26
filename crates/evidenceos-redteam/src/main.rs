@@ -253,7 +253,7 @@ fn serialized_error_len(status: &Status) -> usize {
     let meta_len: usize = status
         .metadata()
         .iter()
-        .map(|kv| kv.0.as_str().len() + kv.1.as_encoded_bytes().len())
+        .map(|kv| format!("{kv:?}").len())
         .sum();
     status.message().len() + meta_len + status.code().to_string().len()
 }

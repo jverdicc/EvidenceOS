@@ -208,19 +208,17 @@ impl VaultEngine {
             return Err(err);
         }
         let output = host.output.clone().ok_or(VaultError::OutputMissing)?;
+        let call_trace = host.call_trace.clone();
+        let oracle_calls = host.oracle_calls;
+        let leakage_bits = host.leakage_bits;
+        let kout_bits = host.kout_bits;
         let output_bytes = u32::try_from(output.len())
             .map_err(|_| VaultError::InvalidConfig("output length overflow".to_string()))?;
 
-        let judge_trace_hash = compute_judge_trace_hash(
-            wasm,
-            &host.call_trace,
-            &output,
-            fuel_used,
-            host.oracle_calls,
-        );
+        let judge_trace_hash =
+            compute_judge_trace_hash(wasm, &call_trace, &output, fuel_used, oracle_calls);
 
-        let oracle_buckets: Vec<u32> = host
-            .call_trace
+        let oracle_buckets: Vec<u32> = call_trace
             .iter()
             .filter_map(|c| match c {
                 HostCallRecord::OracleBucket { bucket, .. } => Some(*bucket),
@@ -236,10 +234,10 @@ impl VaultEngine {
             canonical_output: output,
             judge_trace_hash,
             fuel_used,
-            oracle_calls: host.oracle_calls,
+            oracle_calls,
             output_bytes,
-            leakage_bits_total: host.leakage_bits,
-            kout_bits_total: host.kout_bits,
+            leakage_bits_total: leakage_bits,
+            kout_bits_total: kout_bits,
             oracle_buckets,
             max_memory_pages,
         })

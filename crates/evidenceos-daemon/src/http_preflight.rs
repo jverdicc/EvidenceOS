@@ -138,7 +138,7 @@ pub struct HttpErr {
 }
 
 impl HttpErr {
-    fn invalid_argument(detail: &str, kind: &'static str) -> Self {
+    fn invalid_argument(_detail: &str, kind: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             kind,

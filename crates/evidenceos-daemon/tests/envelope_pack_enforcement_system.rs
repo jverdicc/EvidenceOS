@@ -42,7 +42,7 @@ async fn create_and_seal(
     client: &mut EvidenceOsClient<Channel>,
     schema_id: &str,
     wasm: Vec<u8>,
-) -> String {
+) -> Vec<u8> {
     let claim_id = client
         .create_claim_v2(pb::CreateClaimV2Request {
             claim_name: "signed-pack-enforcement".into(),

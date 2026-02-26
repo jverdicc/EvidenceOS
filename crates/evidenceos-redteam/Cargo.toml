@@ -12,4 +12,4 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 evidenceos-protocol = { path = "../evidenceos-protocol" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-tonic = { version = "0.11", features = ["transport"] }
+tonic = { version = "0.12", features = ["transport"] }

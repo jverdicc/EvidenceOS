@@ -189,8 +189,9 @@ impl AccountStore {
         }
         record.credit_balance = record.credit_balance.saturating_sub(amount);
         record.burned_total = record.burned_total.saturating_add(amount);
+        let credit_balance = record.credit_balance;
         self.persist()?;
-        Ok(record.credit_balance)
+        Ok(credit_balance)
     }
 
     pub fn grant_credit(
@@ -204,8 +205,9 @@ impl AccountStore {
             .credit_balance
             .saturating_add(amount)
             .min(record.limits.credit_limit);
+        let credit_balance = record.credit_balance;
         self.persist()?;
-        Ok(record.credit_balance)
+        Ok(credit_balance)
     }
 
     pub fn set_credit_limit(
@@ -217,8 +219,9 @@ impl AccountStore {
         let record = self.ensure_account(principal_id, default_limit)?;
         record.limits.credit_limit = limit;
         record.credit_balance = record.credit_balance.min(limit);
+        let credit_limit = record.limits.credit_limit;
         self.persist()?;
-        Ok(record.limits.credit_limit)
+        Ok(credit_limit)
     }
 
     pub fn denied_total(&self, principal_id: &str) -> u64 {

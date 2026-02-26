@@ -1,18 +1,28 @@
 use evidenceos_core::aspec::{verify_aspec, AspecPolicy};
-use evidenceos_core::nullspec_contract::{DraftNullSpecContractV1, EValueSpecV1};
+use evidenceos_core::nullspec::{
+    EProcessKind, NullSpecKind, SignedNullSpecContractV1, NULLSPEC_SCHEMA_V1,
+};
 use evidenceos_daemon::vault::{VaultConfig, VaultEngine, VaultExecutionContext};
 use evidenceos_guest_abi::{IMPORT_EMIT_STRUCTURED_CLAIM, IMPORT_ORACLE_QUERY, MODULE_ENV};
 
-fn test_nullspec() -> DraftNullSpecContractV1 {
-    let mut spec = DraftNullSpecContractV1 {
-        id: String::new(),
-        domain: "sealed-vault".to_string(),
-        null_accuracy: 0.5,
-        e_value: EValueSpecV1::LikelihoodRatio { n_observations: 4 },
-        created_at_unix: 1,
-        version: 1,
+fn test_nullspec() -> SignedNullSpecContractV1 {
+    let mut spec = SignedNullSpecContractV1 {
+        schema: NULLSPEC_SCHEMA_V1.to_string(),
+        nullspec_id: [0u8; 32],
+        oracle_id: "builtin.accuracy".to_string(),
+        oracle_resolution_hash: [0u8; 32],
+        holdout_handle: "holdout".to_string(),
+        epoch_created: 1,
+        ttl_epochs: 1,
+        kind: NullSpecKind::ParametricBernoulli { p: 0.5 },
+        eprocess: EProcessKind::LikelihoodRatioFixedAlt {
+            alt: vec![0.5, 0.5],
+        },
+        calibration_manifest_hash: None,
+        created_by: "test".to_string(),
+        signature_ed25519: vec![0u8; 64],
     };
-    spec.id = spec.compute_id().expect("id");
+    spec.nullspec_id = spec.compute_id().expect("id");
     spec
 }
 
