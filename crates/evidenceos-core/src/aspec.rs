@@ -134,7 +134,7 @@ impl Default for AspecPolicy {
 
 impl AspecPolicy {
     pub fn claim_v1() -> Self {
-        let allowed: HashSet<(String, String)> = allowed_import_pairs()
+        let mut allowed: HashSet<(String, String)> = allowed_import_pairs()
             .map(|(module, name)| (module.to_string(), name.to_string()))
             .collect();
         #[cfg(feature = "dp_lane")]

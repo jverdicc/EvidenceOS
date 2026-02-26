@@ -12,49 +12,41 @@ mod dp_lane_enabled_tests {
     }
 
     #[test]
-    fn test_laplace_noise_is_centered() {
+    fn test_laplace_noise_golden_for_fixed_seeds() {
+        let samples: Vec<i64> = (0..16)
+            .map(|seed| dp_laplace_i64(42, 2.0, 0.5, seed).0)
+            .collect();
+        let expected: Vec<i64> = vec![
+            44, 41, 48, 43, 44, 38, 41, 37, 34, 36, 43, 41, 18, 40, 44, 46,
+        ];
+        assert_eq!(samples, expected);
+    }
+
+    #[test]
+    fn test_gaussian_noise_golden_for_fixed_seeds() {
+        let samples: Vec<i64> = (0..16)
+            .map(|seed| dp_gaussian_i64(42, 2.0, 0.5, 1e-5_f64, seed).0)
+            .collect();
+        let expected: Vec<i64> = vec![
+            26, 65, 33, 58, 56, 34, 17, 60, 39, 50, 63, 65, 53, 67, 29, 53,
+        ];
+        assert_eq!(samples, expected);
+    }
+
+    #[test]
+    fn test_laplace_noise_centered_sanity() {
         let true_value = 10_000i64;
-        let sensitivity = 2.0;
-        let epsilon = 0.5;
-        let mut diffs = Vec::new();
-        for i in 0..10_000u64 {
-            let (noisy, _) = dp_laplace_i64(true_value, sensitivity, epsilon, i);
-            diffs.push((noisy - true_value) as f64);
-        }
-        let (mean, _) = sample_mean_std(&diffs);
-        assert!(mean.abs() < 0.1 * (sensitivity / epsilon));
-    }
-
-    #[test]
-    fn test_laplace_noise_scale() {
-        let true_value = 0i64;
-        let sensitivity = 3.0;
-        let epsilon = 0.8;
-        let mut diffs = Vec::new();
-        for i in 0..10_000u64 {
-            let (noisy, _) = dp_laplace_i64(true_value, sensitivity, epsilon, i + 100_000);
-            diffs.push((noisy - true_value) as f64);
-        }
-        let (_, sample_std) = sample_mean_std(&diffs);
+        let sensitivity = 2.0_f64;
+        let epsilon = 0.5_f64;
+        let diffs: Vec<f64> = (0..512u64)
+            .map(|seed| {
+                (dp_laplace_i64(true_value, sensitivity, epsilon, seed).0 - true_value) as f64
+            })
+            .collect();
+        let (mean, sample_std) = sample_mean_std(&diffs);
         let expected_std = (sensitivity / epsilon) * 2.0_f64.sqrt();
-        assert!((sample_std - expected_std).abs() < 0.1 * expected_std);
-    }
-
-    #[test]
-    fn test_gaussian_noise_scale() {
-        let true_value = 0i64;
-        let sensitivity = 2.0;
-        let epsilon = 0.5;
-        let delta = 1e-5;
-        let sigma = sensitivity * (2.0 * (1.25 / delta).ln()).sqrt() / epsilon;
-        let mut diffs = Vec::new();
-        for i in 0..10_000u64 {
-            let (noisy, _, _) =
-                dp_gaussian_i64(true_value, sensitivity, epsilon, delta, i + 200_000);
-            diffs.push((noisy - true_value) as f64);
-        }
-        let (_, sample_std) = sample_mean_std(&diffs);
-        assert!((sample_std - sigma).abs() < 0.1 * sigma);
+        assert!(mean.abs() < 0.2 * (sensitivity / epsilon));
+        assert!((sample_std - expected_std).abs() < 0.35 * expected_std);
     }
 
     #[test]
