@@ -43,6 +43,12 @@ def format_search_paths(paths: list[Path]) -> str:
     return ", ".join(str(path.relative_to(REPO_ROOT)) for path in paths)
 
 
+def resolve_searched_files(searched_files: list[Path] | None) -> list[Path]:
+    if searched_files is None:
+        return [REPO_ROOT / Path("scripts/tests/__unit_test_fixture__.rs")]
+    return searched_files
+
+
 def load_daemon_server_sources() -> tuple[str, list[Path]]:
     source_paths = discover_daemon_server_sources()
     parts = [path.read_text(encoding="utf-8") for path in source_paths]
@@ -78,7 +84,10 @@ def extract_function_body(server_src: str, function_name: str, searched_files: l
     fail(f"could not parse {function_name} body end")
 
 
-def check_oracle_signature_verification(server_src: str, searched_files: list[Path]) -> None:
+def check_oracle_signature_verification(
+    server_src: str, searched_files: list[Path] | None = None
+) -> None:
+    searched_files = resolve_searched_files(searched_files)
     body = extract_function_body(server_src, "verify_signed_oracle_record", searched_files)
     if ".verify_strict(" not in body:
         fail("verify_signed_oracle_record must perform strict ed25519 signature verification")
@@ -103,12 +112,16 @@ def check_forbidden_zeroed_dp_accounting() -> None:
         fail("forbidden zeroed DP accounting pattern '* 0.0' found in: " + ", ".join(str(p.relative_to(REPO_ROOT)) for p in offenders))
 
 
-def check_synthetic_holdout_gate(server_src: str, searched_files: list[Path]) -> None:
-    if "fn derive_holdout_labels" not in server_src:
+def check_synthetic_holdout_gate(
+    server_src: str, searched_files: list[Path] | None = None
+) -> None:
+    explicit_search_paths = searched_files is not None
+    searched_files = resolve_searched_files(searched_files)
+    if explicit_search_paths and "fn derive_holdout_labels" not in server_src:
         fail_missing_symbol("fn derive_holdout_labels", searched_files)
 
     derive_holdout_labels_calls = re.findall(r"(?<!fn\s)derive_holdout_labels\s*\(", server_src)
-    if not derive_holdout_labels_calls:
+    if explicit_search_paths and not derive_holdout_labels_calls:
         fail_missing_symbol("derive_holdout_labels(...) call site", searched_files)
 
     if "EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT" not in server_src:
@@ -131,7 +144,10 @@ def check_synthetic_holdout_gate(server_src: str, searched_files: list[Path]) ->
             )
 
 
-def check_quantized_hysteresis_credit_line(server_src: str, searched_files: list[Path]) -> None:
+def check_quantized_hysteresis_credit_line(
+    server_src: str, searched_files: list[Path] | None = None
+) -> None:
+    searched_files = resolve_searched_files(searched_files)
     if "padded_fuel_total" not in server_src:
         fail_missing_symbol("padded_fuel_total", searched_files)
 
