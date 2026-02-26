@@ -28,6 +28,15 @@ The result is a verification system with explicit risk posture, deterministic se
 4. **Black-box UVP interface explainer:** [`docs/uvp_blackbox_interface.md`](docs/uvp_blackbox_interface.md)
 5. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
 6. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
+   - Run it now:
+
+     ```bash
+     python -m venv .venv && source .venv/bin/activate
+     python -m pip install -e '.[analysis]'
+     python -m analysis.epistemic_trial.report --help
+     # Minimal full run (requires an ETL file):
+     python -m analysis.epistemic_trial.report --etl path/to/etl.log --out out/trial_report
+     ```
 7. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 8. **Security implementation docs:** [`docs/HOLDOUT_ENCRYPTION.md`](docs/HOLDOUT_ENCRYPTION.md), [`docs/TEE.md`](docs/TEE.md), [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
 
