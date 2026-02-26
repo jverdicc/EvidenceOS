@@ -219,6 +219,63 @@ EvidenceOS is designed for settings where an AI system is assumed to be capable,
 
 See [`docs/POSITIONING.md`](docs/POSITIONING.md) for a full capability and risk matrix.
 
+## Real-World Validation
+
+On February 23, 2026, Anthropic published a security
+report documenting three industrial-scale distillation
+attacks against Claude by DeepSeek, Moonshot AI, and
+MiniMax. The campaigns generated over 16 million
+exchanges across approximately 24,000 fraudulent
+accounts, targeting specific capabilities including
+agentic reasoning, tool use, and chain-of-thought
+extraction.
+
+Anthropic's published description of these attacks maps
+directly to the threat model formalized in the UVP paper
+and implemented in EvidenceOS.
+
+Source: https://www.anthropic.com/research/detecting-and-preventing-distillation-attacks
+
+### Attack Pattern Mapping
+
+| Anthropic's observed attack | UVP threat model | EvidenceOS mechanism |
+|---|---|---|
+| 24,000 fraudulent accounts rotating to avoid per-account bans | Sybil amplification (Paper §12) | TopicHash / MultiSignalTopicID shared budget — extraction cost is cumulative across all identities, not reset per account |
+| 16M+ exchanges coordinated across accounts targeting the same narrow capability | Adaptive leakage / operation-level extraction (Paper §2, §14) | Conservation Ledger charges k-bits cumulatively across the operation, not per session |
+| Chain-of-thought elicitation repeated tens of thousands of times to generate training data | Structured capability extraction via repeated oracle probing | Quantized oracle + hysteresis collapses precision of repeated near-identical queries; ASPEC rejects capsules designed to elicit unmetered internal reasoning |
+| "Load balancing" across accounts to increase throughput and evade detection | Distributed salami attack (Paper §11) | Joint-interface accounting detects cross-account probing of correlated capabilities; topic budget shared across the operation |
+| MiniMax pivoted within 24 hours when Anthropic released a new model, redirecting traffic to the new system | Adaptive adversary updating strategy in real time | DLC epoch settlement + W/k ledger continuity — strategy pivots do not reset the budget; accumulated leakage persists |
+
+### What EvidenceOS adds that reactive detection does not
+
+Anthropic's published countermeasures are classifiers,
+behavioral fingerprinting, and access controls. These
+are reactive: they identify attacks after extraction has
+occurred. Anthropic describes detecting MiniMax "while
+it was still active" — after 13 million exchanges — as
+"unprecedented visibility."
+
+EvidenceOS is designed to make 13 million exchanges
+mathematically impossible within a bounded budget before
+extraction succeeds. The Conservation Ledger does not
+detect when a budget has been exceeded. It enforces a
+hard ceiling on what can be extracted, proactively, by
+construction.
+
+The distinction:
+
+- **Reactive detection:** Identify the attack after
+  extraction has occurred. Ban the accounts. The
+  capability has already been transferred.
+- **Proactive bounding (UVP):** Make extraction beyond
+  a defined k-bit budget physically impossible.
+  The attack cannot succeed even if it goes undetected.
+
+This is the shift from a social/heuristic process to a
+computational substrate that the UVP paper argues for.
+Anthropic's February 2026 report is a real-world case
+study of what happens at industrial scale without it.
+
 ## Practical Use Cases and Outcomes
 
 | Use case category | Adversarial vector (plain English) | EvidenceOS mechanism | Mitigation / outcome | Reproducible evidence |
@@ -268,6 +325,7 @@ To avoid review-time ambiguity between paper artifact snapshots and current main
 | Adaptive metric probing | Repeated near-threshold probing to infer holdout internals | Quantization (`epsilon`/bucketing), hysteresis (`delta` stall), W/k charging | THROTTLE or HEAVY as k budget rises; reduced bit leakage | Live | [docs/TEST_COVERAGE_MATRIX.md](docs/TEST_COVERAGE_MATRIX.md), [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md), [`fuzz_oracle_roundtrip`](fuzz/fuzz_targets/fuzz_oracle_roundtrip.rs) |
 | Cross-interface differential extraction | Combining outputs across related oracle interfaces | Joint-interface accounting, conserved W/k budgets, topic pooling | PASS only under budget; otherwise THROTTLE/HEAVY | Sim-tested | [docs/TEST_COVERAGE_MATRIX.md](docs/TEST_COVERAGE_MATRIX.md), [`fuzz_ledger_ops`](fuzz/fuzz_targets/fuzz_ledger_ops.rs) |
 | Sybil amplification | Identity rotation to bypass per-account limits | TopicHash / MultiSignalTopicID shared budgets | THROTTLE or REJECT once topic budget exhausted | Architecture specified | [docs/TEST_COVERAGE_MATRIX.md](docs/TEST_COVERAGE_MATRIX.md) |
+| Distillation / capability extraction at scale | 24,000 coordinated accounts extracting via 16M+ exchanges (Anthropic, Feb 2026) | TopicHash shared budget + Conservation Ledger + joint-interface accounting | Extraction bounded by k-bit budget across all identities; strategy pivots do not reset ledger | Sim-tested | docs/TEST_COVERAGE_MATRIX.md, Anthropic distillation report (Feb 23, 2026) |
 | Hidden in-capsule search | Submitting code that smuggles unmetered optimization/search | ASPEC admissibility and bounded execution profile | REJECT inadmissible capsules before settlement | Live | [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md), [`fuzz_aspec_verify`](fuzz/fuzz_targets/fuzz_aspec_verify.rs) |
 | Timing/order manipulation | Exploiting race/order non-determinism for inconsistent receipts | Deterministic Logical Clock (DLC), canonicalization, deterministic ETL commits | PASS with reproducible receipts; divergent flows rejected/frozen | Live | [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md), [`fuzz_etl_ops`](fuzz/fuzz_targets/fuzz_etl_ops.rs), [`fuzz_etl_read_entry`](fuzz/fuzz_targets/fuzz_etl_read_entry.rs) |
 | Proven bad-root propagation | Downstream claims continue after root invalidation | Lineage DAG + recursive revocation feed | FROZEN/REJECT for tainted descendants | Sim-tested | [docs/TEST_EVIDENCE.md](docs/TEST_EVIDENCE.md), [docs/TEST_COVERAGE_MATRIX.md](docs/TEST_COVERAGE_MATRIX.md) |
@@ -402,6 +460,9 @@ Key rotation strategy: the daemon supports keyrings under `<data-dir>/keys/` and
 This repository is part of the **Universal Verification Protocol (UVP)** research project.
 
 * **Paper:** "The Conservation of Epistemic Integrity: A Kernel–Userland Protocol for Verifiable Reality" (Under Review at FORC 2026).
+For a mapping of published real-world attack patterns
+to UVP mechanisms, see
+[docs/REAL_WORLD_VALIDATION.md](docs/REAL_WORLD_VALIDATION.md).
 * **Citation DOI (all versions):** Cite all versions using [DOI: 10.5281/zenodo.18685556](https://doi.org/10.5281/zenodo.18685556), which always resolves to the latest release.
 
 If you use this code in your research, please cite the Zenodo archive or the forthcoming FORC 2026 paper.
