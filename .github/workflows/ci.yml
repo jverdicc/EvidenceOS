@@ -10,18 +10,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Initialize artifact files
+        run: |
+          mkdir -p artifacts
+          : > artifacts/clippy-report.txt
+
       - name: Install Rust stable
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
           components: rustfmt, clippy
-          override: true
 
       - name: Install Rust nightly (for cargo-fuzz)
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo tools
         run: |
@@ -65,7 +65,9 @@ jobs:
         run: cargo fmt --check
 
       - name: Rust clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee artifacts/clippy-report.txt
 
       - name: Rust tests
         run: cargo test --workspace
@@ -202,11 +204,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Python 3.11 (pinned)
         uses: actions/setup-python@v5
