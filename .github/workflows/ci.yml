@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "0 4 * * *"
 
 jobs:
   test-evidence:
@@ -65,6 +67,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang llvm
 
       - name: Run test evidence gate
+        env:
+          EVIDENCEOS_CI_STRICT: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: ./scripts/test_evidence.sh
 
       - name: Check protocol drift
@@ -170,24 +174,18 @@ jobs:
       - name: Coverage summary
         run: cargo llvm-cov --workspace --all-features --summary-only
 
-      - name: Upload test output artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-output
-          path: artifacts/test_output.txt
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-lcov
-          path: artifacts/coverage.lcov
-
-      - name: Upload clippy report artifact
+      - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: clippy-report
-          path: artifacts/clippy-report.txt
+          name: evidenceos-ci-artifacts
+          path: |
+            artifacts/test_output.txt
+            artifacts/coverage.lcov
+            artifacts/fuzz_*.log
+            artifacts/scenarios/summary.json
+            artifacts/clippy-report.txt
+
 
 
   dp-lane-tests:
