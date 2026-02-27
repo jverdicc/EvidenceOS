@@ -43,6 +43,17 @@ if ! cargo metadata --format-version 1 --locked >/dev/null 2>artifacts/cargo-met
   fi
 fi
 
+cargo_feature_args=()
+# Default: NO all-features, to match docs/TEST_EVIDENCE.md CI expectations.
+# Opt-in knobs:
+#  - EVIDENCEOS_CI_ALL_FEATURES=1 => use --all-features
+#  - EVIDENCEOS_CI_FEATURES="feat1,feat2" => use --features "feat1,feat2"
+if [[ "${EVIDENCEOS_CI_ALL_FEATURES:-0}" == "1" ]]; then
+  cargo_feature_args+=(--all-features)
+elif [[ -n "${EVIDENCEOS_CI_FEATURES:-}" ]]; then
+  cargo_feature_args+=(--features "${EVIDENCEOS_CI_FEATURES}")
+fi
+
 {
   stage "cargo fmt" cargo fmt --check
 
@@ -50,7 +61,7 @@ fi
   echo ""
   echo "== ${CURRENT_STAGE} ==" | tee -a artifacts/test_output.txt
   if [[ "$can_resolve_workspace_deps" == "true" ]]; then
-    cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tee artifacts/clippy-report.txt
+    cargo clippy --workspace --all-targets "${cargo_feature_args[@]}" -- -D warnings 2>&1 | tee artifacts/clippy-report.txt
   else
     echo "skipped (dependency resolution unavailable)" | tee artifacts/clippy-report.txt
   fi
@@ -59,7 +70,7 @@ fi
   echo ""
   echo "== ${CURRENT_STAGE} ==" | tee -a artifacts/test_output.txt
   if [[ "$can_resolve_workspace_deps" == "true" ]]; then
-    cargo test --workspace --all-targets --all-features
+    cargo test --workspace --all-targets "${cargo_feature_args[@]}"
   else
     echo "skipped (dependency resolution unavailable)"
   fi
