@@ -52,6 +52,12 @@ jobs:
       - name: Unit test security doc drift checker
         run: python -m unittest scripts.tests.test_check_doc_drift
 
+      - name: Check website parity snippets
+        run: ./scripts/check_website_parity.py
+
+      - name: Unit test website parity checker
+        run: python -m unittest scripts.tests.test_check_website_parity
+
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
