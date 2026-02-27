@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure llvm-tools are available for cargo-llvm-cov
+if command -v rustup >/dev/null 2>&1; then
+  if ! rustup component list --installed | grep -q '^llvm-tools-preview'; then
+    rustup component add llvm-tools-preview
+  fi
+fi
+
 mkdir -p artifacts target
 : > artifacts/test_output.txt
 : > artifacts/clippy-report.txt

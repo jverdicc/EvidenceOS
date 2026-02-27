@@ -18,9 +18,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
 
-      - name: Install Rust nightly (for cargo-fuzz)
+      - name: Install nightly toolchain (for fuzz)
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo tools
@@ -60,6 +60,9 @@ jobs:
 
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Install LLVM/clang (needed by cargo-fuzz on some runner images)
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
 
       - name: Run test evidence gate
         run: ./scripts/test_evidence.sh
