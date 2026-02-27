@@ -69,6 +69,7 @@ jobs:
       - name: Run test evidence gate
         env:
           EVIDENCEOS_CI_STRICT: ${{ github.event_name == 'schedule' && '1' || '0' }}
+          EVIDENCEOS_CI_ALL_FEATURES: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: ./scripts/test_evidence.sh
 
       - name: Check protocol drift
