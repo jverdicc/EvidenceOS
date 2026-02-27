@@ -47,6 +47,8 @@ pub struct PreflightToolCallResponse {
     pub rewrittenParams: Option<Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budgetDelta: Option<BudgetDelta>,
+    #[serde(rename = "paramsHash", skip_serializing_if = "Option::is_none")]
+    pub paramsHash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -148,6 +150,7 @@ impl HttpErr {
                 detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
+                paramsHash: None,
             },
             _source: EvidenceOSError::InvalidArgument,
         }
@@ -163,6 +166,7 @@ impl HttpErr {
                 detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
+                paramsHash: None,
             },
             _source: EvidenceOSError::InvalidArgument,
         }
@@ -178,6 +182,7 @@ impl HttpErr {
                 detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
+                paramsHash: None,
             },
             _source: EvidenceOSError::Frozen,
         }
@@ -198,6 +203,7 @@ impl HttpErr {
                 detail: None,
                 rewrittenParams: None,
                 budgetDelta: None,
+                paramsHash: None,
             },
             _source: EvidenceOSError::Internal,
         }
@@ -232,6 +238,28 @@ pub async fn preflight_tool_call_impl(
     if let Some(agent) = req.agentId.as_deref() {
         validate_ascii_printable_len(agent, 0, 128, "agentId")?;
     }
+    let is_high_risk = state.high_risk_tools.contains(&req.toolName);
+    if is_high_risk
+        && req
+            .sessionId
+            .as_deref()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+    {
+        return Err(HttpErr {
+            status: StatusCode::BAD_REQUEST,
+            kind: "session_required",
+            response: PreflightToolCallResponse {
+                decision: "DENY".to_string(),
+                reason_code: "SESSION_REQUIRED".to_string(),
+                detail: maybe_auditor_detail(headers, "sessionId is required for high-risk tools"),
+                rewrittenParams: None,
+                budgetDelta: None,
+                paramsHash: None,
+            },
+            _source: EvidenceOSError::InvalidArgument,
+        });
+    }
 
     let params_canonical = canonical_json(&req.params)
         .map_err(|_| HttpErr::invalid_argument("invalid params object", "params_canonical"))?;
@@ -259,6 +287,7 @@ pub async fn preflight_tool_call_impl(
     };
 
     let mut response = map_probe_verdict(&probe_verdict, &snapshot, state.hard_freeze_ops);
+    response.paramsHash = Some(params_hash.clone());
     tracing::info!(
         request_id = %request_id,
         tool_name = %req.toolName,
@@ -358,11 +387,21 @@ fn map_probe_verdict(
     snapshot: &ProbeSnapshot,
     hard_freeze_ops: usize,
 ) -> PreflightToolCallResponse {
-    let remaining = hard_freeze_ops.saturating_sub(snapshot.total_requests_window) as u64;
+    let remaining = hard_freeze_ops.saturating_sub(snapshot.total_requests_operation) as u64;
     let budget = Some(BudgetDelta {
         spent: 1,
         remaining,
     });
+    if snapshot.total_requests_operation >= hard_freeze_ops {
+        return PreflightToolCallResponse {
+            decision: "DENY".to_string(),
+            reason_code: "PROBE_FREEZE".to_string(),
+            detail: None,
+            rewrittenParams: None,
+            budgetDelta: budget,
+            paramsHash: None,
+        };
+    }
     match verdict {
         ProbeVerdict::Clean => PreflightToolCallResponse {
             decision: "ALLOW".to_string(),
@@ -370,6 +409,7 @@ fn map_probe_verdict(
             detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
+            paramsHash: None,
         },
         ProbeVerdict::Throttle { reason: _, .. } => PreflightToolCallResponse {
             decision: "DOWNGRADE".to_string(),
@@ -377,6 +417,7 @@ fn map_probe_verdict(
             detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
+            paramsHash: None,
         },
         ProbeVerdict::Escalate { reason: _ } => PreflightToolCallResponse {
             decision: "REQUIRE_HUMAN".to_string(),
@@ -384,6 +425,7 @@ fn map_probe_verdict(
             detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
+            paramsHash: None,
         },
         ProbeVerdict::Freeze { reason: _ } => PreflightToolCallResponse {
             decision: "DENY".to_string(),
@@ -391,6 +433,7 @@ fn map_probe_verdict(
             detail: None,
             rewrittenParams: None,
             budgetDelta: budget,
+            paramsHash: None,
         },
     }
 }
@@ -589,5 +632,127 @@ fn maybe_auditor_detail(headers: &HeaderMap, detail: &str) -> Option<String> {
         Some(detail.to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::ProbeConfig;
+    use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct FixedClock {
+        now: AtomicU64,
+    }
+
+    impl FixedClock {
+        fn new(initial: u64) -> Self {
+            Self {
+                now: AtomicU64::new(initial),
+            }
+        }
+
+        fn set(&self, value: u64) {
+            self.now.store(value, Ordering::Relaxed);
+        }
+    }
+
+    impl ProbeClock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            self.now.load(Ordering::Relaxed)
+        }
+    }
+
+    fn test_state(clock: Arc<dyn ProbeClock>) -> HttpPreflightState {
+        let cfg = DaemonConfig {
+            preflight_require_bearer_token: Some("token".to_string()),
+            preflight_high_risk_tools: vec!["shell.exec".to_string()],
+            ..DaemonConfig::default()
+        };
+
+        HttpPreflightState {
+            cfg,
+            telemetry: Arc::new(Telemetry::new().expect("telemetry")),
+            probe: Arc::new(Mutex::new(ProbeDetector::new(ProbeConfig {
+                freeze_total_requests: 99,
+                ..ProbeConfig::default()
+            }))),
+            policy_oracles: Arc::new(Vec::new()),
+            hard_freeze_ops: 3,
+            clock,
+            rate_state: Arc::new(Mutex::new(RateLimitState::default())),
+            high_risk_tools: Arc::new(HashSet::from(["shell.exec".to_string()])),
+        }
+    }
+
+    fn test_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token"));
+        headers.insert(
+            HeaderName::from_static("x-request-id"),
+            HeaderValue::from_static("req-1"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn budget_remaining_is_monotonic_per_operation() {
+        let clock_impl = Arc::new(FixedClock::new(1));
+        let state = test_state(clock_impl.clone());
+        let headers = test_headers();
+
+        for (idx, expected_remaining) in [2_u64, 1, 0].into_iter().enumerate() {
+            clock_impl.set((idx + 1) as u64);
+            let body = json!({
+                "toolName": "lowrisk.read",
+                "params": {"k": idx},
+                "sessionId": "session-1",
+                "agentId": "agent-1"
+            })
+            .to_string();
+            let response = preflight_tool_call_impl(&state, &headers, body.as_bytes())
+                .await
+                .expect("preflight response");
+            let budget = response.budgetDelta.expect("budget present");
+            assert_eq!(budget.remaining, expected_remaining);
+        }
+
+        clock_impl.set(10);
+        let body = json!({
+            "toolName": "lowrisk.read",
+            "params": {"k": 9},
+            "sessionId": "session-1",
+            "agentId": "agent-1"
+        })
+        .to_string();
+        let response = preflight_tool_call_impl(&state, &headers, body.as_bytes())
+            .await
+            .expect("preflight response");
+        assert_eq!(response.decision, "DENY");
+        assert_eq!(response.reason_code, "PROBE_FREEZE");
+        assert_eq!(response.budgetDelta.expect("budget present").remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn high_risk_requires_session_id() {
+        let clock_impl = Arc::new(FixedClock::new(1));
+        let state = test_state(clock_impl);
+        let headers = test_headers();
+        let body = json!({
+            "toolName": "shell.exec",
+            "params": {"command": "echo hi"},
+            "agentId": "agent-1"
+        })
+        .to_string();
+
+        let err = preflight_tool_call_impl(&state, &headers, body.as_bytes())
+            .await
+            .expect_err("missing session should fail");
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.response.decision, "DENY");
+        assert_eq!(err.response.reason_code, "SESSION_REQUIRED");
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -199,6 +199,28 @@ pub struct ProbeSnapshot {
     pub total_requests_window: usize,
     pub unique_semantic_hashes_window: usize,
     pub distinct_topics_window: usize,
+    pub total_requests_operation: usize,
+    pub unique_semantic_hashes_operation: usize,
+    pub distinct_topics_operation: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProbeOperationState {
+    total_requests: usize,
+    semantic_hashes: HashSet<String>,
+    topics: HashSet<String>,
+}
+
+impl ProbeOperationState {
+    fn observe(&mut self, semantic_hash: &str, topic_id: &str, cap: usize) {
+        self.total_requests = self.total_requests.saturating_add(1);
+        if self.semantic_hashes.len() < cap {
+            self.semantic_hashes.insert(semantic_hash.to_string());
+        }
+        if self.topics.len() < cap {
+            self.topics.insert(topic_id.to_string());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -206,6 +228,7 @@ pub struct ProbeDetector {
     cfg: ProbeConfig,
     principal_state: HashMap<String, ProbeWindowState>,
     operation_state: HashMap<(String, String), ProbeWindowState>,
+    operation_cumulative: HashMap<(String, String), ProbeOperationState>,
 }
 
 impl ProbeDetector {
@@ -214,6 +237,7 @@ impl ProbeDetector {
             cfg,
             principal_state: HashMap::new(),
             operation_state: HashMap::new(),
+            operation_cumulative: HashMap::new(),
         }
     }
 
@@ -238,6 +262,11 @@ impl ProbeDetector {
         op_bucket.trim(cutoff);
         op_bucket.observe(now_ms, &obs.semantic_hash, &obs.topic_id);
 
+        let op_key = (obs.principal_id.clone(), obs.operation_id.clone());
+        let op_cap = 4096usize;
+        let op_cumulative = self.operation_cumulative.entry(op_key).or_default();
+        op_cumulative.observe(&obs.semantic_hash, &obs.topic_id, op_cap);
+
         let snapshot = ProbeSnapshot {
             total_requests_window: principal_bucket
                 .total_requests_window
@@ -248,6 +277,9 @@ impl ProbeDetector {
             distinct_topics_window: principal_bucket
                 .distinct_topics_window()
                 .max(op_bucket.distinct_topics_window()),
+            total_requests_operation: op_cumulative.total_requests,
+            unique_semantic_hashes_operation: op_cumulative.semantic_hashes.len(),
+            distinct_topics_operation: op_cumulative.topics.len(),
         };
 
         let verdict = evaluate(&self.cfg, &snapshot);
@@ -407,7 +439,24 @@ mod tests {
                 prop_assert!(snapshot.total_requests_window <= 64);
                 prop_assert!(snapshot.unique_semantic_hashes_window <= 64);
                 prop_assert!(snapshot.distinct_topics_window <= 64);
+                prop_assert!(snapshot.total_requests_operation <= 64);
+                prop_assert!(snapshot.unique_semantic_hashes_operation <= 64);
+                prop_assert!(snapshot.distinct_topics_operation <= 64);
             }
         }
+    }
+
+    #[test]
+    fn operation_counters_persist_across_window_expiry() {
+        let mut d = ProbeDetector::new(cfg());
+        let (_v1, s1) = d.observe(&obs("a", "t1"), 1);
+        assert_eq!(s1.total_requests_window, 1);
+        assert_eq!(s1.total_requests_operation, 1);
+
+        let (_v2, s2) = d.observe(&obs("b", "t2"), 500);
+        assert_eq!(s2.total_requests_window, 1);
+        assert_eq!(s2.total_requests_operation, 2);
+        assert_eq!(s2.unique_semantic_hashes_operation, 2);
+        assert_eq!(s2.distinct_topics_operation, 2);
     }
 }
