@@ -127,6 +127,10 @@ struct Args {
     preflight_timeout_ms: u64,
     #[arg(long, default_value_t = 50)]
     preflight_rate_limit_rps: u32,
+    #[arg(long, default_value_t = 4096)]
+    postflight_default_max_output_bytes: usize,
+    #[arg(long, default_value_t = 256)]
+    postflight_preview_chars: usize,
     #[arg(long)]
     envelope_packs_dir: Option<String>,
     #[arg(long)]
@@ -528,6 +532,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         preflight_high_risk_tools: args.preflight_high_risk_tools.clone(),
         preflight_timeout_ms: args.preflight_timeout_ms,
         preflight_rate_limit_rps: args.preflight_rate_limit_rps,
+        postflight_default_max_output_bytes: args.postflight_default_max_output_bytes,
+        postflight_preview_chars: args.postflight_preview_chars,
         envelope_packs_dir: envelope_packs_dir.clone(),
         trusted_envelope_issuer_keys: args
             .trusted_envelope_issuer_keys

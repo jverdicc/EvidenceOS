@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::{HeaderMap, HeaderValue};
@@ -7,7 +8,7 @@ use serde_json::{json, Map, Value};
 
 use crate::config::DaemonConfig;
 use crate::http_preflight::{
-    preflight_tool_call_impl, stable_params_hash, HttpPreflightState, RateLimitState,
+    postflight_tool_call_impl, preflight_tool_call_impl, stable_params_hash, HttpPreflightState, RateLimitState,
 };
 use crate::probe::{ProbeClock, ProbeConfig, ProbeDetector};
 use crate::telemetry::Telemetry;
@@ -34,6 +35,7 @@ fn state(cfg: DaemonConfig) -> HttpPreflightState {
         clock: Arc::new(FixedClock),
         rate_state: Arc::new(Mutex::new(RateLimitState::default())),
         high_risk_tools: Arc::new(cfg.preflight_high_risk_tools.into_iter().collect()),
+        postflight_etl_path: PathBuf::from("artifacts/postflight-unit.etl.ndjson"),
     }
 }
 
@@ -227,4 +229,52 @@ async fn invalid_inputs_use_constant_public_error_shape() {
         assert!(err.response.detail.is_none());
     }
     assert_eq!(lengths.len(), 1);
+}
+
+
+#[tokio::test]
+async fn postflight_redacts_large_output_deterministically() {
+    let st = state(DaemonConfig { postflight_default_max_output_bytes: 8, ..DaemonConfig::default() });
+    let headers = request_headers("req-post-1");
+    let body = json!({
+        "toolName":"exec",
+        "sessionId":"s1",
+        "paramsHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status":"ok",
+        "output": {"x":"abcdefghijklmnopqrstuvwxyz"}
+    }).to_string();
+    let r1 = postflight_tool_call_impl(&st, &headers, body.as_bytes()).await.expect("ok");
+    let r2 = postflight_tool_call_impl(&st, &headers, body.as_bytes()).await.expect("ok");
+    assert_eq!(r1.outputRewrite, r2.outputRewrite);
+    assert_eq!(r1.decision, "REDACT");
+}
+
+#[tokio::test]
+async fn postflight_budget_decreases_monotonically_per_operation_for_unique_outputs() {
+    let st = state(DaemonConfig::default());
+    let headers = request_headers("req-post-2");
+    let mk = |idx| json!({
+        "toolName":"tool.a",
+        "sessionId":"op1",
+        "paramsHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status":"ok",
+        "output": {"n": idx}
+    }).to_string();
+    let r1 = postflight_tool_call_impl(&st, &headers, mk(1).as_bytes()).await.expect("r1");
+    let r2 = postflight_tool_call_impl(&st, &headers, mk(2).as_bytes()).await.expect("r2");
+    assert!(r2.budgetRemainingBits.unwrap_or(0.0) <= r1.budgetRemainingBits.unwrap_or(0.0));
+}
+
+#[tokio::test]
+async fn postflight_requires_session_id_for_high_risk_tools() {
+    let st = state(DaemonConfig::default());
+    let headers = request_headers("req-post-3");
+    let body = json!({
+        "toolName":"exec",
+        "paramsHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "status":"ok",
+        "output": {"ok":true}
+    }).to_string();
+    let err = postflight_tool_call_impl(&st, &headers, body.as_bytes()).await.expect_err("must fail");
+    assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 }
