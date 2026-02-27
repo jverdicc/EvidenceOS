@@ -12,34 +12,27 @@ EvidenceOS is a production-oriented verification kernel for the Universal Verifi
 
 ## Scope & terminology (read this if you're thinking "runtime governance")
 
-EvidenceOS is a **deterministic settlement kernel** for **discrete claim capsules** under adaptive interaction.
-It enforces a one-way-door lifecycle (`CreateClaim -> Freeze -> Seal -> Execute`) and meters oracle outputs
-so adaptivity leakage is budgeted rather than ignored.
+EvidenceOS is a deterministic settlement kernel for discrete claim capsules under adaptive interaction. It enforces a one-way-door lifecycle (CreateClaim -> Freeze -> Seal -> Execute) and meters oracle outputs so adaptivity leakage is budgeted rather than ignored.
 
-**Terminology note:** when this project says **“real-time”** it means **deterministic, low-tail-latency, high-frequency
-transaction processing of capsules** (matching-engine style). It does **not** mean EvidenceOS ingests or governs a
-continuous, streaming agent behavior trace.
+Terminology note: when this project says “real-time” it means deterministic, low-tail-latency, high-frequency transaction processing of capsules (matching-engine style). It does not mean EvidenceOS ingests or governs a continuous, streaming agent behavior trace.
 
-**Continuous agent governance** is supported via an **adapter/sidecar** (in DiscOS/OpenClaw) that:
-1) watches for high-stakes agent actions/tool calls,
-2) snapshots only the falsifiable artifact(s),
-3) compiles them into an admissible capsule,
-4) submits to EvidenceOS for settlement,
-5) reinjects the signed receipt back into the agent loop.
+Continuous agent governance is supported via an adapter/sidecar (in DiscOS/OpenClaw) that:
 
-This is the **adapter/sidecar for continuous agents** integration pattern.
+- watches for high-stakes agent actions/tool calls,
+- snapshots only the falsifiable artifact(s),
+- compiles them into an admissible capsule,
+- submits to EvidenceOS for settlement,
+- reinjects the signed receipt back into the agent loop.
 
-See: docs/REALTIME_VS_RUNTIME.md and docs/AGENT_ADAPTER_CONTRACT.md
+This is the adapter/sidecar for continuous agents integration pattern.
+
+See: [`docs/REALTIME_VS_RUNTIME.md`](docs/REALTIME_VS_RUNTIME.md) and [`docs/AGENT_ADAPTER_CONTRACT.md`](docs/AGENT_ADAPTER_CONTRACT.md)
 
 ## What UVP is (in 60 seconds)
 
-UVP is a kernel + userland architecture for certifying claims under adaptive interaction.
-DiscOS (separate repo) is untrusted discovery/userland that proposes claim capsules.
-EvidenceOS (this repo) is the trusted kernel that executes capsules on holdouts.
-Every oracle response is canonicalized, metered, and logged so leakage is budgeted rather than ignored.
-The protocol tracks evidence wealth (W) and adaptivity leakage (k) across time, identities, and interfaces.
-This makes coordinated probing measurable, expensive, and auditable instead of silently cumulative.
-The result is a verification system with explicit risk posture, deterministic settlement, and revocation-ready evidence trails.
+UVP is a kernel + userland architecture for certifying claims under adaptive interaction. DiscOS (separate repo) is untrusted discovery/userland that proposes claim capsules. EvidenceOS (this repo) is the trusted kernel that executes capsules on holdouts. Every oracle response is canonicalized, metered, and logged so leakage is budgeted rather than ignored.
+
+The protocol tracks evidence wealth (W) and adaptivity leakage (k) across time, identities, and interfaces. This makes coordinated probing measurable, expensive, and auditable instead of silently cumulative. The result is a verification system with explicit risk posture, deterministic settlement, and revocation-ready evidence trails.
 
 ## Start here (2-minute on-ramp)
 
@@ -51,20 +44,22 @@ The result is a verification system with explicit risk posture, deterministic se
 6. **Continuous-agent adapter trust boundary:** [`docs/AGENT_ADAPTER_CONTRACT.md`](docs/AGENT_ADAPTER_CONTRACT.md)
 7. **Hands-on adversarial demo:** [`examples/exfiltration_demo/`](examples/exfiltration_demo/)
 8. **Epistemic Trial Harness (clinical-trial style evaluation):** [`docs/EPISTEMIC_TRIAL_HARNESS.md`](docs/EPISTEMIC_TRIAL_HARNESS.md) ([analysis pipeline](docs/TRIAL_HARNESS_ANALYSIS.md))
-   - Run it now:
 
-     ```bash
-     python -m venv .venv && source .venv/bin/activate
-     python -m pip install -e '.[analysis]'
-     python -m analysis.epistemic_trial.report --help
-     # Minimal full run (requires an ETL file):
-     python -m analysis.epistemic_trial.report --etl path/to/etl.log --out out/trial_report
-     ```
+   Run it now:
+
+   ```bash
+   python -m venv .venv && source .venv/bin/activate
+   python -m pip install -e '.[analysis]'
+   python -m analysis.epistemic_trial.report --help
+
+   # Minimal full run (requires an ETL file):
+   python -m analysis.epistemic_trial.report --etl path/to/etl.log --out out/trial_report
+   ```
 9. **Role-based reader map:** [`docs/reader_map.md`](docs/reader_map.md)
 10. **Security implementation docs:** [`docs/HOLDOUT_ENCRYPTION.md`](docs/HOLDOUT_ENCRYPTION.md), [`docs/TEE.md`](docs/TEE.md), [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)
 
-> 🚩 **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)
-> 🚩 **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
+> **Read this for risk posture and dual-use analysis:** [`docs/POSITIONING.md`](docs/POSITIONING.md)  
+> **Dual-use / misuse policy (deployment requirements):** [`docs/DUAL_USE_AND_MISUSE.md`](docs/DUAL_USE_AND_MISUSE.md)
 
 New to the project or coming from outside systems engineering? Start with [`docs/START_HERE.md`](docs/START_HERE.md) for additional guided reading paths.
 
