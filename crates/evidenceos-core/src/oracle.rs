@@ -228,7 +228,7 @@ impl OracleResolution {
 
     pub fn ttl_expired(&self, current_epoch: u64) -> bool {
         self.ttl_epochs
-            .map(|ttl| current_epoch.saturating_sub(self.calibrated_at_epoch) > ttl)
+            .map(|ttl| current_epoch.saturating_sub(self.calibrated_at_epoch) >= ttl)
             .unwrap_or(false)
     }
 
@@ -574,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn ttl_expired_true_when_epoch_delta_exceeds() {
+    fn ttl_expired_true_when_epoch_delta_reaches_ttl() {
         let mut r = OracleResolution::new(8, 0.01).expect("resolution");
         r.calibrated_at_epoch = 10;
         r.ttl_epochs = Some(5);
-        assert!(!r.ttl_expired(15));
+        assert!(r.ttl_expired(15));
         assert!(r.ttl_expired(16));
     }
 
@@ -787,10 +787,11 @@ mod matrix_tests {
         r.ttl_epochs = None;
         assert!(!r.ttl_expired(10));
         r.ttl_epochs = Some(0);
-        assert!(!r.ttl_expired(10));
+        assert!(r.ttl_expired(10));
         assert!(r.ttl_expired(11));
         r.ttl_epochs = Some(1);
-        assert!(!r.ttl_expired(11));
+        assert!(!r.ttl_expired(10));
+        assert!(r.ttl_expired(11));
         assert!(r.ttl_expired(12));
     }
     #[test]
@@ -917,7 +918,7 @@ mod matrix_tests {
         #![proptest_config(ProptestConfig::with_cases(24))]
         #[test] fn oracle_roundtrip_varlen_symbols_proptest(num in 2u32..4096u32, b in 0u32..4095u32) { prop_assume!(b<num); let r=OracleResolution::new(num,0.0).expect("r"); let enc=r.encode_bucket(b).expect("e"); let dec=r.decode_bucket(&enc).expect("d"); prop_assert_eq!(dec,b); }
         #[test] fn tie_breaker_proptest(v in 0.0f64..1.0f64) { let r=OracleResolution::new(16,0.0).expect("r"); let b=r.quantize_unit_interval(v).expect("q"); prop_assert!(b<16); }
-        #[test] fn ttl_expiry_proptest(base in 0u64..1000u64, ttl in 1u64..100u64) { let mut r=OracleResolution::new(8,0.0).expect("r"); r.calibrated_at_epoch=base; r.ttl_epochs=Some(ttl); prop_assert!(!r.ttl_expired(base+ttl)); prop_assert!(r.ttl_expired(base+ttl+1)); }
+        #[test] fn ttl_expiry_proptest(base in 0u64..1000u64, ttl in 1u64..100u64) { let mut r=OracleResolution::new(8,0.0).expect("r"); r.calibrated_at_epoch=base; r.ttl_epochs=Some(ttl); prop_assert!(r.ttl_expired(base+ttl)); prop_assert!(r.ttl_expired(base+ttl+1)); }
         #[test] fn ttl_monotone_proptest(calibrated in 0u64..10_000u64, ttl in 1u64..1024u64, current_a in 0u64..12_000u64, current_b in 0u64..12_000u64) {
             let mut r=OracleResolution::new(8,0.0).expect("r");
             r.calibrated_at_epoch=calibrated;
