@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
         .map(|l| l.with_budgets(input.k_budget, input.access_budget))
         .unwrap_or_else(|_| ConservationLedger::new(0.5).expect("fixed alpha must be valid"));
 
-    let mut frozen = ledger.frozen;
+    let mut frozen = ledger.is_frozen();
     for op in input.ops {
         let result = match op {
             Op::ChargeAll {
@@ -69,9 +69,9 @@ fuzz_target!(|data: &[u8]| {
             frozen = true;
         }
 
-        assert!(ledger.k_bits_total >= 0.0 || ledger.k_bits_total.is_nan());
-        assert!(ledger.access_credit_spent >= 0.0 || ledger.access_credit_spent.is_nan());
-        assert!(ledger.wealth.is_finite());
-        assert!(ledger.wealth > 0.0 || ledger.wealth == 0.0);
+        assert!(ledger.k_bits_total() >= 0.0 || ledger.k_bits_total().is_nan());
+        assert!(ledger.access_credit_spent() >= 0.0 || ledger.access_credit_spent().is_nan());
+        assert!(ledger.wealth().is_finite());
+        assert!(ledger.wealth() >= 0.0);
     }
 });

@@ -24,6 +24,11 @@ Coverage policy consistency check passed (threshold: 95%)
 - `artifacts/fuzz_aspec_verify.log`
 - `artifacts/fuzz_etl_read_entry.log`
 - `artifacts/fuzz_structured_claim_validate.log`
+- `artifacts/fuzz_ledger_ops.log`
+- `artifacts/fuzz_oracle_roundtrip.log`
+- `artifacts/fuzz_etl_ops.log`
+- `artifacts/fuzz_probe_detector.log`
+- `artifacts/fuzz_daemon_decode_limits.log`
 
 ## Gates
 
