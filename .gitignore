@@ -7,3 +7,5 @@ artifacts/*
 !artifacts/forc10/
 !artifacts/forc10/**
 artifacts/forc10/out/
+crates/*/artifacts/
+proptest-regressions/
