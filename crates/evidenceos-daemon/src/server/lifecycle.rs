@@ -38,6 +38,12 @@ impl EvidenceOsService {
             claim.state = ClaimState::Frozen;
             return Ok(());
         }
+        if (claim.state == ClaimState::Uncommitted || claim.state == ClaimState::Frozen)
+            && to == ClaimState::Stale
+        {
+            claim.state = ClaimState::Stale;
+            return Ok(());
+        }
         if to == ClaimState::Committed {
             return Err(Status::failed_precondition(
                 "invalid claim state transition",

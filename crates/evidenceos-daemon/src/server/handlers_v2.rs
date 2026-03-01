@@ -1102,19 +1102,31 @@ impl EvidenceOsV2 for EvidenceOsService {
             reserved_expires_at_unix_ms,
         };
 
-        self.state
-            .topic_pools
-            .lock()
-            .entry(topic.topic_id)
-            .or_insert(
-                TopicBudgetPool::new(
-                    hex::encode(topic.topic_id),
-                    lane_cfg.k_bits_budget,
-                    lane_cfg.access_credit_budget,
-                )
-                .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
-            );
-        let holdout_scope = self.holdout_pool_scope;
+        let created_topic_pool = {
+            let mut topic_pools = self.state.topic_pools.lock();
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                topic_pools.entry(topic.topic_id)
+            {
+                entry.insert(
+                    TopicBudgetPool::new(
+                        hex::encode(topic.topic_id),
+                        lane_cfg.k_bits_budget,
+                        lane_cfg.access_credit_budget,
+                    )
+                    .map_err(|_| Status::invalid_argument("invalid topic budget"))?,
+                );
+                true
+            } else {
+                false
+            }
+        };
+        let holdout_scope = self.holdout_scope_for(&holdout_descriptor);
+        let holdout_k_budget = holdout_descriptor
+            .holdout_k_bits_budget
+            .unwrap_or(self.default_holdout_k_bits_budget);
+        let holdout_access_budget = holdout_descriptor
+            .holdout_access_credit_budget
+            .unwrap_or(self.default_holdout_access_credit_budget);
         let holdout_keys =
             self.holdout_pool_keys(holdout_handle_id, &caller.principal_id, holdout_scope);
         {
@@ -1124,8 +1136,8 @@ impl EvidenceOsV2 for EvidenceOsService {
                     .entry(holdout_key.clone())
                     .or_insert(HoldoutBudgetPool::new(
                         holdout_key.clone(),
-                        self.default_holdout_k_bits_budget,
-                        self.default_holdout_access_credit_budget,
+                        holdout_k_budget,
+                        holdout_access_budget,
                     )?);
             }
         }
@@ -1148,6 +1160,9 @@ impl EvidenceOsV2 for EvidenceOsService {
                 .reserve(worst_case_taxed, worst_case_taxed)
                 .is_err()
             {
+                if created_topic_pool {
+                    topic_pools.remove(&claim.topic_id);
+                }
                 return Err(Status::failed_precondition("topic budget exhausted"));
             }
             let mut reserved_holdout_keys: Vec<&HoldoutPoolKey> = Vec::new();

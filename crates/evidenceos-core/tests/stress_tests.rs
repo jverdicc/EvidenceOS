@@ -73,7 +73,9 @@ fn boundary_transition_from_active_to_frozen_has_no_off_by_one_leakage() {
         "exact boundary charge should be accepted"
     );
 
-    let overflow_result = pool.charge(f64::EPSILON * 2.0);
+    // At a magnitude of 64.0, tiny sub-ULP additions can round away; use a
+    // representable excess that is strictly greater than the EPSILON tolerance.
+    let overflow_result = pool.charge(1e-12);
     assert!(matches!(overflow_result, Err(EvidenceOSError::Frozen)));
     assert!(pool.frozen);
 
