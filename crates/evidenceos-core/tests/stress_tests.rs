@@ -79,6 +79,9 @@ fn boundary_transition_from_active_to_frozen_has_no_off_by_one_leakage() {
     assert!(matches!(overflow_result, Err(EvidenceOSError::Frozen)));
     assert!(pool.frozen);
 
+    let post_frozen_result = pool.charge(1.0);
+    assert!(matches!(post_frozen_result, Err(EvidenceOSError::Frozen)));
+
     let spent = pool.k_bits_spent();
     assert!(
         (spent - budget).abs() <= f64::EPSILON,
