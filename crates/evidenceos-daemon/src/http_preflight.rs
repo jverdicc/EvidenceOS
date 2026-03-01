@@ -55,7 +55,6 @@ pub struct PreflightToolCallResponse {
     pub paramsHash: Option<String>,
 }
 
-
 #[derive(Debug, Clone, Deserialize)]
 #[allow(non_snake_case)]
 pub struct PostflightToolCallRequest {
@@ -171,7 +170,6 @@ async fn preflight_tool_call(
         }
     }
 }
-
 
 async fn postflight_tool_call(
     State(state): State<HttpPreflightState>,
@@ -322,7 +320,10 @@ pub async fn preflight_tool_call_impl(
         validate_hex_64(client_hash)
             .map_err(|_| HttpErr::invalid_argument("invalid paramsHash", "invalid_params_hash"))?;
         if client_hash != params_hash {
-            return Err(HttpErr::invalid_argument("paramsHash mismatch", "params_hash_mismatch"));
+            return Err(HttpErr::invalid_argument(
+                "paramsHash mismatch",
+                "params_hash_mismatch",
+            ));
         }
     }
 
@@ -411,7 +412,6 @@ pub async fn preflight_tool_call_impl(
     Ok(response)
 }
 
-
 #[derive(Debug)]
 pub struct PostflightHttpErr {
     pub(crate) status: StatusCode,
@@ -443,38 +443,57 @@ pub async fn postflight_tool_call_impl(
 ) -> Result<PostflightToolCallResponse, PostflightHttpErr> {
     validate_authorization(headers, &state.cfg)
         .map_err(|_| PostflightHttpErr::invalid("unauthorized"))?;
-    let _ = validate_request_id(headers).map_err(|_| PostflightHttpErr::invalid("missing_request_id"))?;
-    let req: PostflightToolCallRequest = serde_json::from_slice(body)
-        .map_err(|_| PostflightHttpErr::invalid("invalid_json"))?;
+    let _ = validate_request_id(headers)
+        .map_err(|_| PostflightHttpErr::invalid("missing_request_id"))?;
+    let req: PostflightToolCallRequest =
+        serde_json::from_slice(body).map_err(|_| PostflightHttpErr::invalid("invalid_json"))?;
     validate_ascii_printable_len(&req.toolName, 1, 128, "toolName")
         .map_err(|_| PostflightHttpErr::invalid("invalid_tool_name"))?;
-    validate_hex_64(&req.paramsHash).map_err(|_| PostflightHttpErr::invalid("invalid_params_hash"))?;
+    validate_hex_64(&req.paramsHash)
+        .map_err(|_| PostflightHttpErr::invalid("invalid_params_hash"))?;
     if let Some(h) = req.outputHash.as_deref() {
         validate_hex_64(h).map_err(|_| PostflightHttpErr::invalid("invalid_output_hash"))?;
     }
     if let Some(h) = req.preflightReceiptHash.as_deref() {
-        validate_hex_64(h).map_err(|_| PostflightHttpErr::invalid("invalid_preflight_receipt_hash"))?;
+        validate_hex_64(h)
+            .map_err(|_| PostflightHttpErr::invalid("invalid_preflight_receipt_hash"))?;
     }
     if let Some(session) = req.sessionId.as_deref() {
         validate_ascii_printable_len(session, 0, 128, "sessionId")
             .map_err(|_| PostflightHttpErr::invalid("invalid_session_id"))?;
     }
     if state.high_risk_tools.contains(&req.toolName)
-        && req.sessionId.as_deref().map(|s| s.is_empty()).unwrap_or(true)
+        && req
+            .sessionId
+            .as_deref()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
     {
         return Err(PostflightHttpErr::invalid("session_required"));
     }
 
-    let output_json = req.output.as_ref().map(|v| serde_json::to_vec(v).unwrap_or_default());
-    let output_len = output_json.as_ref().map(|v| v.len() as u64).or(req.outputBytes).unwrap_or(0);
+    let output_json = req
+        .output
+        .as_ref()
+        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+    let output_len = output_json
+        .as_ref()
+        .map(|v| v.len() as u64)
+        .or(req.outputBytes)
+        .unwrap_or(0);
     let output_hash = req
         .outputHash
         .clone()
         .or_else(|| output_json.as_ref().map(|v| hex::encode(sha256_bytes(v))));
 
-    let operation = req.sessionId.clone().unwrap_or_else(|| "no-session".to_string());
+    let operation = req
+        .sessionId
+        .clone()
+        .unwrap_or_else(|| "no-session".to_string());
     let principal = principal_id_from_auth(headers);
-    let semantic_hash = output_hash.clone().unwrap_or_else(|| req.paramsHash.clone());
+    let semantic_hash = output_hash
+        .clone()
+        .unwrap_or_else(|| req.paramsHash.clone());
     let now_ms = state.clock.now_ms();
     let (probe_verdict, snapshot) = {
         let mut guard = state.probe.lock();
@@ -505,7 +524,10 @@ pub async fn postflight_tool_call_impl(
         if output_len > max_bytes {
             decision = "REDACT".to_string();
             let preview = serde_json::to_string(raw).unwrap_or_default();
-            let preview: String = preview.chars().take(state.cfg.postflight_preview_chars).collect();
+            let preview: String = preview
+                .chars()
+                .take(state.cfg.postflight_preview_chars)
+                .collect();
             output_rewrite = Some(json!({
                 "truncated": true,
                 "len": output_len,
@@ -519,7 +541,8 @@ pub async fn postflight_tool_call_impl(
     let budget_delta = 1.0;
     let budget_remaining = state
         .hard_freeze_ops
-        .saturating_sub(snapshot.unique_semantic_hashes_operation) as f64;
+        .saturating_sub(snapshot.unique_semantic_hashes_operation)
+        as f64;
 
     let mut response = PostflightToolCallResponse {
         decision,
@@ -540,7 +563,8 @@ pub async fn postflight_tool_call_impl(
         },
         "response": response.clone(),
     });
-    let canonical = canonical_json(&receipt_payload).map_err(|_| PostflightHttpErr::invalid("receipt_canonical"))?;
+    let canonical = canonical_json(&receipt_payload)
+        .map_err(|_| PostflightHttpErr::invalid("receipt_canonical"))?;
     response.receiptHash = hex::encode(sha256_bytes(&canonical));
 
     let etl_record = json!({
@@ -564,8 +588,10 @@ fn append_postflight_etl(path: &PathBuf, record: &Value) -> Result<(), std::io::
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, record)?;
-    file.write_all(b"
-")?;
+    file.write_all(
+        b"
+",
+    )?;
     Ok(())
 }
 
@@ -910,6 +936,7 @@ mod tests {
             clock,
             rate_state: Arc::new(Mutex::new(RateLimitState::default())),
             high_risk_tools: Arc::new(HashSet::from(["shell.exec".to_string()])),
+            postflight_etl_path: PathBuf::from("artifacts/postflight.etl.ndjson"),
         }
     }
 
