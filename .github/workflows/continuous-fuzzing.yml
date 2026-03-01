@@ -1,0 +1,101 @@
+name: Continuous Fuzzing
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # nightly at 2am UTC
+  pull_request:
+    branches: [main]
+  workflow_dispatch:        # manual trigger for on-demand runs
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false      # run all targets even if one crashes
+      matrix:
+        target:
+          - fuzz_aspec_verify
+          - fuzz_ledger_ops
+          - fuzz_etl_ops
+          - fuzz_etl_read_entry
+          - fuzz_probe_detector
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      # Restore corpus from previous runs.
+      # Cache key includes target name so each fuzzer has
+      # its own independent corpus that grows over time.
+      # restore-keys falls back to any prior corpus for this
+      # target if the exact key isn't found (e.g. first run).
+      - name: Restore fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      # Create corpus dir if it doesn't exist yet (first run)
+      - name: Ensure corpus directory exists
+        run: mkdir -p fuzz/corpus/${{ matrix.target }}
+
+      # Run fuzzer for exactly 5 minutes.
+      # -max_total_time=300 is a libFuzzer flag passed after --
+      # New corpus entries discovered during this run are saved
+      # to fuzz/corpus/$target and will be cached after the job.
+      - name: Run fuzzer
+        run: |
+          cargo fuzz run ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} \
+            -- \
+            -max_total_time=300 \
+            -print_final_stats=1
+        env:
+          RUST_BACKTRACE: 1
+
+      # If the fuzzer found a crash, artifacts/ will contain
+      # the exact input that caused it. Upload immediately so
+      # you can reproduce locally even if the job is cleaned up.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # Generate coverage report from the accumulated corpus.
+      # This shows which code paths the fuzzer has actually reached
+      # after this run — proof that the corpus is growing.
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov \
+            fuzz \
+            --fuzz-target ${{ matrix.target }} \
+            --corpus fuzz/corpus/${{ matrix.target }} \
+            --html \
+            --output-dir coverage/${{ matrix.target }}
+        continue-on-error: true   # coverage failure never blocks CI
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-coverage-${{ matrix.target }}-${{ github.run_id }}
+          path: coverage/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
