@@ -234,7 +234,7 @@ pub struct ClaimCapsule {
     pub trial_nonce_hex: Option<String>,
     #[serde(default)]
     pub trial_commitment_hash_hex: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_config_hash_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial: Option<TrialMetadata>,
