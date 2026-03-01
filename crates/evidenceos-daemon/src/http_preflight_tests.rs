@@ -92,7 +92,7 @@ async fn requires_bearer_token_when_configured() {
         ..DaemonConfig::default()
     };
     let st = state(cfg);
-    let body = json!({"toolName":"exec","params":{}}).to_string();
+    let body = json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"a"}).to_string();
     let err = preflight_tool_call_impl(&st, &request_headers("req-4"), body.as_bytes())
         .await
         .expect_err("must reject");
@@ -120,7 +120,7 @@ async fn probe_freeze_after_threshold() {
 async fn requires_request_id_header() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
-    let body = json!({"toolName":"exec","params":{}}).to_string();
+    let body = json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"a"}).to_string();
     let err = preflight_tool_call_impl(&st, &HeaderMap::new(), body.as_bytes())
         .await
         .expect_err("must reject");
@@ -132,7 +132,7 @@ async fn requires_request_id_header() {
 async fn accepts_legacy_request_id_alias_header() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
-    let body = json!({"toolName":"exec","params":{}}).to_string();
+    let body = json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"a"}).to_string();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -150,7 +150,7 @@ async fn accepts_legacy_request_id_alias_header() {
 async fn prefers_x_request_id_when_both_request_id_headers_present() {
     let cfg = DaemonConfig::default();
     let st = state(cfg);
-    let body = json!({"toolName":"exec","params":{}}).to_string();
+    let body = json!({"toolName":"exec","params":{},"sessionId":"s","agentId":"a"}).to_string();
 
     let mut headers = HeaderMap::new();
     headers.insert("x-request-id", HeaderValue::from_static("preferred-id"));

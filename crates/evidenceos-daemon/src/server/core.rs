@@ -1259,7 +1259,7 @@ fn strict_pln_padding_duration(elapsed: Duration, floor_ms: u64) -> Option<Durat
         return None;
     }
     let floor = Duration::from_millis(floor_ms);
-    (elapsed < floor).then_some(floor - elapsed)
+    (elapsed < floor).then(|| floor - elapsed)
 }
 
 fn validate_trial_harness_variation(
@@ -1880,60 +1880,63 @@ impl EvidenceOsService {
             return Ok(0);
         }
 
-        let mut topic_pools = self.state.topic_pools.lock();
-        let mut holdout_pools = self.state.holdout_pools.lock();
-        let mut claims = self.state.claims.lock();
         let mut expired_count = 0usize;
+        {
+            let mut topic_pools = self.state.topic_pools.lock();
+            let mut holdout_pools = self.state.holdout_pools.lock();
+            let mut claims = self.state.claims.lock();
 
-        for claim_id in expired_claims {
-            let Some(claim) = claims.get_mut(&claim_id) else {
-                continue;
-            };
-            if claim.reserved_k_bits <= 0.0 && claim.reserved_access_credit <= 0.0 {
-                continue;
-            }
-            if claim.reserved_expires_at_unix_ms == 0 || now_ms <= claim.reserved_expires_at_unix_ms
-            {
-                continue;
-            }
-            if claim.state != ClaimState::Uncommitted && claim.state != ClaimState::Frozen {
-                continue;
-            }
+            for claim_id in expired_claims {
+                let Some(claim) = claims.get_mut(&claim_id) else {
+                    continue;
+                };
+                if claim.reserved_k_bits <= 0.0 && claim.reserved_access_credit <= 0.0 {
+                    continue;
+                }
+                if claim.reserved_expires_at_unix_ms == 0
+                    || now_ms <= claim.reserved_expires_at_unix_ms
+                {
+                    continue;
+                }
+                if claim.state != ClaimState::Uncommitted && claim.state != ClaimState::Frozen {
+                    continue;
+                }
 
-            let released_k_bits = claim.reserved_k_bits;
-            let released_access_credit = claim.reserved_access_credit;
+                let released_k_bits = claim.reserved_k_bits;
+                let released_access_credit = claim.reserved_access_credit;
 
-            let topic_pool = topic_pools
-                .get_mut(&claim.topic_id)
-                .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
-            topic_pool
-                .release_reserved(released_k_bits, released_access_credit)
-                .map_err(|_| Status::internal("failed to release topic reservation"))?;
-
-            let holdout_keys = self.holdout_pool_keys(
-                claim.holdout_handle_id,
-                &claim.owner_principal_id,
-                claim.holdout_pool_scope,
-            );
-            for holdout_key in holdout_keys {
-                let holdout_pool = holdout_pools
-                    .get_mut(&holdout_key)
-                    .ok_or_else(|| Status::failed_precondition("missing holdout budget pool"))?;
-                holdout_pool
+                let topic_pool = topic_pools
+                    .get_mut(&claim.topic_id)
+                    .ok_or_else(|| Status::failed_precondition("missing topic budget pool"))?;
+                topic_pool
                     .release_reserved(released_k_bits, released_access_credit)
-                    .map_err(|_| Status::internal("failed to release holdout reservation"))?;
-            }
+                    .map_err(|_| Status::internal("failed to release topic reservation"))?;
 
-            claim.reserved_k_bits = 0.0;
-            claim.reserved_access_credit = 0.0;
-            claim.reserved_expires_at_unix_ms = 0;
-            self.transition_claim(claim, ClaimState::Stale, 0.0, 0.0, None)?;
-            self.append_reservation_expired_incident(
-                claim,
-                released_k_bits,
-                released_access_credit,
-            )?;
-            expired_count = expired_count.saturating_add(1);
+                let holdout_keys = self.holdout_pool_keys(
+                    claim.holdout_handle_id,
+                    &claim.owner_principal_id,
+                    claim.holdout_pool_scope,
+                );
+                for holdout_key in holdout_keys {
+                    let holdout_pool = holdout_pools.get_mut(&holdout_key).ok_or_else(|| {
+                        Status::failed_precondition("missing holdout budget pool")
+                    })?;
+                    holdout_pool
+                        .release_reserved(released_k_bits, released_access_credit)
+                        .map_err(|_| Status::internal("failed to release holdout reservation"))?;
+                }
+
+                claim.reserved_k_bits = 0.0;
+                claim.reserved_access_credit = 0.0;
+                claim.reserved_expires_at_unix_ms = 0;
+                self.transition_claim(claim, ClaimState::Stale, 0.0, 0.0, None)?;
+                self.append_reservation_expired_incident(
+                    claim,
+                    released_k_bits,
+                    released_access_credit,
+                )?;
+                expired_count = expired_count.saturating_add(1);
+            }
         }
 
         if expired_count > 0 {
@@ -3680,18 +3683,18 @@ mod tests {
     fn revocation_payload_is_unambiguous_for_multiple_entries() {
         let entries_ab = vec![
             pb::RevocationEntry {
-                claim_id: vec![1],
+                claim_id: vec![1; 32],
                 timestamp_unix: 2,
                 reason: "34".to_string(),
             },
             pb::RevocationEntry {
-                claim_id: vec![5],
+                claim_id: vec![5; 32],
                 timestamp_unix: 6,
                 reason: "7".to_string(),
             },
         ];
         let entries_a_b = vec![pb::RevocationEntry {
-            claim_id: vec![1],
+            claim_id: vec![1; 32],
             timestamp_unix: 2,
             reason: "345".to_string(),
         }];
@@ -3799,10 +3802,24 @@ mod tests {
         req: pb::CreateClaimV2Request,
         principal: &str,
     ) -> Request<pb::CreateClaimV2Request> {
+        static REQUEST_COUNTER: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+        let request_counter = REQUEST_COUNTER
+            .get_or_init(|| std::sync::atomic::AtomicU64::new(1))
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut request = Request::new(req);
+        request
+            .metadata_mut()
+            .insert(
+                "x-request-id",
+                format!("test-request-{request_counter}")
+                    .parse()
+                    .expect("request id metadata"),
+            );
         request.metadata_mut().insert(
-            "x-principal-id",
-            principal.parse().expect("principal metadata"),
+            "authorization",
+            format!("Bearer {principal}")
+                .parse()
+                .expect("authorization metadata"),
         );
         request
     }
@@ -3826,10 +3843,31 @@ mod tests {
             oracle_num_symbols: 4,
             dp_epsilon_budget: None,
             dp_delta_budget: None,
-            access_credit: 32,
+            access_credit: 1_000_000,
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
         }
+    }
+
+    fn write_epoch_config(root: &Path, epoch_ref: &str) {
+        let epoch_dir = root.join("epoch_configs");
+        std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+        let payload = serde_json::json!({
+            "epoch_size": 10,
+            "pln": {
+                "target_fuel": 100,
+                "max_fuel": 500,
+                "lanes": {
+                    "fast": true,
+                    "heavy": true
+                }
+            }
+        });
+        std::fs::write(
+            epoch_dir.join(format!("{epoch_ref}.json")),
+            serde_json::to_vec(&payload).expect("encode epoch config"),
+        )
+        .expect("write epoch config");
     }
 
     #[tokio::test]
@@ -3844,7 +3882,7 @@ mod tests {
         .expect("service");
         let err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
-            Request::new(claim_request("unknown-holdout")),
+            request_with_principal(claim_request("unknown-holdout"), "anonymous"),
         )
         .await
         .expect_err("unknown holdout should fail");
@@ -3878,7 +3916,10 @@ mod tests {
 
         let mut req = claim_request(holdout_ref);
         req.dp_epsilon_budget = Some(-0.1);
-        let err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+        let err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req, "anonymous"),
+        )
             .await
             .expect_err("negative dp budget should fail");
         assert_eq!(err.code(), Code::InvalidArgument);
@@ -3895,6 +3936,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let holdout_ref = "holdout-a";
         let handle = [7u8; 32];
@@ -3911,7 +3953,7 @@ mod tests {
 
         let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
-            Request::new(claim_request(holdout_ref)),
+            request_with_principal(claim_request(holdout_ref), "anonymous"),
         )
         .await
         .expect("create")
@@ -3940,6 +3982,7 @@ mod tests {
             let mut claims = svc.state.claims.lock();
             let claim = claims.get_mut(&claim_id).expect("claim");
             claim.reserved_expires_at_unix_ms = 1;
+            claim.state = ClaimState::Frozen;
         }
 
         let swept = svc.sweep_expired_reservations().expect("sweep");
@@ -3985,6 +4028,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let holdout_ref = "holdout-a";
         let handle = [7u8; 32];
@@ -4009,7 +4053,10 @@ mod tests {
             .as_mut()
             .expect("signals")
             .dependency_merkle_root = root.to_vec();
-        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req, "anonymous"),
+        )
             .await
             .expect("create")
             .into_inner();
@@ -4023,14 +4070,16 @@ mod tests {
             kind: "dependency".to_string(),
         });
 
-        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
-            &svc,
-            Request::new(pb::CommitArtifactsRequest {
-                claim_id: created.claim_id,
-                artifacts,
-                wasm_module: BURN_WASM_MODULE.to_vec(),
-            }),
-        )
+        let mut commit_req = Request::new(pb::CommitArtifactsRequest {
+            claim_id: created.claim_id,
+            artifacts,
+            wasm_module: BURN_WASM_MODULE.to_vec(),
+        });
+        commit_req.metadata_mut().insert(
+            "authorization",
+            "Bearer anonymous".parse().expect("authorization metadata"),
+        );
+        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(&svc, commit_req)
         .await
         .expect_err("dependency root mismatch must fail");
         assert_eq!(err.code(), Code::FailedPrecondition);
@@ -4046,6 +4095,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let holdout_ref = "holdout-a";
         let handle = [7u8; 32];
@@ -4065,7 +4115,10 @@ mod tests {
             .as_mut()
             .expect("signals")
             .dependency_merkle_root = Vec::new();
-        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req))
+        let created = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req, "anonymous"),
+        )
             .await
             .expect("create")
             .into_inner();
@@ -4081,14 +4134,16 @@ mod tests {
             },
         ];
 
-        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
-            &svc,
-            Request::new(pb::CommitArtifactsRequest {
-                claim_id: created.claim_id,
-                artifacts,
-                wasm_module: BURN_WASM_MODULE.to_vec(),
-            }),
-        )
+        let mut commit_req = Request::new(pb::CommitArtifactsRequest {
+            claim_id: created.claim_id,
+            artifacts,
+            wasm_module: BURN_WASM_MODULE.to_vec(),
+        });
+        commit_req.metadata_mut().insert(
+            "authorization",
+            "Bearer anonymous".parse().expect("authorization metadata"),
+        );
+        let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(&svc, commit_req)
         .await
         .expect_err("dependencies without root commitment must fail");
         assert_eq!(err.code(), Code::FailedPrecondition);
@@ -4104,6 +4159,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let holdout_ref = "holdout-a";
         let handle = [7u8; 32];
@@ -4120,7 +4176,7 @@ mod tests {
 
         let response = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
-            Request::new(claim_request(holdout_ref)),
+            request_with_principal(claim_request(holdout_ref), "anonymous"),
         )
         .await
         .expect("create");
@@ -4137,7 +4193,7 @@ mod tests {
 
         let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
-            Request::new(claim_request(holdout_ref)),
+            request_with_principal(claim_request(holdout_ref), "anonymous"),
         )
         .await
         .expect("create duplicate");
@@ -4152,9 +4208,26 @@ mod tests {
         assert_eq!(first_assignment, second_assignment);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn create_claim_v2_trial_interventions_scale_k_budget_between_arms() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock");
+
         let dir = TempDir::new().expect("tmp");
+        let trial_cfg = default_trial_arms_config();
+        let trial_cfg_path = dir.path().join("trial_arms.json");
+        std::fs::write(
+            &trial_cfg_path,
+            serde_json::to_vec(&trial_cfg).expect("encode trial cfg"),
+        )
+        .expect("write trial cfg");
+        std::env::set_var("EVIDENCEOS_TRIAL_HARNESS", "1");
+        std::env::set_var("EVIDENCEOS_TRIAL_ARMS_CONFIG", &trial_cfg_path);
+
         let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
         let svc = EvidenceOsService::build_with_options(
             dir.path().to_str().expect("utf8"),
@@ -4162,6 +4235,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let holdout_ref = "holdout-trial-scale";
         let handle = [6u8; 32];
@@ -4178,18 +4252,26 @@ mod tests {
 
         let mut req_a = claim_request(holdout_ref);
         req_a.claim_name = "claim-a".to_string();
+        req_a.access_credit = 1_000_000;
         req_a.signals.as_mut().expect("signals").semantic_hash = vec![11; 32];
         let resp_a =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_a))
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+                &svc,
+                request_with_principal(req_a, "anonymous"),
+            )
                 .await
                 .expect("create a");
         let claim_a = parse_hash32(&resp_a.get_ref().claim_id, "claim_id").expect("claim a id");
 
         let mut req_b = claim_request(holdout_ref);
         req_b.claim_name = "claim-b".to_string();
+        req_b.access_credit = 1_000_000;
         req_b.signals.as_mut().expect("signals").semantic_hash = vec![12; 32];
         let resp_b =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_b))
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+                &svc,
+                request_with_principal(req_b, "anonymous"),
+            )
                 .await
                 .expect("create b");
         let claim_b = parse_hash32(&resp_b.get_ref().claim_id, "claim_id").expect("claim b id");
@@ -4226,6 +4308,9 @@ mod tests {
             (budget_b, budget_a)
         };
         assert!((treatment_budget - (control_budget * 0.75)).abs() < 1e-6);
+
+        std::env::remove_var("EVIDENCEOS_TRIAL_ARMS_CONFIG");
+        std::env::remove_var("EVIDENCEOS_TRIAL_HARNESS");
     }
 
     #[tokio::test]
@@ -4238,14 +4323,15 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
         let holdout_ref = "holdout-per-principal";
         write_holdout_registry_with_policy(
             dir.path(),
             holdout_ref,
             [8u8; 32],
             &[0, 1, 1, 0],
-            Some(100.0),
-            Some(55.0),
+            Some(5_000_000.0),
+            Some(5_000_000.0),
             Some("per_principal"),
         );
 
@@ -4255,9 +4341,12 @@ mod tests {
         )
         .await
         .expect("create a");
+        let mut req_b = claim_request(holdout_ref);
+        req_b.claim_name = "claim-b".to_string();
+        req_b.signals.as_mut().expect("signals").semantic_hash = vec![3; 32];
         let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
-            request_with_principal(claim_request(holdout_ref), "principal-b"),
+            request_with_principal(req_b, "principal-b"),
         )
         .await
         .expect("create b");
@@ -4267,8 +4356,8 @@ mod tests {
         for (key, pool) in pools.iter() {
             assert_eq!(key.holdout_id, [8u8; 32]);
             assert!(key.principal_id.is_some());
-            assert_eq!(pool.k_bits_budget, 100.0);
-            assert_eq!(pool.access_credit_budget, 55.0);
+            assert_eq!(pool.k_bits_budget, 5_000_000.0);
+            assert_eq!(pool.access_credit_budget, 5_000_000.0);
         }
     }
 
@@ -4282,6 +4371,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
         let holdout_ref = "holdout-global";
         write_holdout_registry_with_policy(
             dir.path(),
@@ -4294,7 +4384,7 @@ mod tests {
         );
 
         let mut req_a = claim_request(holdout_ref);
-        req_a.access_credit = 1;
+        req_a.access_credit = 1_000_000;
         let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
             request_with_principal(req_a, "principal-a"),
@@ -4302,7 +4392,7 @@ mod tests {
         .await
         .expect("create a");
         let mut req_b = claim_request(holdout_ref);
-        req_b.access_credit = 999;
+        req_b.access_credit = 2_000_000;
         let _ = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &svc,
             request_with_principal(req_b, "principal-b"),
@@ -4614,6 +4704,7 @@ mod tests {
             claim.reserved_k_bits = reserved;
             claim.reserved_access_credit = reserved;
             claim.reserved_expires_at_unix_ms = 1;
+            claim.state = ClaimState::Frozen;
             svc.state.claims.lock().insert(claim_id, claim);
         }
 
@@ -4983,6 +5074,7 @@ mod tests {
             telemetry,
         )
         .expect("service");
+        write_epoch_config(dir.path(), "epoch-a");
 
         let mut req_a = claim_request("synthetic-holdout");
         req_a.claim_name = "pool-claim".to_string();
@@ -4993,12 +5085,18 @@ mod tests {
         req_b.signals.as_mut().expect("signals").semantic_hash = vec![201; 32];
 
         let created_a =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_a))
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+                &svc,
+                request_with_principal(req_a, "anonymous"),
+            )
                 .await
                 .expect("create a")
                 .into_inner();
         let created_b =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(&svc, Request::new(req_b))
+            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+                &svc,
+                request_with_principal(req_b, "anonymous"),
+            )
                 .await
                 .expect("create b")
                 .into_inner();
@@ -5037,9 +5135,10 @@ mod tests {
             strict_telemetry,
         )
         .expect("strict service");
+        write_epoch_config(strict_dir.path(), "epoch-a");
         let strict_err = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &strict_svc,
-            Request::new(claim_request("synthetic-holdout")),
+            request_with_principal(claim_request("synthetic-holdout"), "anonymous"),
         )
         .await
         .expect_err("strict mode should reject synthetic holdout");
@@ -5054,9 +5153,10 @@ mod tests {
             insecure_telemetry,
         )
         .expect("insecure service");
+        write_epoch_config(insecure_dir.path(), "epoch-a");
         <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
             &insecure_svc,
-            Request::new(claim_request("synthetic-holdout")),
+            request_with_principal(claim_request("synthetic-holdout"), "anonymous"),
         )
         .await
         .expect("insecure synthetic holdout should be accepted");
@@ -5068,6 +5168,7 @@ mod tests {
         let elapsed = Duration::from_millis(3);
         let pad = strict_pln_padding_duration(elapsed, 10).expect("pad");
         assert!(pad >= Duration::from_millis(7));
+        assert!(elapsed + pad >= Duration::from_millis(10));
         assert!(strict_pln_padding_duration(Duration::from_millis(12), 10).is_none());
     }
 
