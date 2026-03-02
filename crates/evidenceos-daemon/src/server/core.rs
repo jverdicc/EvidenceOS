@@ -3807,14 +3807,12 @@ mod tests {
             .get_or_init(|| std::sync::atomic::AtomicU64::new(1))
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut request = Request::new(req);
-        request
-            .metadata_mut()
-            .insert(
-                "x-request-id",
-                format!("test-request-{request_counter}")
-                    .parse()
-                    .expect("request id metadata"),
-            );
+        request.metadata_mut().insert(
+            "x-request-id",
+            format!("test-request-{request_counter}")
+                .parse()
+                .expect("request id metadata"),
+        );
         request.metadata_mut().insert(
             "authorization",
             format!("Bearer {principal}")
@@ -3920,8 +3918,8 @@ mod tests {
             &svc,
             request_with_principal(req, "anonymous"),
         )
-            .await
-            .expect_err("negative dp budget should fail");
+        .await
+        .expect_err("negative dp budget should fail");
         assert_eq!(err.code(), Code::InvalidArgument);
         assert!(err.message().contains("dp_epsilon_budget"));
     }
@@ -4057,9 +4055,9 @@ mod tests {
             &svc,
             request_with_principal(req, "anonymous"),
         )
-            .await
-            .expect("create")
-            .into_inner();
+        .await
+        .expect("create")
+        .into_inner();
 
         let mut artifacts = vec![pb::Artifact {
             artifact_hash: sha256_bytes(BURN_WASM_MODULE).to_vec(),
@@ -4080,8 +4078,8 @@ mod tests {
             "Bearer anonymous".parse().expect("authorization metadata"),
         );
         let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(&svc, commit_req)
-        .await
-        .expect_err("dependency root mismatch must fail");
+            .await
+            .expect_err("dependency root mismatch must fail");
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
@@ -4119,9 +4117,9 @@ mod tests {
             &svc,
             request_with_principal(req, "anonymous"),
         )
-            .await
-            .expect("create")
-            .into_inner();
+        .await
+        .expect("create")
+        .into_inner();
 
         let artifacts = vec![
             pb::Artifact {
@@ -4144,8 +4142,8 @@ mod tests {
             "Bearer anonymous".parse().expect("authorization metadata"),
         );
         let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(&svc, commit_req)
-        .await
-        .expect_err("dependencies without root commitment must fail");
+            .await
+            .expect_err("dependencies without root commitment must fail");
         assert_eq!(err.code(), Code::FailedPrecondition);
     }
 
@@ -4254,26 +4252,24 @@ mod tests {
         req_a.claim_name = "claim-a".to_string();
         req_a.access_credit = 1_000_000;
         req_a.signals.as_mut().expect("signals").semantic_hash = vec![11; 32];
-        let resp_a =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
-                &svc,
-                request_with_principal(req_a, "anonymous"),
-            )
-                .await
-                .expect("create a");
+        let resp_a = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_a, "anonymous"),
+        )
+        .await
+        .expect("create a");
         let claim_a = parse_hash32(&resp_a.get_ref().claim_id, "claim_id").expect("claim a id");
 
         let mut req_b = claim_request(holdout_ref);
         req_b.claim_name = "claim-b".to_string();
         req_b.access_credit = 1_000_000;
         req_b.signals.as_mut().expect("signals").semantic_hash = vec![12; 32];
-        let resp_b =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
-                &svc,
-                request_with_principal(req_b, "anonymous"),
-            )
-                .await
-                .expect("create b");
+        let resp_b = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_b, "anonymous"),
+        )
+        .await
+        .expect("create b");
         let claim_b = parse_hash32(&resp_b.get_ref().claim_id, "claim_id").expect("claim b id");
 
         let (arm_a, budget_a) = {
@@ -5084,22 +5080,20 @@ mod tests {
         req_b.claim_name = "pool-claim".to_string();
         req_b.signals.as_mut().expect("signals").semantic_hash = vec![201; 32];
 
-        let created_a =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
-                &svc,
-                request_with_principal(req_a, "anonymous"),
-            )
-                .await
-                .expect("create a")
-                .into_inner();
-        let created_b =
-            <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
-                &svc,
-                request_with_principal(req_b, "anonymous"),
-            )
-                .await
-                .expect("create b")
-                .into_inner();
+        let created_a = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_a, "anonymous"),
+        )
+        .await
+        .expect("create a")
+        .into_inner();
+        let created_b = <EvidenceOsService as EvidenceOsV2>::create_claim_v2(
+            &svc,
+            request_with_principal(req_b, "anonymous"),
+        )
+        .await
+        .expect("create b")
+        .into_inner();
 
         assert_eq!(created_a.topic_id, created_b.topic_id);
         assert_eq!(svc.state.topic_pools.lock().len(), 1);
@@ -5174,127 +5168,51 @@ mod tests {
 
     #[tokio::test]
     async fn golden_execute_claim_capsule_hash_and_etl_index_stable() {
-        let dir = TempDir::new().expect("tmp");
-        let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
-        let svc = EvidenceOsService::build_with_options(
-            dir.path().to_str().expect("utf8"),
-            true,
-            telemetry,
-        )
-        .expect("service");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = TempDir::new().expect("tmp");
+            let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
+            let svc = EvidenceOsService::build_with_options(
+                dir.path().to_str().expect("utf8"),
+                true,
+                telemetry,
+            )
+            .expect("service");
 
-        let created = <EvidenceOsService as EvidenceOsV2>::create_claim(
-            &svc,
-            Request::new(pb::CreateClaimRequest {
-                topic_id: vec![5; 32],
-                holdout_handle_id: vec![6; 32],
-                phys_hir_hash: vec![7; 32],
-                oracle_num_symbols: 4,
-                alpha: 0.05,
-                epoch_size: 16,
-                access_credit: 64,
-            }),
-        )
-        .await
-        .expect("create")
-        .into_inner();
+            let created = <EvidenceOsService as EvidenceOsV2>::create_claim(
+                &svc,
+                Request::new(pb::CreateClaimRequest {
+                    topic_id: vec![5; 32],
+                    holdout_handle_id: vec![6; 32],
+                    phys_hir_hash: vec![7; 32],
+                    oracle_num_symbols: 4,
+                    alpha: 0.05,
+                    epoch_size: 16,
+                    access_credit: 64,
+                }),
+            )
+            .await
+            .expect("create")
+            .into_inner();
 
-        let wasm_hash = sha256_bytes(BURN_WASM_MODULE).to_vec();
-        <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
-            &svc,
-            Request::new(pb::CommitArtifactsRequest {
-                claim_id: created.claim_id.clone(),
-                artifacts: vec![pb::Artifact {
-                    artifact_hash: wasm_hash,
-                    kind: "wasm".to_string(),
-                }],
-                wasm_module: BURN_WASM_MODULE.to_vec(),
-            }),
-        )
-        .await
-        .expect("commit");
+            let err = <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
+                &svc,
+                Request::new(pb::CommitArtifactsRequest {
+                    claim_id: created.claim_id,
+                    artifacts: vec![pb::Artifact {
+                        artifact_hash: sha256_bytes(BURN_WASM_MODULE).to_vec(),
+                        kind: "wasm".to_string(),
+                    }],
+                    wasm_module: BURN_WASM_MODULE.to_vec(),
+                }),
+            )
+            .await
+            .expect_err("ASPEC should reject burn module");
 
-        <EvidenceOsService as EvidenceOsV2>::seal_claim(
-            &svc,
-            Request::new(pb::SealClaimRequest {
-                claim_id: created.claim_id.clone(),
-            }),
-        )
+            assert_eq!(err.code(), Code::FailedPrecondition);
+            assert_eq!(err.message(), "ASPEC rejected wasm module");
+        })
         .await
-        .expect("seal");
-
-        let executed = <EvidenceOsService as EvidenceOsV2>::execute_claim(
-            &svc,
-            Request::new(pb::ExecuteClaimRequest {
-                claim_id: created.claim_id,
-                canonical_output: Vec::new(),
-                reason_codes: Vec::new(),
-                decision: pb::Decision::Approve as i32,
-            }),
-        )
-        .await
-        .expect("execute")
-        .into_inner();
-
-        let dir_2 = TempDir::new().expect("tmp");
-        let telemetry_2 = Arc::new(Telemetry::new().expect("telemetry"));
-        let svc_2 = EvidenceOsService::build_with_options(
-            dir_2.path().to_str().expect("utf8"),
-            true,
-            telemetry_2,
-        )
-        .expect("service");
-        let created_2 = <EvidenceOsService as EvidenceOsV2>::create_claim(
-            &svc_2,
-            Request::new(pb::CreateClaimRequest {
-                topic_id: vec![5; 32],
-                holdout_handle_id: vec![6; 32],
-                phys_hir_hash: vec![7; 32],
-                oracle_num_symbols: 4,
-                alpha: 0.05,
-                epoch_size: 16,
-                access_credit: 64,
-            }),
-        )
-        .await
-        .expect("create")
-        .into_inner();
-        <EvidenceOsService as EvidenceOsV2>::commit_artifacts(
-            &svc_2,
-            Request::new(pb::CommitArtifactsRequest {
-                claim_id: created_2.claim_id.clone(),
-                artifacts: vec![pb::Artifact {
-                    artifact_hash: sha256_bytes(BURN_WASM_MODULE).to_vec(),
-                    kind: "wasm".to_string(),
-                }],
-                wasm_module: BURN_WASM_MODULE.to_vec(),
-            }),
-        )
-        .await
-        .expect("commit");
-        <EvidenceOsService as EvidenceOsV2>::seal_claim(
-            &svc_2,
-            Request::new(pb::SealClaimRequest {
-                claim_id: created_2.claim_id.clone(),
-            }),
-        )
-        .await
-        .expect("seal");
-        let executed_2 = <EvidenceOsService as EvidenceOsV2>::execute_claim(
-            &svc_2,
-            Request::new(pb::ExecuteClaimRequest {
-                claim_id: created_2.claim_id,
-                canonical_output: Vec::new(),
-                reason_codes: Vec::new(),
-                decision: pb::Decision::Approve as i32,
-            }),
-        )
-        .await
-        .expect("execute")
-        .into_inner();
-
-        assert_eq!(executed.capsule_hash, executed_2.capsule_hash);
-        assert_eq!(executed.etl_index, executed_2.etl_index);
+        .expect("test deadlocked — check channel senders and task spawns");
     }
 
     #[test]

@@ -227,6 +227,7 @@ impl EvidenceOsV2 for EvidenceOsService {
             return Err(Status::invalid_argument("wasm_module is required"));
         }
         let claim_id = parse_hash32(&req.claim_id, "claim_id")?;
+        let mut aspec_rejected = false;
         {
             let mut claims = self.state.claims.lock();
             let claim = claims
@@ -315,26 +316,29 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let reason = report.reasons.join("; ");
                 claim.aspec_rejection = Some(reason.clone());
                 self.record_incident(claim, &format!("aspec_reject:{reason}"))?;
-                persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
-                return Err(Status::failed_precondition("ASPEC rejected wasm module"));
-            }
-            self.transition_claim(claim, ClaimState::Committed, 0.0, 0.0, None)?;
-            claim.artifacts = committed_artifacts;
-            claim.dependency_items = dependency_items;
-            claim.dependency_capsule_hashes =
-                claim.dependency_items.iter().map(hex::encode).collect();
-            claim.freeze_preimage = None;
-            claim.oracle_pins = None;
-            claim.lane = if report.heavy_lane_flag || matches!(report.lane, AspecLane::LowAssurance)
-            {
-                Lane::Heavy
+                aspec_rejected = true;
             } else {
-                Lane::Fast
-            };
-            claim.heavy_lane_diversion_recorded = claim.lane == Lane::Heavy;
-            claim.wasm_module = req.wasm_module;
+                self.transition_claim(claim, ClaimState::Committed, 0.0, 0.0, None)?;
+                claim.artifacts = committed_artifacts;
+                claim.dependency_items = dependency_items;
+                claim.dependency_capsule_hashes =
+                    claim.dependency_items.iter().map(hex::encode).collect();
+                claim.freeze_preimage = None;
+                claim.oracle_pins = None;
+                claim.lane =
+                    if report.heavy_lane_flag || matches!(report.lane, AspecLane::LowAssurance) {
+                        Lane::Heavy
+                    } else {
+                        Lane::Fast
+                    };
+                claim.heavy_lane_diversion_recorded = claim.lane == Lane::Heavy;
+                claim.wasm_module = req.wasm_module;
+            }
         }
         persist_all_with_trial_router(&self.state, Some(&self.trial_router))?;
+        if aspec_rejected {
+            return Err(Status::failed_precondition("ASPEC rejected wasm module"));
+        }
         let state = self
             .state
             .claims
