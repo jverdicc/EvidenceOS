@@ -227,7 +227,6 @@ fn parse_azure_key_resource(key_resource: &str) -> Option<(&str, &str, &str)> {
     Some((endpoint, key_name, key_version))
 }
 
-
 #[cfg(feature = "kms-aws")]
 struct AwsSdkClient;
 
@@ -388,7 +387,9 @@ impl KmsDecryptClient for AzureSdkClient {
             let client = azure_security_keyvault_keys::KeyClient::new(endpoint, credential, None)
                 .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
             let params = azure_security_keyvault_keys::models::KeyOperationParameters {
-                algorithm: Some(azure_security_keyvault_keys::models::EncryptionAlgorithm::RsaOaep256),
+                algorithm: Some(
+                    azure_security_keyvault_keys::models::EncryptionAlgorithm::RsaOaep256,
+                ),
                 value: Some(ciphertext.to_vec()),
                 ..Default::default()
             };
@@ -400,14 +401,16 @@ impl KmsDecryptClient for AzureSdkClient {
                     params
                         .try_into()
                         .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?,
-                    Some(azure_security_keyvault_keys::models::KeyClientUnwrapKeyOptions {
-                        key_version: if key_version.is_empty() {
-                            None
-                        } else {
-                            Some(key_version.to_string())
+                    Some(
+                        azure_security_keyvault_keys::models::KeyClientUnwrapKeyOptions {
+                            key_version: if key_version.is_empty() {
+                                None
+                            } else {
+                                Some(key_version.to_string())
+                            },
+                            ..Default::default()
                         },
-                        ..Default::default()
-                    }),
+                    ),
                 )
                 .await;
             let out = out.map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
