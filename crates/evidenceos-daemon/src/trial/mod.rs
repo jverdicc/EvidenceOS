@@ -890,7 +890,7 @@ pub fn default_trial_arms_config() -> TrialArmsConfig {
                 arm_parameters: serde_json::json!({"alpha_scale_ppm":1_000_000,"access_credit_scale_ppm":1_000_000,"k_bits_scale_ppm":750_000}),
             },
         ],
-        assignment_mode: AssignmentMode::Hashed,
+        assignment_mode: AssignmentMode::Blocked,
         stratify: true,
         block_size: Some(2),
     }

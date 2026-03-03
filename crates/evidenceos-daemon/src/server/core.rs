@@ -346,6 +346,9 @@ fn verify_holdout_permissions(dir: &Path, file: &Path) -> Result<(), Status> {
 impl HoldoutProvider for SyntheticHoldoutProvider {
     fn resolve(&self, holdout_ref: &str) -> Result<HoldoutDescriptor, Status> {
         validate_holdout_ref(holdout_ref)?;
+        if !holdout_ref.starts_with("synthetic-") {
+            return Err(Status::invalid_argument("unknown holdout_ref"));
+        }
         let mut holdout_hasher = Sha256::new();
         holdout_hasher.update(holdout_ref.as_bytes());
         let mut holdout_handle_id = [0u8; 32];
@@ -4303,6 +4306,10 @@ mod tests {
         } else {
             (budget_b, budget_a)
         };
+        eprintln!(
+            "arm_a={} k_budget={} arm_b={} k_budget={}",
+            arm_a, budget_a, arm_b, budget_b
+        );
         assert!((treatment_budget - (control_budget * 0.75)).abs() < 1e-6);
 
         std::env::remove_var("EVIDENCEOS_TRIAL_ARMS_CONFIG");
