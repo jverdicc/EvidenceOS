@@ -209,6 +209,25 @@ fn parse_kms_key_ref(key_id: &str) -> Result<(&str, Vec<u8>), HoldoutKeyProvider
     Ok((key_resource, ciphertext))
 }
 
+#[cfg(feature = "kms-azure")]
+fn parse_azure_key_resource(key_resource: &str) -> Option<(&str, &str, &str)> {
+    let (endpoint, key_path) = key_resource.split_once("/keys/")?;
+    if endpoint.is_empty() {
+        return None;
+    }
+    let mut parts = key_path.split('/');
+    let key_name = parts.next()?;
+    if key_name.is_empty() {
+        return None;
+    }
+    let key_version = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((endpoint, key_name, key_version))
+}
+
+
 #[cfg(feature = "kms-aws")]
 struct AwsSdkClient;
 
@@ -229,7 +248,7 @@ impl KmsDecryptClient for AwsSdkClient {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
         runtime.block_on(async {
-            let config = aws_config::load_from_env().await;
+            let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = aws_sdk_kms::Client::new(&config);
             let out = client
                 .decrypt()
@@ -299,13 +318,13 @@ impl KmsDecryptClient for GcpSdkClient {
             let client = google_cloud_kms::client::Client::new(config)
                 .await
                 .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
-            let req = google_cloud_googleapis::cloud::kms::v1::DecryptRequest {
+            let req = google_cloud_kms::grpc::kms::v1::DecryptRequest {
                 name: key_resource.to_string(),
                 ciphertext: ciphertext.to_vec(),
                 ..Default::default()
             };
             let out = client
-                .decrypt(req)
+                .decrypt(req, None)
                 .await
                 .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
             if out.plaintext.is_empty() {
@@ -363,24 +382,38 @@ impl KmsDecryptClient for AzureSdkClient {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
         runtime.block_on(async {
-            let credential = azure_identity::DefaultAzureCredential::default();
-            let client = azure_security_keyvault_keys::CryptographyClient::new(
-                key_resource,
-                credential,
-                None,
-            )
-            .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
-            let out = client
-                .unwrap_key(
-                    azure_security_keyvault_keys::models::KeyEncryptionAlgorithm::RsaOaep256,
-                    ciphertext.to_vec(),
-                    None,
-                )
-                .await
+            let credential = std::sync::Arc::new(azure_identity::DefaultAzureCredential::default());
+            let (endpoint, key_name, key_version) = parse_azure_key_resource(key_resource)
+                .ok_or(HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let client = azure_security_keyvault_keys::KeyClient::new(endpoint, credential, None)
                 .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
+            let params = azure_security_keyvault_keys::models::KeyOperationParameters {
+                algorithm: Some(azure_security_keyvault_keys::models::EncryptionAlgorithm::RsaOaep256),
+                value: Some(ciphertext.to_vec()),
+                ..Default::default()
+            };
+            let out: azure_core::Result<
+                azure_core::Response<azure_security_keyvault_keys::models::KeyOperationResult>,
+            > = client
+                .unwrap_key(
+                    key_name,
+                    params
+                        .try_into()
+                        .map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?,
+                    Some(azure_security_keyvault_keys::models::KeyClientUnwrapKeyOptions {
+                        key_version: if key_version.is_empty() {
+                            None
+                        } else {
+                            Some(key_version.to_string())
+                        },
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            let out = out.map_err(|_| HoldoutKeyProviderError::KmsDecryptFailed)?;
             let value = out
+                .into_body()
                 .result
-                .value
                 .ok_or(HoldoutKeyProviderError::KmsDecryptFailed)?;
             Ok(value)
         })
