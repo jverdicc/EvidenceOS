@@ -1,8 +1,6 @@
 // Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "dp_lane")]
-
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
