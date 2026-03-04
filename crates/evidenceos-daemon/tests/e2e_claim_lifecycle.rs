@@ -123,7 +123,7 @@ fn valid_wasm() -> Vec<u8> {
     let preds_esc = std::iter::repeat_n("\\00", 128).collect::<String>();
     wat::parse_str(format!(
         r#"(module
-          (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
+          (import "env" "oracle_query" (func $oracle_query (param i32 i32) (result i32)))
           (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
           (memory (export "memory") 1)
           (data (i32.const 0) "{}")
@@ -131,7 +131,7 @@ fn valid_wasm() -> Vec<u8> {
           (func (export "run")
             i32.const 0
             i32.const 128
-            call $oracle
+            call $oracle_query
             drop
             i32.const 128
             i32.const 1
