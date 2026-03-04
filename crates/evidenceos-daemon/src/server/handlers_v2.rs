@@ -1271,7 +1271,6 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let claim = claims
                     .get_mut(&claim_id)
                     .ok_or_else(|| Status::not_found("claim not found"))?;
-                self.transition_claim(claim, ClaimState::Executing, 0.0, 0.0, None)?;
                 claim.execution_nonce = claim.execution_nonce.saturating_add(1);
                 let execution_nonce = claim.execution_nonce;
                 (claim.clone(), execution_nonce)
@@ -1319,35 +1318,50 @@ impl EvidenceOsV2 for EvidenceOsService {
                 hex::encode(claim.topic_id),
                 hex::encode(claim.phys_hir_hash),
             )?;
+            self.transition_claim(&mut claim, ClaimState::Executing, 0.0, 0.0, None)?;
             let nullspec_store = NullSpecStore::open(&self.state.data_path)
                 .map_err(|_| Status::internal("nullspec store init failed"))?;
-            let active_id = if claim.nullspec_id.is_empty() {
+            let expected_resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
+            let contract = if claim.nullspec_id.is_empty() {
                 match nullspec_store
                     .active_for(&claim.claim_name, &claim.holdout_ref)
                     .map_err(|_| Status::internal("nullspec mapping read failed"))?
                 {
-                    Some(id) => id,
+                    Some(active_id) => nullspec_store
+                        .get(&active_id)
+                        .map_err(|_| Status::failed_precondition("active nullspec not found"))?,
                     None => {
-                        self.record_incident(&mut claim, "nullspec_missing")?;
-                        return Err(Status::failed_precondition("missing active nullspec"));
+                        if self.enforce_operator_provenance {
+                            self.record_incident(&mut claim, "nullspec_missing")?;
+                            return Err(Status::failed_precondition("missing active nullspec"));
+                        }
+                        let mut fallback = default_registry_nullspec()?;
+                        fallback.oracle_id = claim.claim_name.clone();
+                        fallback.holdout_handle = claim.holdout_ref.clone();
+                        fallback.oracle_resolution_hash = expected_resolution_hash;
+                        fallback.epoch_created = current_epoch;
+                        fallback.ttl_epochs = 10_000;
+                        fallback.nullspec_id = fallback
+                            .compute_id()
+                            .map_err(|_| Status::internal("fallback nullspec id compute failed"))?;
+                        fallback
                     }
                 }
             } else {
                 let decoded = hex::decode(&claim.nullspec_id)
                     .map_err(|_| Status::invalid_argument("invalid nullspec_id hex"))?;
-                decoded
+                let active_id = decoded
                     .as_slice()
                     .try_into()
-                    .map_err(|_| Status::invalid_argument("invalid nullspec_id length"))?
+                    .map_err(|_| Status::invalid_argument("invalid nullspec_id length"))?;
+                nullspec_store
+                    .get(&active_id)
+                    .map_err(|_| Status::failed_precondition("active nullspec not found"))?
             };
-            let contract = nullspec_store
-                .get(&active_id)
-                .map_err(|_| Status::failed_precondition("active nullspec not found"))?;
             if contract.is_expired(current_epoch) {
                 self.record_incident(&mut claim, "nullspec_expired")?;
                 return Err(Status::failed_precondition("active nullspec expired"));
             }
-            let expected_resolution_hash = oracle_resolution_hash(&claim.oracle_resolution)?;
             if contract.oracle_resolution_hash != expected_resolution_hash {
                 self.record_incident(&mut claim, "nullspec_resolution_hash_mismatch")?;
                 return Err(Status::failed_precondition(
@@ -1447,11 +1461,27 @@ impl EvidenceOsV2 for EvidenceOsService {
             };
 
             let vault = VaultEngine::new().map_err(map_vault_error)?;
-            let registry = self.ensure_nullspec_registry_fresh()?;
-            let reg_nullspec = registry
-                .get(&hex::encode(contract.nullspec_id))
-                .cloned()
-                .ok_or_else(|| Status::failed_precondition("active nullspec id not in registry"))?;
+            let reg_nullspec = match self.ensure_nullspec_registry_fresh() {
+                Ok(registry) => registry
+                    .get(&hex::encode(contract.nullspec_id))
+                    .cloned()
+                    .or_else(|| {
+                        if self.enforce_operator_provenance {
+                            None
+                        } else {
+                            Some(contract.clone())
+                        }
+                    })
+                    .ok_or_else(|| {
+                        Status::failed_precondition("active nullspec id not in registry")
+                    })?,
+                Err(err) => {
+                    if self.enforce_operator_provenance {
+                        return Err(err);
+                    }
+                    contract.clone()
+                }
+            };
             let context = vault_context(&claim, reg_nullspec, self.holdout_provider.as_ref())?;
             let vault_result = match vault.execute(&claim.wasm_module, &context, vault_cfg) {
                 Ok(v) => v,
@@ -1900,9 +1930,7 @@ impl EvidenceOsV2 for EvidenceOsService {
                 let stored = claims
                     .get_mut(&claim.claim_id)
                     .ok_or_else(|| Status::not_found("claim not found"))?;
-                if stored.execution_nonce != execution_nonce
-                    || stored.state != ClaimState::Executing
-                {
+                if stored.execution_nonce != execution_nonce || stored.state != ClaimState::Sealed {
                     return Err(Status::aborted("claim execution superseded"));
                 }
                 *stored = claim.clone();
