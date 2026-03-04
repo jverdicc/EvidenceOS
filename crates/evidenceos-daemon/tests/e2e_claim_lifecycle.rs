@@ -36,6 +36,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 type RequestIdClient =
     EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
 
+#[allow(clippy::result_large_err)]
 fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
     req.metadata_mut().insert(
         "x-request-id",
