@@ -44,6 +44,14 @@ fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
             .parse()
             .expect("request id"),
     );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer e2e-token".parse().expect("authorization"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
     Ok(req)
 }
 
@@ -112,19 +120,26 @@ fn trial_commitment_hash_from_fields(
 }
 
 fn valid_wasm() -> Vec<u8> {
-    wat::parse_str(
+    let preds_esc = std::iter::repeat_n("\\00", 128).collect::<String>();
+    wat::parse_str(format!(
         r#"(module
           (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
           (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
           (memory (export "memory") 1)
-          (data (i32.const 0) "\01")
+          (data (i32.const 0) "{}")
+          (data (i32.const 128) "\01")
           (func (export "run")
             i32.const 0
+            i32.const 128
+            call $oracle
+            drop
+            i32.const 128
             i32.const 1
             call $emit
             drop)
         )"#,
-    )
+        preds_esc,
+    ))
     .expect("valid wat")
 }
 
@@ -744,12 +759,12 @@ async fn topic_budget_is_shared_across_claims() {
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(41),
             phys_hir_signature_hash: hash(42),
-            dependency_merkle_root: hash(43),
+            dependency_merkle_root: Vec::new(),
         }),
         holdout_ref: holdout.to_string(),
         epoch_size: 10,
         oracle_num_symbols: 4,
-        access_credit: 16,
+        access_credit: 5_000_000,
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
