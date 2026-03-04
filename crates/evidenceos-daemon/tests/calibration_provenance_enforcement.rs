@@ -12,9 +12,9 @@ use evidenceos_protocol::{sha256_domain, DOMAIN_ORACLE_OPERATOR_RECORD_V1};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tonic::Request;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Serialize)]
 struct DisjointnessAttestation<'a> {
@@ -41,7 +41,6 @@ fn sign_oracle_record(sk: &SigningKey, payload: &OracleOperatorRecordPayload<'_>
     let digest = sha256_domain(DOMAIN_ORACLE_OPERATOR_RECORD_V1, &canonical);
     hex::encode(sk.sign(&digest).to_bytes())
 }
-
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -325,7 +324,8 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
             got == claim_id
         })
         .expect("claim");
-    let expected_resolution_hash = resolution_hash(&state["claims"][claim_idx]["oracle_resolution"]);
+    let expected_resolution_hash =
+        resolution_hash(&state["claims"][claim_idx]["oracle_resolution"]);
     install_active_nullspec(data_dir, expected_resolution_hash, Some([0xBB; 32]));
 
     state["claims"][claim_idx]["status"] = json!("SEALED");
@@ -364,5 +364,7 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
         .await
         .expect_err("must fail on pinned resolution hash mismatch");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("sealed pins") || err.message().contains("claim must be SEALED"));
+    assert!(
+        err.message().contains("sealed pins") || err.message().contains("claim must be SEALED")
+    );
 }

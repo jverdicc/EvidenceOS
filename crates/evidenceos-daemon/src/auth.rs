@@ -506,7 +506,11 @@ mod tests {
         );
         let sig = sign_hex(
             &key,
-            &signing_material("req-1", "/evidenceos.v1.EvidenceOS/Health", Some(timestamp.as_str())),
+            &signing_material(
+                "req-1",
+                "/evidenceos.v1.EvidenceOS/Health",
+                Some(timestamp.as_str()),
+            ),
         );
         req.metadata_mut().insert(
             "x-evidenceos-signature",

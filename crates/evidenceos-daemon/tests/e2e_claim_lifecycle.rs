@@ -14,8 +14,8 @@
 //
 #![allow(dead_code)]
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_daemon::telemetry::Telemetry;
@@ -30,7 +30,6 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::service::interceptor::InterceptedService;
 use tonic::{transport::Channel, transport::Server, Code, Request, Status};
-
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
