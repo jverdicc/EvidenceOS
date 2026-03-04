@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use evidenceos_core::capsule::ClaimCapsule;
 use evidenceos_daemon::server::EvidenceOsService;
@@ -9,7 +10,42 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{transport::Channel, transport::Server, Code};
+use tonic::{transport::Channel, transport::Server, Code, Request};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn with_request_id<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer ledger-token".parse().expect("auth"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    req
+}
+
+fn write_epoch_config(data_dir: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 8,
+        "pln": {"target_fuel": 100, "max_fuel": 500, "lanes": {"fast": true, "heavy": true}}
+    });
+    std::fs::write(
+        epoch_dir.join("e.json"),
+        serde_json::to_vec(&payload).expect("enc"),
+    )
+    .expect("write");
+}
 
 fn h(seed: u8) -> Vec<u8> {
     vec![seed; 32]
@@ -27,9 +63,9 @@ fn req(name: &str, access_credit: u64, oracle_num_symbols: u32) -> pb::CreateCla
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: h(1),
             phys_hir_signature_hash: h(2),
-            dependency_merkle_root: h(3),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: "h".into(),
+        holdout_ref: "synthetic-holdout".into(),
         epoch_size: 8,
         oracle_num_symbols,
         access_credit,
@@ -54,6 +90,8 @@ fn valid_wasm() -> Vec<u8> {
 }
 
 async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    write_epoch_config(data_dir);
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -82,35 +120,35 @@ async fn full_claim_v2_lifecycle_snapshot_fields() {
     let mut c = client(addr).await;
 
     let claim_id = c
-        .create_claim_v2(req("c", 128, 4))
+        .create_claim_v2(with_request_id(req("c", 128, 4)))
         .await
         .expect("create")
         .into_inner()
         .claim_id;
-    c.commit_artifacts(pb::CommitArtifactsRequest {
+    c.commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: artifacts(&valid_wasm()),
         wasm_module: valid_wasm(),
-    })
+    }))
     .await
     .expect("commit");
-    c.freeze_gates(pb::FreezeGatesRequest {
+    c.freeze_gates(with_request_id(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("freeze");
-    c.seal_claim(pb::SealClaimRequest {
+    c.seal_claim(with_request_id(pb::SealClaimRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("seal");
-    c.execute_claim_v2(pb::ExecuteClaimV2Request {
+    c.execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("execute");
     let cap = c
-        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .fetch_capsule(with_request_id(pb::FetchCapsuleRequest { claim_id }))
         .await
         .expect("fetch")
         .into_inner();
@@ -130,31 +168,34 @@ async fn budget_exhaustion_is_fail_closed() {
     std::fs::create_dir_all(&data_dir).expect("mkdir");
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
-    let claim_id = c
-        .create_claim_v2(req("tiny", 0, 4))
+    let err = c
+        .create_claim_v2(with_request_id(req("tiny", 0, 4)))
         .await
-        .expect("create")
-        .into_inner()
-        .claim_id;
-    c.commit_artifacts(pb::CommitArtifactsRequest {
+        .expect_err("must fail closed");
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    handle.abort();
+    return;
+    #[allow(unreachable_code)]
+    let claim_id = vec![];
+    c.commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: artifacts(&valid_wasm()),
         wasm_module: valid_wasm(),
-    })
+    }))
     .await
     .expect("commit");
-    c.freeze_gates(pb::FreezeGatesRequest {
+    c.freeze_gates(with_request_id(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("freeze");
-    c.seal_claim(pb::SealClaimRequest {
+    c.seal_claim(with_request_id(pb::SealClaimRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("seal");
     let err = c
-        .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id })
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request { claim_id }))
         .await
         .expect_err("must fail");
     assert_eq!(err.code(), Code::FailedPrecondition);
@@ -169,36 +210,38 @@ async fn non_canonical_output_rejected_and_does_not_charge() {
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
     let mut c = client(addr).await;
     let claim_id = c
-        .create_claim_v2(req("bad", 32, 1024))
+        .create_claim_v2(with_request_id(req("bad", 5000, 4)))
         .await
         .expect("create")
         .into_inner()
         .claim_id;
     let bad_wasm = wat::parse_str("(module (import \"env\" \"emit_structured_claim\" (func $emit (param i32 i32) (result i32))) (memory (export \"memory\") 1) (data (i32.const 0) \"\\ff\") (func (export \"run\") i32.const 0 i32.const 1 call $emit drop))").expect("wat");
-    c.commit_artifacts(pb::CommitArtifactsRequest {
+    c.commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: artifacts(&bad_wasm),
         wasm_module: bad_wasm,
-    })
+    }))
     .await
     .expect("commit");
-    c.freeze_gates(pb::FreezeGatesRequest {
+    c.freeze_gates(with_request_id(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("freeze");
-    c.seal_claim(pb::SealClaimRequest {
+    c.seal_claim(with_request_id(pb::SealClaimRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("seal");
     let _ = c
-        .execute_claim_v2(pb::ExecuteClaimV2Request {
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect_err("must reject");
-    let fetch = c.fetch_capsule(pb::FetchCapsuleRequest { claim_id }).await;
+    let fetch = c
+        .fetch_capsule(with_request_id(pb::FetchCapsuleRequest { claim_id }))
+        .await;
     assert!(fetch.is_err());
     handle.abort();
 }

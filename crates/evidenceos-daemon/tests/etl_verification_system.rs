@@ -11,11 +11,33 @@ use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 use evidenceos_verifier::{verify_consistency_proof, verify_inclusion_proof, verify_sth_signature};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{transport::Channel, transport::Server};
+use tonic::{transport::Channel, transport::Server, Request};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn with_request_id<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer etl-token".parse().expect("authorization"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    req
+}
 
 struct TestServer {
     client: EvidenceOsClient<Channel>,
@@ -24,6 +46,8 @@ struct TestServer {
 
 impl TestServer {
     async fn start(data_dir: &str) -> Self {
+        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+        write_epoch_config(data_dir, "e");
         let svc = EvidenceOsService::build(data_dir).expect("service");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -53,6 +77,27 @@ impl TestServer {
     }
 }
 
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true,
+                "heavy": true
+            }
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
+
 fn wasm_legacy() -> Vec<u8> {
     wat::parse_str("(module (import \"env\" \"emit_structured_claim\" (func $emit (param i32 i32) (result i32))) (memory (export \"memory\") 1) (data (i32.const 0) \"\\01\") (func (export \"run\") i32.const 0 i32.const 1 call $emit drop))").expect("wat")
 }
@@ -62,7 +107,7 @@ async fn execute_once(
     name: &str,
 ) -> pb::FetchCapsuleResponse {
     let claim_id = client
-        .create_claim_v2(pb::CreateClaimV2Request {
+        .create_claim_v2(with_request_id(pb::CreateClaimV2Request {
             claim_name: name.into(),
             metadata: Some(pb::ClaimMetadataV2 {
                 lane: "fast".into(),
@@ -73,9 +118,9 @@ async fn execute_once(
             signals: Some(pb::TopicSignalsV2 {
                 semantic_hash: vec![1; 32],
                 phys_hir_signature_hash: vec![2; 32],
-                dependency_merkle_root: vec![3; 32],
+                dependency_merkle_root: Vec::new(),
             }),
-            holdout_ref: "h".into(),
+            holdout_ref: "synthetic-holdout".into(),
             epoch_size: 10,
             oracle_num_symbols: 4,
             access_credit: 128,
@@ -84,7 +129,7 @@ async fn execute_once(
             nullspec_id: String::new(),
             dp_epsilon_budget: None,
             dp_delta_budget: None,
-        })
+        }))
         .await
         .expect("create")
         .into_inner()
@@ -96,36 +141,36 @@ async fn execute_once(
         h.finalize().to_vec()
     };
     client
-        .commit_artifacts(pb::CommitArtifactsRequest {
+        .commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
             claim_id: claim_id.clone(),
             artifacts: vec![pb::Artifact {
                 kind: "wasm".into(),
                 artifact_hash,
             }],
             wasm_module: wasm,
-        })
+        }))
         .await
         .expect("commit");
     client
-        .freeze_gates(pb::FreezeGatesRequest {
+        .freeze_gates(with_request_id(pb::FreezeGatesRequest {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("freeze");
     client
-        .seal_claim(pb::SealClaimRequest {
+        .seal_claim(with_request_id(pb::SealClaimRequest {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("seal");
     client
-        .execute_claim_v2(pb::ExecuteClaimV2Request {
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("execute");
     client
-        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .fetch_capsule(with_request_id(pb::FetchCapsuleRequest { claim_id }))
         .await
         .expect("fetch")
         .into_inner()
@@ -139,11 +184,14 @@ fn rotate_key(data_dir: &std::path::Path, seed: u8) {
     let key_id: [u8; 32] = Sha256::digest(key.verifying_key().to_bytes()).into();
     let keys_dir = data_dir.join("keys");
     std::fs::create_dir_all(&keys_dir).expect("keys dir");
-    std::fs::write(
-        keys_dir.join(format!("{}.key", hex::encode(key_id))),
-        secret,
-    )
-    .expect("write key");
+    let key_path = keys_dir.join(format!("{}.key", hex::encode(key_id)));
+    std::fs::write(&key_path, secret).expect("write key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict key permissions");
+    }
     std::fs::write(
         keys_dir.join("active_key_id"),
         format!("{}\n", hex::encode(key_id)),
@@ -162,7 +210,7 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
     let mut server = TestServer::start(temp.path().to_str().expect("path")).await;
     let pubk = server
         .client
-        .get_public_key(pb::GetPublicKeyRequest { key_id: vec![] })
+        .get_public_key(with_request_id(pb::GetPublicKeyRequest { key_id: vec![] }))
         .await
         .expect("pk")
         .into_inner();
@@ -200,10 +248,10 @@ async fn verifies_inclusion_consistency_and_sth_signature() {
     let cp = second.consistency_proof.expect("consistency");
     let proof = server
         .client
-        .get_consistency_proof(pb::GetConsistencyProofRequest {
+        .get_consistency_proof(with_request_id(pb::GetConsistencyProofRequest {
             first_tree_size: cp.old_tree_size,
             second_tree_size: cp.new_tree_size,
-        })
+        }))
         .await
         .expect("cp")
         .into_inner();
@@ -241,9 +289,9 @@ async fn key_rotation_preserves_old_head_verification() {
     let sth_a = first.signed_tree_head.clone().expect("sth a");
     let key_a = server
         .client
-        .get_public_key(pb::GetPublicKeyRequest {
+        .get_public_key(with_request_id(pb::GetPublicKeyRequest {
             key_id: sth_a.key_id.clone(),
-        })
+        }))
         .await
         .expect("get key a")
         .into_inner()
@@ -260,9 +308,9 @@ async fn key_rotation_preserves_old_head_verification() {
 
     let key_b = server
         .client
-        .get_public_key(pb::GetPublicKeyRequest {
+        .get_public_key(with_request_id(pb::GetPublicKeyRequest {
             key_id: sth_b.key_id.clone(),
-        })
+        }))
         .await
         .expect("get key b")
         .into_inner()
@@ -271,9 +319,9 @@ async fn key_rotation_preserves_old_head_verification() {
 
     let old_again = server
         .client
-        .get_public_key(pb::GetPublicKeyRequest {
+        .get_public_key(with_request_id(pb::GetPublicKeyRequest {
             key_id: sth_a.key_id.clone(),
-        })
+        }))
         .await
         .expect("get old key")
         .into_inner()
@@ -305,9 +353,9 @@ async fn property_random_rotation_and_append_stays_verifiable() {
         for prev in &known_sths {
             let key = server
                 .client
-                .get_public_key(pb::GetPublicKeyRequest {
+                .get_public_key(with_request_id(pb::GetPublicKeyRequest {
                     key_id: prev.key_id.clone(),
-                })
+                }))
                 .await
                 .expect("get key")
                 .into_inner()

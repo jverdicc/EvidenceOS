@@ -8,10 +8,51 @@ use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer as EvidenceOsV
 use evidenceos_protocol::pb::v1;
 use evidenceos_protocol::pb::v1::evidence_os_client::EvidenceOsClient as EvidenceOsV1Client;
 use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as EvidenceOsV1Server;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
+use tonic::{Request, Status};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer golden-token".parse().expect("authorization"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    Ok(req)
+}
+
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 20,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {"fast": true, "heavy": true}
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("enc"),
+    )
+    .expect("write");
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -29,9 +70,9 @@ fn v2_create(seed: u8) -> pb::CreateClaimV2Request {
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(seed),
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
-            dependency_merkle_root: hash(seed.wrapping_add(2)),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: format!("holdout-v2-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 20,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -54,9 +95,9 @@ fn v1_create(seed: u8) -> v1::CreateClaimV2Request {
         signals: Some(v1::TopicSignalsV2 {
             semantic_hash: hash(seed),
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
-            dependency_merkle_root: hash(seed.wrapping_add(2)),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: format!("holdout-v1-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 20,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -69,6 +110,8 @@ fn v1_create(seed: u8) -> v1::CreateClaimV2Request {
 
 async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    write_epoch_config(data_dir, "epoch-v2-7");
+    write_epoch_config(data_dir, "epoch-v1-9");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -91,12 +134,24 @@ async fn golden_claims_vs_impl_status_gate() {
     std::fs::create_dir_all(&data_dir).expect("mkdir");
 
     let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
-    let mut v2 = EvidenceOsV2Client::<Channel>::connect(format!("http://{addr}"))
+    let channel_v2 = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
         .expect("v2 connect");
-    let mut v1 = EvidenceOsV1Client::<Channel>::connect(format!("http://{addr}"))
+    let channel_v1 = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
         .expect("v1 connect");
+    let mut v2 = EvidenceOsV2Client::with_interceptor(
+        channel_v2,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
+    let mut v1 = EvidenceOsV1Client::with_interceptor(
+        channel_v1,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
 
     let v2_claim = v2
         .create_claim_v2(v2_create(7))

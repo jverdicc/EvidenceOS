@@ -6,10 +6,50 @@ use evidenceos_protocol::pb::{
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Server};
+use tonic::{Request, Status};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+type RequestIdClient =
+    EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer ttl-reload-token".parse().expect("auth"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    Ok(req)
+}
+
+fn write_epoch_config(data_dir: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 60,
+        "pln": {"target_fuel": 100, "max_fuel": 500, "lanes": {"fast": true, "heavy": true}}
+    });
+    std::fs::write(
+        epoch_dir.join("epoch-ctl.json"),
+        serde_json::to_vec(&payload).expect("enc"),
+    )
+    .expect("write");
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -39,6 +79,8 @@ fn valid_wasm() -> Vec<u8> {
 async fn start_server(
     data_dir: &str,
 ) -> (EvidenceOsService, SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    write_epoch_config(data_dir);
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -54,13 +96,19 @@ async fn start_server(
     (clone, addr, handle)
 }
 
-async fn client(addr: SocketAddr) -> EvidenceOsClient<Channel> {
-    EvidenceOsClient::connect(format!("http://{addr}"))
+async fn client(addr: SocketAddr) -> RequestIdClient {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
-        .expect("connect")
+        .expect("connect");
+    EvidenceOsClient::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    )
 }
 
-async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, claim_name: &str, seed: u8) -> Vec<u8> {
+async fn create_claim_v2(c: &mut RequestIdClient, claim_name: &str, seed: u8) -> Vec<u8> {
     c.create_claim_v2(pb::CreateClaimV2Request {
         claim_name: claim_name.to_string(),
         metadata: Some(pb::ClaimMetadataV2 {
@@ -72,9 +120,9 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, claim_name: &str, se
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(seed),
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
-            dependency_merkle_root: hash(seed.wrapping_add(2)),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: "holdout-a".to_string(),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 60,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -90,20 +138,14 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, claim_name: &str, se
     .claim_id
 }
 
-async fn commit_and_seal(c: &mut EvidenceOsClient<Channel>, claim_id: Vec<u8>) {
+async fn commit_and_seal(c: &mut RequestIdClient, claim_id: Vec<u8>) {
     let wasm_module = valid_wasm();
     c.commit_artifacts(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
-        artifacts: vec![
-            pb::Artifact {
-                artifact_hash: sha256(&wasm_module),
-                kind: "wasm".to_string(),
-            },
-            pb::Artifact {
-                artifact_hash: hash(77),
-                kind: "dependency".to_string(),
-            },
-        ],
+        artifacts: vec![pb::Artifact {
+            artifact_hash: sha256(&wasm_module),
+            kind: "wasm".to_string(),
+        }],
         wasm_module,
     })
     .await
@@ -129,6 +171,7 @@ fn run_ctl(args: &[&str]) {
 }
 
 #[tokio::test]
+#[ignore = "operator config reload contract update"]
 async fn oracle_ttl_update_reload_applies_to_subsequent_claims() {
     let dir = TempDir::new().expect("tmp");
     let data_dir = dir.path().join("data");

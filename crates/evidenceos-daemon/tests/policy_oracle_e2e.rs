@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
@@ -10,6 +11,42 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Server};
+use tonic::Request;
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn with_request_id<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer policy-token".parse().expect("auth"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    req
+}
+
+fn write_epoch_config(data_dir: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 30,
+        "pln": {"target_fuel": 100, "max_fuel": 500, "lanes": {"fast": true, "heavy": true}}
+    });
+    std::fs::write(
+        epoch_dir.join("epoch.json"),
+        serde_json::to_vec(&payload).expect("enc"),
+    )
+    .expect("write");
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -75,6 +112,8 @@ fn install_oracle(data_dir: &std::path::Path, decision: i32, reason_code: u32) {
 }
 
 async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    write_epoch_config(data_dir);
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -97,7 +136,7 @@ async fn client(addr: SocketAddr) -> EvidenceOsClient<Channel> {
 
 async fn run_lifecycle(c: &mut EvidenceOsClient<Channel>) -> (Vec<u8>, pb::ExecuteClaimV2Response) {
     let claim_id = c
-        .create_claim_v2(pb::CreateClaimV2Request {
+        .create_claim_v2(with_request_id(pb::CreateClaimV2Request {
             claim_name: "oracle-e2e".to_string(),
             metadata: Some(pb::ClaimMetadataV2 {
                 lane: "fast".to_string(),
@@ -108,9 +147,9 @@ async fn run_lifecycle(c: &mut EvidenceOsClient<Channel>) -> (Vec<u8>, pb::Execu
             signals: Some(pb::TopicSignalsV2 {
                 semantic_hash: hash(1),
                 phys_hir_signature_hash: hash(2),
-                dependency_merkle_root: hash(3),
+                dependency_merkle_root: Vec::new(),
             }),
-            holdout_ref: "holdout".to_string(),
+            holdout_ref: "synthetic-holdout".to_string(),
             epoch_size: 30,
             oracle_num_symbols: 4,
             access_credit: 64,
@@ -119,39 +158,39 @@ async fn run_lifecycle(c: &mut EvidenceOsClient<Channel>) -> (Vec<u8>, pb::Execu
             nullspec_id: String::new(),
             dp_epsilon_budget: None,
             dp_delta_budget: None,
-        })
+        }))
         .await
         .expect("create")
         .into_inner()
         .claim_id;
 
     let wasm_module = valid_wasm();
-    c.commit_artifacts(pb::CommitArtifactsRequest {
+    c.commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: vec![pb::Artifact {
             artifact_hash: sha256(&wasm_module),
             kind: "wasm".to_string(),
         }],
         wasm_module,
-    })
+    }))
     .await
     .expect("commit");
 
-    c.freeze_gates(pb::FreezeGatesRequest {
+    c.freeze_gates(with_request_id(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("freeze");
-    c.seal_claim(pb::SealClaimRequest {
+    c.seal_claim(with_request_id(pb::SealClaimRequest {
         claim_id: claim_id.clone(),
-    })
+    }))
     .await
     .expect("seal");
 
     let resp = c
-        .execute_claim_v2(pb::ExecuteClaimV2Request {
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("execute")
         .into_inner();
@@ -173,7 +212,7 @@ async fn policy_oracle_defer_forces_defer_and_receipts() {
     assert_eq!(resp.state, pb::ClaimState::Frozen as i32);
 
     let capsule = c
-        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+        .fetch_capsule(with_request_id(pb::FetchCapsuleRequest { claim_id }))
         .await
         .expect("capsule")
         .into_inner();

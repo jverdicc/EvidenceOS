@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
@@ -10,6 +11,8 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataValue;
 use tonic::{transport::Channel, transport::Server, Code, Request};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -42,6 +45,7 @@ fn wasm_artifacts(wasm_module: &[u8]) -> Vec<pb::Artifact> {
 }
 
 async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    write_epoch_config(data_dir, "epoch-1");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -62,6 +66,20 @@ async fn client(addr: SocketAddr) -> EvidenceOsClient<Channel> {
         .expect("connect")
 }
 
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {"target_fuel": 100, "max_fuel": 500, "lanes": {"fast": true, "heavy": true}}
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("enc"),
+    )
+    .expect("write");
+}
+
 fn bearer(value: &str) -> MetadataValue<tonic::metadata::Ascii> {
     MetadataValue::try_from(format!("Bearer {value}")).expect("bearer metadata")
 }
@@ -69,6 +87,16 @@ fn bearer(value: &str) -> MetadataValue<tonic::metadata::Ascii> {
 fn with_token<T>(request: T, token: &str) -> Request<T> {
     let mut req = Request::new(request);
     req.metadata_mut().insert("authorization", bearer(token));
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        MetadataValue::from_static("auditor"),
+    );
     req
 }
 
@@ -94,7 +122,7 @@ async fn owner_can_execute_non_owner_cannot_fetch_and_operator_can_revoke() {
                 signals: Some(pb::TopicSignalsV2 {
                     semantic_hash: hash(1),
                     phys_hir_signature_hash: hash(2),
-                    dependency_merkle_root: hash(3),
+                    dependency_merkle_root: Vec::new(),
                 }),
                 holdout_ref: "synthetic-holdout".to_string(),
                 epoch_size: 10,
