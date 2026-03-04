@@ -6,7 +6,6 @@ use evidenceos_core::magnitude_envelope::{
 use evidenceos_core::physhir::Dimension;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
-use evidenceos_protocol::pb::Decision;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::process::{Child, Command, Stdio};
@@ -73,12 +72,12 @@ async fn create_and_seal(
             signals: Some(pb::TopicSignalsV2 {
                 semantic_hash: vec![1; 32],
                 phys_hir_signature_hash: vec![2; 32],
-                dependency_merkle_root: vec![3; 32],
+                dependency_merkle_root: Sha256::digest([]).to_vec(),
             }),
-            holdout_ref: "h".into(),
+            holdout_ref: "synthetic-h".into(),
             epoch_size: 10,
             oracle_num_symbols: 4,
-            access_credit: 4096,
+            access_credit: 1_000_000,
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
             dp_epsilon_budget: None,
@@ -137,12 +136,37 @@ fn spawn_daemon(
             trusted_keys_path,
             "--require-signed-envelopes",
             "true",
+            "--default-holdout-k-bits-budget",
+            "1000000000",
+            "--default-holdout-access-credit-budget",
+            "1000000000",
         ])
         .env("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn daemon")
+}
+
+fn write_epoch_config_fixture(dir: &TempDir, epoch_ref: &str) {
+    let epoch_dir = dir.path().join("data").join("epoch_configs");
+    fs::create_dir_all(&epoch_dir).expect("epoch dir");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true,
+                "heavy": true
+            }
+        }
+    });
+    fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("epoch json"),
+    )
+    .expect("write epoch config");
 }
 
 async fn connect_with_retry(listen: &str) -> EvidenceOsClient<Channel> {
@@ -220,6 +244,7 @@ async fn daemon_enforces_active_signed_envelope_pack_for_structured_claims() {
 
     let data_dir = temp.path().join("data");
     fs::create_dir_all(&data_dir).expect("data dir");
+    write_epoch_config_fixture(&temp, "epoch");
     let envelope_packs_dir = temp.path().join("packs");
     let trusted_keys_path = temp.path().join("trusted-envelope-keys.json");
 
@@ -234,14 +259,13 @@ async fn daemon_enforces_active_signed_envelope_pack_for_structured_claims() {
         let mut client = connect_with_retry(&listen).await;
         let payload = b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"123\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}";
         let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
-        let resp = client
+        let err = client
             .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request { claim_id }))
             .await
-            .expect("execute")
-            .into_inner();
+            .expect_err("execute should fail closed when envelope policy is violated");
 
-        assert_eq!(resp.decision, Decision::Defer as i32);
-        assert!(resp.reason_codes.contains(&9205));
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(err.message().contains("operation blocked by policy"));
     }
     .await;
 
