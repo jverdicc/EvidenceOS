@@ -188,6 +188,16 @@ fn rejected_wasm_modules() -> Vec<Vec<u8>> {
 
 async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    for epoch_ref in [
+        "epoch-1",
+        "epoch-2",
+        "epoch-11",
+        "epoch-19",
+        "epoch-29",
+        "shared-epoch",
+    ] {
+        write_epoch_config(data_dir, epoch_ref);
+    }
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -200,6 +210,27 @@ async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()
             .expect("server run");
     });
     (addr, handle)
+}
+
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true,
+                "heavy": true
+            }
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
 }
 
 async fn client(addr: SocketAddr) -> RequestIdClient {
@@ -727,13 +758,13 @@ async fn topic_budget_is_shared_across_claims() {
     };
 
     let claim_a = c
-        .create_claim_v2(req("claim-a", "holdout-a"))
+        .create_claim_v2(req("claim-a", "synthetic-holdout"))
         .await
         .expect("create a")
         .into_inner()
         .claim_id;
     let claim_b = c
-        .create_claim_v2(req("claim-b", "holdout-b"))
+        .create_claim_v2(req("claim-b", "synthetic-holdout"))
         .await
         .expect("create b")
         .into_inner()
@@ -783,6 +814,8 @@ async fn metrics_endpoint_increments_after_lifecycle() {
         .await
         .expect("metrics server");
 
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    write_epoch_config(&data_dir.to_string_lossy(), "epoch-19");
     let svc = EvidenceOsService::build_with_options(&data_dir.to_string_lossy(), false, telemetry)
         .expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
