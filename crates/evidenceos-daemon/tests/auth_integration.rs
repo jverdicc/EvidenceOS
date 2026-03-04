@@ -82,7 +82,6 @@ fn with_bearer<T>(msg: T, token: &str) -> Request<T> {
     req
 }
 
-
 #[tokio::test]
 async fn daemon_rejects_missing_auth_token() {
     let dir = TempDir::new().expect("tmp");
@@ -179,9 +178,7 @@ async fn agent_role_cannot_fetch_capsule_or_etl_proofs() {
 
     let err = c
         .fetch_capsule(with_bearer(
-            pb::FetchCapsuleRequest {
-                claim_id: vec![],
-            },
+            pb::FetchCapsuleRequest { claim_id: vec![] },
             "agent-secret",
         ))
         .await
@@ -209,7 +206,5 @@ async fn agent_role_cannot_fetch_capsule_or_etl_proofs() {
         .expect_err("agent consistency proof must fail");
     assert_eq!(err.code(), Code::PermissionDenied);
 
-
     handle.abort();
 }
-
