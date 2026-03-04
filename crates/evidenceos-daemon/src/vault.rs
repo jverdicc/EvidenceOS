@@ -17,7 +17,9 @@
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use wasmtime::{Caller, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{
+    Caller, Engine, Extern, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
+};
 
 use evidenceos_core::nullspec::SignedNullSpecContractV1;
 use evidenceos_core::oracle::{HoldoutLabels, OracleResolution};
@@ -488,7 +490,9 @@ fn map_trap(store: &Store<VaultHostState>, err: anyhow::Error) -> VaultError {
     if let Some(host_error) = store.data().host_error.clone() {
         return host_error;
     }
-    if err.to_string().to_ascii_lowercase().contains("fuel") {
+    if err.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel)
+        || err.to_string().to_ascii_lowercase().contains("fuel")
+    {
         return VaultError::FuelExhausted;
     }
     VaultError::Trap(err.to_string())

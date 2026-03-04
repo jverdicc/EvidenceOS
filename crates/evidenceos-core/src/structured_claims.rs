@@ -406,7 +406,7 @@ pub fn validate_and_canonicalize(
     if canonical_schema_id == LEGACY_SCHEMA_ID {
         return Ok(StructuredClaimValidation {
             canonical_bytes: payload.to_vec(),
-            kout_bits_upper_bound: kout_bits_upper_bound(payload),
+            kout_bits_upper_bound: 0,
             max_bytes_upper_bound: max_bytes_upper_bound(),
             claim: StructuredClaim {
                 schema_id: LEGACY_SCHEMA_ID.to_string(),

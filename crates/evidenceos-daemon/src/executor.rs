@@ -270,7 +270,9 @@ fn map_trap(store: &Store<HostState>, err: anyhow::Error) -> ExecutionError {
         return host;
     }
     let msg = err.to_string();
-    if msg.to_ascii_lowercase().contains("fuel") {
+    if err.downcast_ref::<Trap>() == Some(&Trap::OutOfFuel)
+        || msg.to_ascii_lowercase().contains("fuel")
+    {
         return ExecutionError::FuelExhausted;
     }
     ExecutionError::Trap(msg)

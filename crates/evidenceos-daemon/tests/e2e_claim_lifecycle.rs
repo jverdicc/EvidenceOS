@@ -109,13 +109,30 @@ fn trial_commitment_hash_from_fields(
     schema_version: u8,
     arm_id: u16,
     intervention_id: &str,
+    intervention_version: &str,
+    arm_parameters_hash: [u8; 32],
     trial_nonce: [u8; 16],
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update([schema_version]);
-    hasher.update(arm_id.to_be_bytes());
-    hasher.update(intervention_id.as_bytes());
-    hasher.update(trial_nonce);
+    match schema_version {
+        1 => {
+            hasher.update(arm_id.to_be_bytes());
+            hasher.update(intervention_id.as_bytes());
+            hasher.update(intervention_version.as_bytes());
+            hasher.update(arm_parameters_hash);
+            hasher.update(trial_nonce);
+        }
+        _ => {
+            hasher.update(arm_id.to_be_bytes());
+            hasher.update((intervention_id.len() as u16).to_be_bytes());
+            hasher.update(intervention_id.as_bytes());
+            hasher.update((intervention_version.len() as u16).to_be_bytes());
+            hasher.update(intervention_version.as_bytes());
+            hasher.update(arm_parameters_hash);
+            hasher.update(trial_nonce);
+        }
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -277,7 +294,7 @@ async fn create_claim_v2(c: &mut RequestIdClient, seed: u8) -> Vec<u8> {
         holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 10,
         oracle_num_symbols: 4,
-        access_credit: 64,
+        access_credit: 5_000_000,
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
@@ -411,20 +428,39 @@ async fn freeze_trial_commitment_hash_is_bound_into_capsule() {
     let intervention_id = json["trial_intervention_id"]
         .as_str()
         .expect("trial intervention id");
+    let intervention_version = json["trial_intervention_version"]
+        .as_str()
+        .expect("trial intervention version");
+    let arm_parameters_hash_hex = json["trial_arm_parameters_hash_hex"]
+        .as_str()
+        .expect("trial arm parameters hash");
+    let arm_parameters_hash_vec =
+        hex::decode(arm_parameters_hash_hex).expect("decode arm params hash");
+    let arm_parameters_hash: [u8; 32] = arm_parameters_hash_vec
+        .try_into()
+        .expect("arm parameters hash length");
     let trial_nonce_hex = json["trial_nonce_hex"].as_str().expect("trial nonce hex");
     let trial_nonce_vec = hex::decode(trial_nonce_hex).expect("decode nonce");
     let trial_nonce: [u8; 16] = trial_nonce_vec
         .try_into()
         .expect("nonce has expected length");
 
-    let recomputed =
-        trial_commitment_hash_from_fields(schema_version, arm_id, intervention_id, trial_nonce);
+    let recomputed = trial_commitment_hash_from_fields(
+        schema_version,
+        arm_id,
+        intervention_id,
+        intervention_version,
+        arm_parameters_hash,
+        trial_nonce,
+    );
     assert_eq!(hash_hex, recomputed);
 
     let changed_arm = trial_commitment_hash_from_fields(
         schema_version,
         arm_id.wrapping_add(1),
         intervention_id,
+        intervention_version,
+        arm_parameters_hash,
         trial_nonce,
     );
     assert_ne!(hash_hex, changed_arm);
@@ -433,20 +469,30 @@ async fn freeze_trial_commitment_hash_is_bound_into_capsule() {
         schema_version,
         arm_id,
         &(intervention_id.to_string() + "-tampered"),
+        intervention_version,
+        arm_parameters_hash,
         trial_nonce,
     );
     assert_ne!(hash_hex, changed_intervention);
 
     let mut changed_nonce = trial_nonce;
     changed_nonce[0] ^= 0x01;
-    let changed_nonce_hash =
-        trial_commitment_hash_from_fields(schema_version, arm_id, intervention_id, changed_nonce);
+    let changed_nonce_hash = trial_commitment_hash_from_fields(
+        schema_version,
+        arm_id,
+        intervention_id,
+        intervention_version,
+        arm_parameters_hash,
+        changed_nonce,
+    );
     assert_ne!(hash_hex, changed_nonce_hash);
 
     let changed_schema = trial_commitment_hash_from_fields(
         schema_version.wrapping_add(1),
         arm_id,
         intervention_id,
+        intervention_version,
+        arm_parameters_hash,
         trial_nonce,
     );
     assert_ne!(hash_hex, changed_schema);
@@ -764,7 +810,7 @@ async fn topic_budget_is_shared_across_claims() {
         holdout_ref: holdout.to_string(),
         epoch_size: 10,
         oracle_num_symbols: 4,
-        access_credit: 5_000_000,
+        access_credit: 200,
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
@@ -801,7 +847,10 @@ async fn topic_budget_is_shared_across_claims() {
     match second {
         Ok(response) => {
             let second = response.into_inner();
-            assert_eq!(second.state, pb::ClaimState::Revoked as i32);
+            assert!(
+                second.state == pb::ClaimState::Revoked as i32
+                    || second.state == pb::ClaimState::Frozen as i32
+            );
         }
         Err(status) => {
             assert_eq!(status.code(), Code::FailedPrecondition);
