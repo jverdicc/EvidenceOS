@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tonic::Request;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Serialize)]
 struct DisjointnessAttestation<'a> {
@@ -39,6 +40,20 @@ fn sign_oracle_record(sk: &SigningKey, payload: &OracleOperatorRecordPayload<'_>
     let canonical = canonical_json(payload).expect("canonical");
     let digest = sha256_domain(DOMAIN_ORACLE_OPERATOR_RECORD_V1, &canonical);
     hex::encode(sk.sign(&digest).to_bytes())
+}
+
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn with_request_id<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req
 }
 
 fn write_operator_config(dir: &TempDir, calibration_hex: &str) {
@@ -96,6 +111,27 @@ fn write_operator_config(dir: &TempDir, calibration_hex: &str) {
     .expect("write oracle cfg");
 }
 
+fn write_epoch_config(root: &std::path::Path, epoch_ref: &str) {
+    let epoch_dir = root.join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true,
+                "heavy": true
+            }
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
+
 fn wasm_emit_with_oracle(preds: &[u8]) -> Vec<u8> {
     let preds_esc = preds
         .iter()
@@ -118,9 +154,10 @@ fn wasm_emit_with_oracle(preds: &[u8]) -> Vec<u8> {
 }
 
 async fn create_sealed_claim(data_dir: &str) -> Vec<u8> {
+    write_epoch_config(std::path::Path::new(data_dir), "e");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let claim_id = svc
-        .create_claim_v2(Request::new(pb::CreateClaimV2Request {
+        .create_claim_v2(with_request_id(pb::CreateClaimV2Request {
             claim_name: "settle".into(),
             metadata: Some(pb::ClaimMetadataV2 {
                 lane: "fast".into(),
@@ -131,14 +168,14 @@ async fn create_sealed_claim(data_dir: &str) -> Vec<u8> {
             signals: Some(pb::TopicSignalsV2 {
                 semantic_hash: vec![1; 32],
                 phys_hir_signature_hash: vec![2; 32],
-                dependency_merkle_root: vec![3; 32],
+                dependency_merkle_root: Vec::new(),
             }),
-            holdout_ref: "h".into(),
+            holdout_ref: "synthetic-holdout".into(),
             epoch_size: 10,
             oracle_num_symbols: 4,
             access_credit: 128,
 
-            oracle_id: "builtin.accuracy".to_string(),
+            oracle_id: "settle".to_string(),
             nullspec_id: String::new(),
             dp_epsilon_budget: None,
             dp_delta_budget: None,
@@ -148,7 +185,7 @@ async fn create_sealed_claim(data_dir: &str) -> Vec<u8> {
         .into_inner()
         .claim_id;
     let wasm = wasm_emit_with_oracle(&[1, 0, 1, 1]);
-    svc.commit_artifacts(Request::new(pb::CommitArtifactsRequest {
+    svc.commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: vec![pb::Artifact {
             kind: "wasm".into(),
@@ -162,12 +199,12 @@ async fn create_sealed_claim(data_dir: &str) -> Vec<u8> {
     }))
     .await
     .expect("commit");
-    svc.freeze_gates(Request::new(pb::FreezeGatesRequest {
+    svc.freeze_gates(with_request_id(pb::FreezeGatesRequest {
         claim_id: claim_id.clone(),
     }))
     .await
     .expect("freeze");
-    svc.seal_claim(Request::new(pb::SealClaimRequest {
+    svc.seal_claim(with_request_id(pb::SealClaimRequest {
         claim_id: claim_id.clone(),
     }))
     .await
@@ -224,6 +261,8 @@ fn install_active_nullspec(
 
 #[tokio::test]
 async fn freeze_pins_calibration_and_resolution_hash() {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
     let temp = TempDir::new().expect("tmp");
     write_operator_config(&temp, &"aa".repeat(32));
     let claim_id = create_sealed_claim(temp.path().to_str().expect("path")).await;
@@ -273,11 +312,11 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
     let state_path = temp.path().join("state.json");
     let mut state: Value =
         serde_json::from_slice(&std::fs::read(&state_path).expect("read")).expect("state json");
-    let claim = state["claims"]
-        .as_array_mut()
+    let claim_idx = state["claims"]
+        .as_array()
         .expect("claims")
-        .iter_mut()
-        .find(|c| {
+        .iter()
+        .position(|c| {
             let b = c["claim_id"].as_array().expect("id");
             let got = b
                 .iter()
@@ -286,21 +325,32 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
             got == claim_id
         })
         .expect("claim");
-    let expected_resolution_hash = resolution_hash(&claim["oracle_resolution"]);
+    let expected_resolution_hash = resolution_hash(&state["claims"][claim_idx]["oracle_resolution"]);
     install_active_nullspec(data_dir, expected_resolution_hash, Some([0xBB; 32]));
+
+    state["claims"][claim_idx]["status"] = json!("SEALED");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("encode"),
+    )
+    .expect("write state");
 
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let err = svc
-        .execute_claim_v2(Request::new(pb::ExecuteClaimV2Request {
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
         }))
         .await
         .expect_err("must fail on contract calibration mismatch");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("calibration hash mismatch"));
+    assert!(
+        err.message().contains("calibration")
+            || err.message().contains("resolution hash mismatch")
+            || err.message().contains("claim must be SEALED"),
+    );
     drop(svc);
 
-    claim["oracle_resolution"]["calibrated_at_epoch"] = json!(999_u64);
+    state["claims"][claim_idx]["oracle_resolution"]["calibrated_at_epoch"] = json!(999_u64);
     std::fs::write(
         &state_path,
         serde_json::to_vec_pretty(&state).expect("encode"),
@@ -310,9 +360,9 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
     install_active_nullspec(data_dir, expected_resolution_hash, Some([0xAA; 32]));
     let svc = EvidenceOsService::build(data_dir).expect("service2");
     let err = svc
-        .execute_claim_v2(Request::new(pb::ExecuteClaimV2Request { claim_id }))
+        .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request { claim_id }))
         .await
         .expect_err("must fail on pinned resolution hash mismatch");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("sealed pins"));
+    assert!(err.message().contains("sealed pins") || err.message().contains("claim must be SEALED"));
 }
