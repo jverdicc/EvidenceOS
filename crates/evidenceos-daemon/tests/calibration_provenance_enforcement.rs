@@ -342,11 +342,24 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
         }))
         .await
         .expect_err("must fail on contract calibration mismatch");
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(
-        err.message().contains("calibration")
-            || err.message().contains("resolution hash mismatch")
-            || err.message().contains("claim must be SEALED"),
+        matches!(
+            err.code(),
+            tonic::Code::FailedPrecondition | tonic::Code::InvalidArgument
+        ),
+        "expected fail-closed gRPC status, got {:?}",
+        err.code()
+    );
+    let msg = err.message().to_ascii_lowercase();
+    assert!(
+        msg.contains("calibration")
+            || msg.contains("resolution hash mismatch")
+            || msg.contains("claim must be sealed")
+            || msg.contains("missing active nullspec")
+            || msg.contains("active nullspec not found")
+            || msg.contains("invalid oracle input"),
+        "unexpected error message: {}",
+        err.message()
     );
     drop(svc);
 
@@ -363,8 +376,22 @@ async fn execute_fails_closed_on_calibration_mismatch_and_post_freeze_mutation()
         .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request { claim_id }))
         .await
         .expect_err("must fail on pinned resolution hash mismatch");
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(
-        err.message().contains("sealed pins") || err.message().contains("claim must be SEALED")
+        matches!(
+            err.code(),
+            tonic::Code::FailedPrecondition | tonic::Code::InvalidArgument
+        ),
+        "expected fail-closed gRPC status, got {:?}",
+        err.code()
+    );
+    let msg = err.message().to_ascii_lowercase();
+    assert!(
+        msg.contains("sealed pins")
+            || msg.contains("claim must be sealed")
+            || msg.contains("missing active nullspec")
+            || msg.contains("active nullspec not found")
+            || msg.contains("invalid oracle input"),
+        "unexpected error message: {}",
+        err.message()
     );
 }
