@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_daemon::telemetry::Telemetry;
@@ -27,7 +28,24 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{transport::Channel, transport::Server, Code};
+use tonic::service::interceptor::InterceptedService;
+use tonic::{transport::Channel, transport::Server, Code, Request, Status};
+
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type RequestIdClient =
+    EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    Ok(req)
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
@@ -169,6 +187,7 @@ fn rejected_wasm_modules() -> Vec<Vec<u8>> {
 }
 
 async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -183,13 +202,19 @@ async fn start_server(data_dir: &str) -> (SocketAddr, tokio::task::JoinHandle<()
     (addr, handle)
 }
 
-async fn client(addr: SocketAddr) -> EvidenceOsClient<Channel> {
-    EvidenceOsClient::connect(format!("http://{addr}"))
+async fn client(addr: SocketAddr) -> RequestIdClient {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
-        .expect("connect")
+        .expect("connect");
+    EvidenceOsClient::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    )
 }
 
-async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8> {
+async fn create_claim_v2(c: &mut RequestIdClient, seed: u8) -> Vec<u8> {
     c.create_claim_v2(pb::CreateClaimV2Request {
         claim_name: format!("claim-{seed}"),
         metadata: Some(pb::ClaimMetadataV2 {
@@ -201,9 +226,9 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(seed),
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
-            dependency_merkle_root: hash(seed.wrapping_add(2)),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: format!("holdout-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 10,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -220,7 +245,7 @@ async fn create_claim_v2(c: &mut EvidenceOsClient<Channel>, seed: u8) -> Vec<u8>
 }
 
 async fn create_claim_v2_with_dependency_root(
-    c: &mut EvidenceOsClient<Channel>,
+    c: &mut RequestIdClient,
     seed: u8,
     dependency_root: [u8; 32],
 ) -> Vec<u8> {
@@ -237,7 +262,7 @@ async fn create_claim_v2_with_dependency_root(
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
             dependency_merkle_root: dependency_root.to_vec(),
         }),
-        holdout_ref: format!("holdout-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 10,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -252,7 +277,7 @@ async fn create_claim_v2_with_dependency_root(
     .claim_id
 }
 
-async fn commit_freeze_seal(c: &mut EvidenceOsClient<Channel>, claim_id: Vec<u8>, wasm: Vec<u8>) {
+async fn commit_freeze_seal(c: &mut RequestIdClient, claim_id: Vec<u8>, wasm: Vec<u8>) {
     c.commit_artifacts(pb::CommitArtifactsRequest {
         claim_id: claim_id.clone(),
         artifacts: wasm_artifacts(&wasm),

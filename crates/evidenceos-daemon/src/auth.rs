@@ -490,7 +490,28 @@ mod tests {
             None,
         );
 
-        let req = hmac_request(("evidenceos.v1.EvidenceOS", "Health"), "req-1", &key);
+        let mut req = Request::new(());
+        req.extensions_mut()
+            .insert(GrpcMethod::new("evidenceos.v1.EvidenceOS", "Health"));
+        req.metadata_mut()
+            .insert("x-request-id", MetadataValue::from_static("req-1"));
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            .to_string();
+        req.metadata_mut().insert(
+            "x-evidenceos-timestamp",
+            MetadataValue::try_from(timestamp.as_str()).expect("timestamp"),
+        );
+        let sig = sign_hex(
+            &key,
+            &signing_material("req-1", "/evidenceos.v1.EvidenceOS/Health", Some(timestamp.as_str())),
+        );
+        req.metadata_mut().insert(
+            "x-evidenceos-signature",
+            MetadataValue::try_from(format!("sha256={sig}")).expect("signature"),
+        );
         guard.call(req).expect("hmac should pass");
     }
 
