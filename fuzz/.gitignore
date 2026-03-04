@@ -1,0 +1,9 @@
+# cargo-fuzz build artifacts
+target/
+# Crash/timeout artifacts produced by libfuzzer
+artifacts/
+# Fuzzing corpus (may contain large inputs; not needed in source control)
+corpus/
+# Cargo.lock is intentionally excluded here; reproducibility is handled by
+# the workspace-level Cargo.lock
+Cargo.lock

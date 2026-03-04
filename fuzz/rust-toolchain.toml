@@ -1,0 +1,9 @@
+# Copyright (c) 2026 Joseph Verdicchio and EvidenceOS Contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-fuzz requires nightly for -Z flags (sanitizers, fuzzing instrumentation).
+# This override is scoped to the fuzz/ sub-crate only.
+
+[toolchain]
+channel = "nightly"
+profile = "minimal"
