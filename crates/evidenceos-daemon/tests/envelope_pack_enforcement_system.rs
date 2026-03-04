@@ -10,10 +10,28 @@ use evidenceos_protocol::pb::Decision;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use tokio::time::sleep;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
+use tonic::Request;
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn with_request_id<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert(
+        "x-request-id",
+        MetadataValue::try_from(format!(
+            "req-{}",
+            REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+        .expect("request id metadata"),
+    );
+    req
+}
 
 fn wat_string_bytes(bytes: &[u8]) -> String {
     let mut out = String::new();
@@ -44,7 +62,7 @@ async fn create_and_seal(
     wasm: Vec<u8>,
 ) -> Vec<u8> {
     let claim_id = client
-        .create_claim_v2(pb::CreateClaimV2Request {
+        .create_claim_v2(with_request_id(pb::CreateClaimV2Request {
             claim_name: "signed-pack-enforcement".into(),
             metadata: Some(pb::ClaimMetadataV2 {
                 lane: "fast".into(),
@@ -65,14 +83,14 @@ async fn create_and_seal(
             nullspec_id: String::new(),
             dp_epsilon_budget: None,
             dp_delta_budget: None,
-        })
+        }))
         .await
         .expect("create")
         .into_inner()
         .claim_id;
 
     client
-        .commit_artifacts(pb::CommitArtifactsRequest {
+        .commit_artifacts(with_request_id(pb::CommitArtifactsRequest {
             claim_id: claim_id.clone(),
             artifacts: vec![pb::Artifact {
                 kind: "wasm".into(),
@@ -83,19 +101,19 @@ async fn create_and_seal(
                 },
             }],
             wasm_module: wasm,
-        })
+        }))
         .await
         .expect("commit");
     client
-        .freeze_gates(pb::FreezeGatesRequest {
+        .freeze_gates(with_request_id(pb::FreezeGatesRequest {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("freeze");
     client
-        .seal_claim(pb::SealClaimRequest {
+        .seal_claim(with_request_id(pb::SealClaimRequest {
             claim_id: claim_id.clone(),
-        })
+        }))
         .await
         .expect("seal");
     claim_id
@@ -217,7 +235,7 @@ async fn daemon_enforces_active_signed_envelope_pack_for_structured_claims() {
         let payload = b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"123\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}";
         let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
         let resp = client
-            .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id })
+            .execute_claim_v2(with_request_id(pb::ExecuteClaimV2Request { claim_id }))
             .await
             .expect("execute")
             .into_inner();
