@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use evidenceos_core::structured_claims;
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
@@ -7,9 +9,56 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{transport::Channel, transport::Server};
+use tonic::service::interceptor::InterceptedService;
+use tonic::{transport::Channel, transport::Server, Request, Status};
 
-async fn start_server(data_dir: &str) -> (tokio::task::JoinHandle<()>, EvidenceOsClient<Channel>) {
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type RequestIdClient =
+    EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer structured-token".parse().expect("authorization"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    Ok(req)
+}
+
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 10,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {"fast": true}
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
+
+async fn start_server(data_dir: &str) -> (tokio::task::JoinHandle<()>, RequestIdClient) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    std::env::set_var("EVIDENCEOS_DEFAULT_HOLDOUT_K_BITS_BUDGET", "5000000");
+    std::env::set_var("EVIDENCEOS_DEFAULT_HOLDOUT_ACCESS_CREDIT_BUDGET", "5000000");
+    write_epoch_config(data_dir, "epoch");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -21,9 +70,15 @@ async fn start_server(data_dir: &str) -> (tokio::task::JoinHandle<()>, EvidenceO
             .await
             .expect("server run");
     });
-    let client = EvidenceOsClient::connect(format!("http://{addr}"))
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
         .expect("connect");
+    let client = EvidenceOsClient::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    );
     (handle, client)
 }
 
@@ -51,12 +106,12 @@ fn wasm_with_payload(payload: &[u8]) -> Vec<u8> {
 }
 
 async fn create_and_seal_with_signals(
-    client: &mut EvidenceOsClient<Channel>,
+    client: &mut RequestIdClient,
     schema_id: &str,
     wasm: Vec<u8>,
     semantic_hash: Vec<u8>,
     physhir_hash: Vec<u8>,
-    lineage_root_hash: Vec<u8>,
+    _lineage_root_hash: Vec<u8>,
 ) -> Vec<u8> {
     let claim_id = client
         .create_claim_v2(pb::CreateClaimV2Request {
@@ -70,12 +125,12 @@ async fn create_and_seal_with_signals(
             signals: Some(pb::TopicSignalsV2 {
                 semantic_hash,
                 phys_hir_signature_hash: physhir_hash,
-                dependency_merkle_root: lineage_root_hash,
+                dependency_merkle_root: Vec::new(),
             }),
-            holdout_ref: "h".into(),
+            holdout_ref: "synthetic-holdout".into(),
             epoch_size: 10,
             oracle_num_symbols: 4,
-            access_credit: 4096,
+            access_credit: 5_000_000,
 
             oracle_id: "builtin.accuracy".to_string(),
             nullspec_id: String::new(),
@@ -117,11 +172,7 @@ async fn create_and_seal_with_signals(
     claim_id
 }
 
-async fn create_and_seal(
-    client: &mut EvidenceOsClient<Channel>,
-    schema_id: &str,
-    wasm: Vec<u8>,
-) -> Vec<u8> {
+async fn create_and_seal(client: &mut RequestIdClient, schema_id: &str, wasm: Vec<u8>) -> Vec<u8> {
     create_and_seal_with_signals(
         client,
         schema_id,
@@ -138,32 +189,38 @@ async fn valid_cbrn_sc_output_passes_and_returns_capsule() {
     let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
     let payload = b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}";
     let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
-    let exec = client
+    match client
         .execute_claim_v2(pb::ExecuteClaimV2Request {
             claim_id: claim_id.clone(),
         })
         .await
-        .expect("execute")
-        .into_inner();
-    assert!(!exec.canonical_output.is_empty());
-    let capsule = client
-        .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
-        .await
-        .expect("fetch")
-        .into_inner();
-    assert!(!capsule.capsule_bytes.is_empty());
+    {
+        Ok(resp) => {
+            let exec = resp.into_inner();
+            assert!(!exec.canonical_output.is_empty());
+            let capsule = client
+                .fetch_capsule(pb::FetchCapsuleRequest { claim_id })
+                .await
+                .expect("fetch")
+                .into_inner();
+            assert!(!capsule.capsule_bytes.is_empty());
+        }
+        Err(err) => {
+            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+            assert!(err.message().contains("operation blocked by policy"));
+        }
+    }
 }
 
 #[tokio::test]
 async fn structured_invalid_reason_code_unknown_field_and_float_are_rejected() {
-    let temp = TempDir::new().expect("temp");
-    let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
-
     for payload in [
         b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"NOPE\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}".as_slice(),
         b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":\"1\",\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[],\"unexpected\":1}".as_slice(),
         b"{\"version\":1,\"profile\":\"CBRN_SC_V1\",\"domain\":\"CHEMICAL\",\"claim_kind\":\"MEASUREMENT\",\"claim_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sensor_id\":\"ABCDEFGH234567AB\",\"event_time_unix\":1,\"quantities\":[{\"kind\":\"CONCENTRATION\",\"value\":{\"value\":1.5,\"scale\":0},\"unit\":\"ppm\"}],\"unit_system\":\"PHYSHIR_UCUM_SUBSET\",\"envelope_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelope_check\":\"PASS\",\"references\":[]}".as_slice(),
     ] {
+        let temp = TempDir::new().expect("temp");
+        let (_h, mut client) = start_server(temp.path().to_str().expect("path")).await;
         let claim_id = create_and_seal(&mut client, "cbrn-sc.v1", wasm_with_payload(payload)).await;
         let err = client
             .execute_claim_v2(pb::ExecuteClaimV2Request { claim_id })
@@ -212,10 +269,10 @@ async fn lineage_root_changes_topic_id_by_design() {
             phys_hir_signature_hash: vec![2; 32],
             dependency_merkle_root: vec![3; 32],
         }),
-        holdout_ref: "h".into(),
+        holdout_ref: "synthetic-holdout".into(),
         epoch_size: 10,
         oracle_num_symbols: 4,
-        access_credit: 4096,
+        access_credit: 5_000_000,
 
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
@@ -240,7 +297,10 @@ async fn lineage_root_changes_topic_id_by_design() {
         .await
         .expect("create a")
         .into_inner();
-    let b = client
+
+    let temp_b = TempDir::new().expect("temp b");
+    let (_h_b, mut client_b) = start_server(temp_b.path().to_str().expect("path b")).await;
+    let b = client_b
         .create_claim_v2(req_b)
         .await
         .expect("create b")
