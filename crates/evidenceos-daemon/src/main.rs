@@ -233,6 +233,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
+    if args.auth_token.is_some() && args.auth_hmac_key.is_some() {
+        return Err("--auth-token and --auth-hmac-key are mutually exclusive".into());
+    }
+
     if let Some(etl_path) = args.etl_path.take() {
         let etl_path = std::path::PathBuf::from(etl_path);
         let data_dir = etl_path
