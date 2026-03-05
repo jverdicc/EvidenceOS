@@ -41,7 +41,10 @@ async fn preflight_http_allows_then_escalates() {
         .await;
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
     let url = format!("http://{addr}/v1/preflight_tool_call");
     let payload = json!({
         "toolName":"exec",
@@ -127,7 +130,10 @@ async fn preflight_http_uses_camel_case_contract_keys() {
         .await;
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
     let url = format!("http://{addr}/v1/preflight_tool_call");
     let payload = json!({
         "toolName":"db.drop",
@@ -184,11 +190,16 @@ async fn preflight_http_accepts_x_evidenceos_request_id_alias() {
         .await;
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
     let url = format!("http://{addr}/v1/preflight_tool_call");
     let payload = json!({
         "toolName":"exec",
-        "params":{"cmd":"echo alias"}
+        "params":{"cmd":"echo alias"},
+        "sessionId":"sess-alias",
+        "agentId":"agent-alias"
     });
 
     let response = client

@@ -13,11 +13,34 @@ fn hash32(seed: u8) -> Vec<u8> {
     vec![seed; 32]
 }
 
+fn write_epoch_config(data_dir: &Path, epoch_ref: &str) {
+    let epoch_dir = data_dir.join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 1,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true,
+                "heavy": true
+            }
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
+
 #[tokio::test]
 async fn probing_detection_grades_response_and_emits_evidence() {
     let dir = TempDir::new().expect("tmp");
     let data_dir = dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("mkdir");
+    write_epoch_config(&data_dir, "epoch-v1");
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
     let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
     let svc = EvidenceOsService::build_with_options(
         &data_dir.to_string_lossy(),
@@ -31,8 +54,8 @@ async fn probing_detection_grades_response_and_emits_evidence() {
     for i in 0u8..100u8 {
         let req = pb::CreateClaimV2Request {
             claim_name: format!("probe-{i}"),
-            holdout_ref: "holdout-1".to_string(),
-            access_credit: 10,
+            holdout_ref: "synthetic-probe".to_string(),
+            access_credit: 5_000_000,
             oracle_num_symbols: 8,
             epoch_size: 1,
             metadata: Some(pb::ClaimMetadataV2 {
@@ -56,6 +79,10 @@ async fn probing_detection_grades_response_and_emits_evidence() {
         request.metadata_mut().insert(
             "authorization",
             "Bearer probe-token".parse().expect("metadata"),
+        );
+        request.metadata_mut().insert(
+            "x-request-id",
+            format!("probe-{i}").parse().expect("metadata"),
         );
         match svc.create_claim_v2(request).await {
             Ok(_) => {}
@@ -100,4 +127,5 @@ async fn probing_detection_grades_response_and_emits_evidence() {
         serde_json::to_string_pretty(&artifact).expect("json"),
     )
     .expect("write artifact");
+    std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
 }
