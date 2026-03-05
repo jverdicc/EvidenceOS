@@ -287,10 +287,7 @@ fn index_etl(etl_path: &Path) -> Result<IndexedRows, IndexerError> {
 
 fn apply_schema(conn: &Connection) -> Result<(), IndexerError> {
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=FULL;
-         PRAGMA foreign_keys=ON;
-         CREATE TABLE IF NOT EXISTS claim_capsules(
+        "CREATE TABLE IF NOT EXISTS claim_capsules(
             etl_index INTEGER PRIMARY KEY NOT NULL,
             capsule_hash TEXT,
             claim_id TEXT,
@@ -342,8 +339,18 @@ fn apply_schema(conn: &Connection) -> Result<(), IndexerError> {
     Ok(())
 }
 
+fn apply_connection_pragmas(conn: &Connection) -> Result<(), IndexerError> {
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=FULL;
+         PRAGMA foreign_keys=ON;",
+    )?;
+    Ok(())
+}
+
 fn migrate_schema(db_path: &Path) -> Result<(), IndexerError> {
     let mut conn = Connection::open(db_path)?;
+    apply_connection_pragmas(&conn)?;
     let tx = conn.transaction()?;
     apply_schema(&tx)?;
 
@@ -388,6 +395,7 @@ fn build_index(etl_path: &Path, out_path: &Path) -> Result<(), IndexerError> {
     }
 
     let mut conn = Connection::open(&tmp_path)?;
+    apply_connection_pragmas(&conn)?;
     let tx = conn.transaction()?;
     apply_schema(&tx)?;
 
@@ -443,6 +451,7 @@ fn build_index(etl_path: &Path, out_path: &Path) -> Result<(), IndexerError> {
         params![digest, INDEX_SCHEMA_VERSION, TOOL_VERSION],
     )?;
     tx.commit()?;
+    drop(conn);
 
     if out_path.exists() {
         fs::remove_file(out_path)?;
