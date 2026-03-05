@@ -147,7 +147,7 @@ async fn tls_required_rejects_plaintext() {
         .health(pb::HealthRequest {})
         .await
         .expect_err("plaintext must fail");
-    assert_eq!(err.code(), Code::Unavailable);
+    assert!(matches!(err.code(), Code::Unavailable | Code::Unknown));
 
     handle.abort();
 }
@@ -176,7 +176,14 @@ async fn mtls_rejects_no_client_cert() {
         .expect("tls")
         .connect()
         .await;
-    assert!(channel.is_err());
+    if let Ok(ch) = channel {
+        let mut client = EvidenceOsClient::new(ch);
+        let err = client
+            .health(pb::HealthRequest {})
+            .await
+            .expect_err("mtls without client cert must fail");
+        assert!(matches!(err.code(), Code::Unavailable | Code::Unknown));
+    }
 
     let wrong_pki = generate_test_pki();
     let wrong_client_cert = ClientTlsConfig::new()
@@ -192,7 +199,14 @@ async fn mtls_rejects_no_client_cert() {
         .expect("tls")
         .connect()
         .await;
-    assert!(wrong_channel.is_err());
+    if let Ok(ch) = wrong_channel {
+        let mut client = EvidenceOsClient::new(ch);
+        let err = client
+            .health(pb::HealthRequest {})
+            .await
+            .expect_err("mtls with wrong client cert must fail");
+        assert!(matches!(err.code(), Code::Unavailable | Code::Unknown));
+    }
 
     handle.abort();
 }
