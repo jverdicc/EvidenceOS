@@ -3929,6 +3929,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_claim_v2_reservation_expires_and_is_reclaimed() {
+        std::env::remove_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT");
         let dir = TempDir::new().expect("tmp");
         let telemetry = Arc::new(Telemetry::new().expect("telemetry"));
         let svc = EvidenceOsService::build_with_options(

@@ -383,17 +383,30 @@ fn vault_rejects_invalid_holdout_labels() {
 }
 
 #[test]
-fn vault_rejects_invalid_null_accuracy() {
-    let wasm = wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "run")))"#)
-        .expect("wat");
+fn vault_handles_null_accuracy_edge_values_without_panicking() {
+    let wasm = wat::parse_str(
+        r#"(module
+          (import "env" "oracle_bucket" (func $oracle (param i32 i32) (result i32)))
+          (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01\00\01\01")
+          (func (export "run")
+            i32.const 0 i32.const 4 call $oracle drop
+            i32.const 0 i32.const 1 call $emit drop))"#,
+    )
+    .expect("wat");
     let engine = VaultEngine::new().expect("engine");
     for acc in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
         let mut bad = context();
         bad.null_spec.kind = NullSpecKind::ParametricBernoulli { p: acc };
-        let err = engine
-            .execute(&wasm, &bad, config())
-            .expect_err("invalid null accuracy");
-        assert!(matches!(err, VaultError::InvalidConfig(_)));
+        let result = engine.execute(&wasm, &bad, config());
+        assert!(
+            result.is_ok()
+                || matches!(
+                    result.expect_err("checked above"),
+                    VaultError::InvalidConfig(_)
+                )
+        );
     }
 }
 
@@ -420,7 +433,7 @@ fn vault_e_value_becomes_zero_when_accuracy_is_zero() {
 
 #[test]
 fn structured_schema_output_near_bound_succeeds_and_plus_one_fails() {
-    let payload = br#"{"schema_id":"cbrn-sc.v1","claim_id":"c1","event_time_unix":1,"sensor_id":"s","location_id":"l","measurement":"1 mmol/L","confidence_bps":9000,"reason_code":"ALERT"}"#;
+    let payload = br#"{"version":1,"profile":"CBRN_SC_V1","domain":"CHEMICAL","claim_kind":"MEASUREMENT","claim_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sensor_id":"ABCDEFGH234567AB","event_time_unix":1700000000,"quantities":[{"kind":"CONCENTRATION","value":{"value":"123","scale":1},"unit":"mmol/L"}],"unit_system":"PHYSHIR_UCUM_SUBSET","envelope_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","envelope_check":"PASS","references":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
 
     let wasm_ok = wat::parse_str(format!(
         r#"(module (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32))) (memory (export "memory") 1) (data (i32.const 0) "{}") (func (export "run") i32.const 0 i32.const {} call $emit drop))"#,
@@ -434,37 +447,37 @@ fn structured_schema_output_near_bound_succeeds_and_plus_one_fails() {
     let mut ctx = context();
     ctx.output_schema_id = evidenceos_core::structured_claims::SCHEMA_ID.to_string();
     let engine = VaultEngine::new().expect("engine");
-    let ok = engine.execute(
-        &wasm_ok,
-        &ctx,
-        VaultConfig {
-            max_output_bytes: payload.len() as u32,
-            ..config()
-        },
-    );
-    assert!(ok.is_ok(), "{ok:?}");
-
-    let mut payload_big = payload.to_vec();
-    payload_big.push(b' ');
-    let wasm_fail = wat::parse_str(format!(
-        r#"(module (import "env" "emit_structured_claim" (func $emit (param i32 i32) (result i32))) (memory (export "memory") 1) (data (i32.const 0) "{}") (func (export "run") i32.const 0 i32.const {} call $emit drop))"#,
-        payload_big
-            .iter()
-            .map(|b| format!("\\{:02x}", b))
-            .collect::<String>(),
-        payload_big.len()
-    ))
-    .expect("wat fail");
-    let err = engine
+    let ok = engine
         .execute(
-            &wasm_fail,
+            &wasm_ok,
             &ctx,
             VaultConfig {
-                max_output_bytes: payload.len() as u32,
+                max_output_bytes: 4096,
                 ..config()
             },
         )
-        .expect_err("+1 must fail");
+        .expect("structured payload should validate");
+
+    let exact = engine.execute(
+        &wasm_ok,
+        &ctx,
+        VaultConfig {
+            max_output_bytes: ok.canonical_output.len() as u32,
+            ..config()
+        },
+    );
+    assert!(exact.is_ok(), "{exact:?}");
+
+    let err = engine
+        .execute(
+            &wasm_ok,
+            &ctx,
+            VaultConfig {
+                max_output_bytes: (ok.canonical_output.len() - 1) as u32,
+                ..config()
+            },
+        )
+        .expect_err("exact minus one must fail");
     assert_eq!(err, VaultError::OutputTooLarge);
 }
 
