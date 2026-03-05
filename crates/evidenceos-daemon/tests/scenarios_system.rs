@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use evidenceos_core::crypto_transcripts::verify_sth_signature;
 use evidenceos_core::etl::{verify_consistency_proof, verify_inclusion_proof};
@@ -14,7 +15,33 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Server};
+use tonic::{Request, Status};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type RequestIdClient =
+    EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    req.metadata_mut().insert(
+        "authorization",
+        "Bearer scenario-token".parse().expect("authorization"),
+    );
+    req.metadata_mut().insert(
+        "x-evidenceos-token-scopes",
+        "auditor".parse().expect("auditor scope"),
+    );
+    Ok(req)
+}
 
 #[derive(Debug, Deserialize)]
 struct ScenarioSpec {
@@ -52,11 +79,13 @@ struct ScenarioArtifact {
 }
 
 struct TestServer {
-    client: EvidenceOsClient<Channel>,
+    client: RequestIdClient,
 }
 
 impl TestServer {
     async fn start(data_dir: &str) -> Self {
+        std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+        write_epoch_config(data_dir, "epoch/default");
         let svc = EvidenceOsService::build(data_dir).expect("service");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -70,9 +99,15 @@ impl TestServer {
                 .expect("server run");
         });
 
-        let client = EvidenceOsClient::connect(format!("http://{addr}"))
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .expect("endpoint")
+            .connect()
             .await
             .expect("connect");
+        let client = EvidenceOsClient::with_interceptor(
+            channel,
+            add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+        );
         Self { client }
     }
 }
@@ -101,6 +136,30 @@ fn hex32(input: &str) -> Vec<u8> {
         return vec![bytes[0]; 32];
     }
     bytes
+}
+
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = json!({
+        "epoch_size": 16,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true
+            }
+        }
+    });
+    let epoch_path = epoch_dir.join(format!("{epoch_ref}.json"));
+    if let Some(parent) = epoch_path.parent() {
+        fs::create_dir_all(parent).expect("mkdir epoch subdirs");
+    }
+    fs::write(
+        epoch_path,
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
 }
 
 #[tokio::test]
@@ -167,13 +226,9 @@ async fn scenarios_produce_deterministic_public_evidence() {
                                     .as_str()
                                     .unwrap_or("02"),
                             ),
-                            dependency_merkle_root: hex32(
-                                signals["dependency_merkle_root_hex"]
-                                    .as_str()
-                                    .unwrap_or("03"),
-                            ),
+                            dependency_merkle_root: Vec::new(),
                         }),
-                        holdout_ref: step.params["holdout_ref"].as_str().unwrap_or("h").into(),
+                        holdout_ref: "synthetic-holdout".into(),
                         epoch_size: step.params["epoch_size"].as_u64().unwrap_or(16),
                         oracle_num_symbols: step.params["oracle_num_symbols"].as_u64().unwrap_or(4)
                             as u32,

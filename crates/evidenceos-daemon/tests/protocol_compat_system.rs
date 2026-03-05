@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient as EvidenceOsV2Client;
@@ -8,14 +10,57 @@ use evidenceos_protocol::pb::v1::evidence_os_server::EvidenceOsServer as Evidenc
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Server};
+use tonic::{Request, Status};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type V2RequestIdClient =
+    EvidenceOsV2Client<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+type V1RequestIdClient =
+    EvidenceOsV1Client<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    Ok(req)
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
 }
 
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 20,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {
+                "fast": true
+            }
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
+
 async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "true");
+    write_epoch_config(data_dir, "epoch-v2-7");
+    write_epoch_config(data_dir, "epoch-v1-9");
+    write_epoch_config(data_dir, "epoch-v2-11");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
@@ -31,16 +76,28 @@ async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::Joi
     (addr, handle)
 }
 
-async fn v2_client(addr: std::net::SocketAddr) -> EvidenceOsV2Client<Channel> {
-    EvidenceOsV2Client::connect(format!("http://{addr}"))
+async fn v2_client(addr: std::net::SocketAddr) -> V2RequestIdClient {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("v2 endpoint")
+        .connect()
         .await
-        .expect("v2 connect")
+        .expect("v2 connect");
+    EvidenceOsV2Client::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    )
 }
 
-async fn v1_client(addr: std::net::SocketAddr) -> EvidenceOsV1Client<Channel> {
-    EvidenceOsV1Client::connect(format!("http://{addr}"))
+async fn v1_client(addr: std::net::SocketAddr) -> V1RequestIdClient {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("v1 endpoint")
+        .connect()
         .await
-        .expect("v1 connect")
+        .expect("v1 connect");
+    EvidenceOsV1Client::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    )
 }
 
 fn v2_create(seed: u8) -> pb::CreateClaimV2Request {
@@ -57,7 +114,7 @@ fn v2_create(seed: u8) -> pb::CreateClaimV2Request {
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
             dependency_merkle_root: hash(seed.wrapping_add(2)),
         }),
-        holdout_ref: format!("holdout-v2-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 20,
         oracle_num_symbols: 4,
         access_credit: 64,
@@ -82,7 +139,7 @@ fn v1_create(seed: u8) -> v1::CreateClaimV2Request {
             phys_hir_signature_hash: hash(seed.wrapping_add(1)),
             dependency_merkle_root: hash(seed.wrapping_add(2)),
         }),
-        holdout_ref: format!("holdout-v1-{seed}"),
+        holdout_ref: "synthetic-holdout".to_string(),
         epoch_size: 20,
         oracle_num_symbols: 4,
         access_credit: 64,

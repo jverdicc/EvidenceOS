@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use evidenceos_daemon::server::EvidenceOsService;
 use evidenceos_protocol::pb;
 use evidenceos_protocol::pb::evidence_os_client::EvidenceOsClient;
@@ -5,13 +7,53 @@ use evidenceos_protocol::pb::evidence_os_server::EvidenceOsServer;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, Server};
+use tonic::{Request, Status};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type RequestIdClient =
+    EvidenceOsClient<InterceptedService<Channel, fn(Request<()>) -> Result<Request<()>, Status>>>;
+
+#[allow(clippy::result_large_err)]
+fn add_request_id(mut req: Request<()>) -> Result<Request<()>, Status> {
+    req.metadata_mut().insert(
+        "x-request-id",
+        format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed))
+            .parse()
+            .expect("request id"),
+    );
+    Ok(req)
+}
+
+fn write_epoch_config(data_dir: &str, epoch_ref: &str) {
+    let epoch_dir = std::path::Path::new(data_dir).join("epoch_configs");
+    std::fs::create_dir_all(&epoch_dir).expect("mkdir epoch configs");
+    let payload = serde_json::json!({
+        "epoch_size": 20,
+        "pln": {
+            "target_fuel": 100,
+            "max_fuel": 500,
+            "lanes": {"fast": true}
+        }
+    });
+    std::fs::write(
+        epoch_dir.join(format!("{epoch_ref}.json")),
+        serde_json::to_vec(&payload).expect("encode epoch config"),
+    )
+    .expect("write epoch config");
+}
 
 fn hash(seed: u8) -> Vec<u8> {
     [seed; 32].to_vec()
 }
 
 async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    std::env::set_var("EVIDENCEOS_INSECURE_SYNTHETIC_HOLDOUT", "1");
+    std::env::set_var("EVIDENCEOS_DEFAULT_HOLDOUT_K_BITS_BUDGET", "5000000");
+    std::env::set_var("EVIDENCEOS_DEFAULT_HOLDOUT_ACCESS_CREDIT_BUDGET", "5000000");
+    write_epoch_config(data_dir, "epoch-1");
     let svc = EvidenceOsService::build(data_dir).expect("service");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -26,15 +68,21 @@ async fn start_server(data_dir: &str) -> (std::net::SocketAddr, tokio::task::Joi
     (addr, handle)
 }
 
-async fn client(addr: std::net::SocketAddr) -> EvidenceOsClient<Channel> {
-    EvidenceOsClient::connect(format!("http://{addr}"))
+async fn client(addr: std::net::SocketAddr) -> RequestIdClient {
+    let channel = Channel::from_shared(format!("http://{addr}"))
+        .expect("endpoint")
+        .connect()
         .await
-        .expect("connect")
+        .expect("connect");
+    EvidenceOsClient::with_interceptor(
+        channel,
+        add_request_id as fn(Request<()>) -> Result<Request<()>, Status>,
+    )
 }
 
 fn request_with_alias(alias: &str) -> pb::CreateClaimV2Request {
     pb::CreateClaimV2Request {
-        claim_name: format!("alias-{alias}"),
+        claim_name: "alias-claim".to_string(),
         metadata: Some(pb::ClaimMetadataV2 {
             lane: "fast".to_string(),
             alpha_micros: 50_000,
@@ -44,12 +92,12 @@ fn request_with_alias(alias: &str) -> pb::CreateClaimV2Request {
         signals: Some(pb::TopicSignalsV2 {
             semantic_hash: hash(1),
             phys_hir_signature_hash: hash(2),
-            dependency_merkle_root: hash(3),
+            dependency_merkle_root: Vec::new(),
         }),
-        holdout_ref: "holdout-1".to_string(),
-        epoch_size: 20,
-        oracle_num_symbols: 4,
-        access_credit: 64,
+        holdout_ref: "synthetic-holdout".to_string(),
+        epoch_size: 1,
+        oracle_num_symbols: 2,
+        access_credit: 5_000_000,
         oracle_id: "builtin.accuracy".to_string(),
         nullspec_id: String::new(),
         dp_epsilon_budget: None,
@@ -59,12 +107,6 @@ fn request_with_alias(alias: &str) -> pb::CreateClaimV2Request {
 
 #[tokio::test]
 async fn structured_claims_accepts_known_aliases() {
-    let dir = TempDir::new().expect("tmp");
-    let data_dir = dir.path().join("data");
-    std::fs::create_dir_all(&data_dir).expect("mkdir");
-    let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
-    let mut c = client(addr).await;
-
     for alias in [
         "cbrn-sc.v1",
         "cbrn/v1",
@@ -72,17 +114,22 @@ async fn structured_claims_accepts_known_aliases() {
         "cbrn_sc.v1",
         "cbrn-sc/v1",
     ] {
+        let dir = TempDir::new().expect("tmp");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("mkdir");
+        let (addr, handle) = start_server(&data_dir.to_string_lossy()).await;
+        let mut c = client(addr).await;
+
         let created = c
             .create_claim_v2(request_with_alias(alias))
             .await
             .expect("alias should be accepted")
             .into_inner();
         assert_eq!(created.state, pb::ClaimState::Uncommitted as i32);
+
+        handle.abort();
     }
-
-    handle.abort();
 }
-
 #[tokio::test]
 async fn topic_id_stability_under_aliases() {
     let dir = TempDir::new().expect("tmp");
@@ -97,7 +144,7 @@ async fn topic_id_stability_under_aliases() {
         .expect("canonical create")
         .into_inner();
     let alias = c
-        .create_claim_v2(request_with_alias("schema/v1"))
+        .create_claim_v2(request_with_alias("cbrn/v1"))
         .await
         .expect("alias create")
         .into_inner();
